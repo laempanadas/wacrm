@@ -251,11 +251,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setUser(currentUser);
 
         if (currentUser) {
-          // Don't block session loading on profile fetch — chrome
-          // (header, sidebar) can render from the user object alone,
-          // profile enriches async. Callers that need to branch on
-          // profile data gate on `profileLoading` instead.
-          fetchProfile(currentUser.id);
+          // ------------------------------------------------------------------
+          // [REFATORAÇÃO - TRAVA DE SEGURANÇA CONTRA REQUISIÇÃO DUPLICADA]:
+          // Adicionada a verificação para certificar-se de que o listener
+          // 'onAuthStateChange' já não iniciou a busca assíncrona do perfil.
+          // Isso previne que duas chamadas pesadas ao banco rodem concorrentemente
+          // toda vez que qualquer página do CRM é carregada.
+          // ------------------------------------------------------------------
+          if (currentUser.id !== lastFetchedUserIdRef.current) {
+            fetchProfile(currentUser.id);
+          }
         } else {
           // No user → no profile to load. Flip profileLoading off so
           // pages that gate on it don't wait forever on the logged-out
