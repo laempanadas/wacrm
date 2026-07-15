@@ -5,7 +5,8 @@ import {
   DndContext,
   DragOverlay,
   KeyboardSensor,
-  PointerSensor,
+  MouseSensor, // <- Adicionado para cliques de mouse estáveis
+  TouchSensor, // <- Adicionado para toques estáveis em mobile
   useSensor,
   useSensors,
   useDroppable,
@@ -54,11 +55,17 @@ export function PipelineBoard({
     return map;
   }, [sortedStages, deals]);
 
+  // ------------------------------------------------------------------
+  // [REFATORAÇÃO - SENSORES ROBUSTOS MOBILE + DESKTOP]:
+  // Substituímos o PointerSensor para evitar o travamento de rolagem de tela
+  // em celulares. O TouchSensor com delay de 250ms garante rolagem nativa fluida.
+  // ------------------------------------------------------------------
   const sensors = useSensors(
-    // 5px activation distance avoids clicks being interpreted as drags.
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    // Keyboard drag support: focus a card, Space to pick up, arrows to move,
-    // Space to drop, Escape to cancel.
+    // Arrastar com mouse: 5px de distância mínima para evitar disparar arrastar em cliques simples de edição
+    useSensor(MouseSensor, { activationConstraint: { distance: 5 } }),
+    // Arrastar com touch: exige pressionar por 250ms antes de descolar o card, liberando o deslize de tela vertical/horizontal
+    useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 5 } }),
+    // Suporte a teclado para acessibilidade
     useSensor(KeyboardSensor),
   );
 
@@ -97,11 +104,7 @@ export function PipelineBoard({
       onDragCancel={handleDragCancel}
     >
       {/* snap-x + snap-mandatory on mobile so swipes land the next
-          stage cleanly at the viewport edge instead of mid-column.
-          Disabled on lg+ where snapping would interfere with the
-          natural layout. The board can still overflow horizontally on
-          lg+ once a pipeline has many stages (columns keep a 260px
-          min-width), so a thin scrollbar stays visible on desktop. */}
+          stage cleanly at the viewport edge instead of mid-column. */}
       <div className="pipeline-scroll flex snap-x snap-mandatory gap-3 overflow-x-auto pb-4 lg:snap-none">
         {sortedStages.map((stage) => {
           const stageDeals = dealsByStage.get(stage.id) ?? [];
@@ -147,11 +150,6 @@ export function PipelineBoard({
         .pipeline-scroll {
           scroll-behavior: smooth;
         }
-        /* On touch devices the peek/snap layout already signals there's
-           more to swipe, so the scrollbar is hidden for a clean look.
-           On desktop (mouse) the board can overflow with many stages
-           and there is no peek hint, so keep a thin, themed scrollbar
-           visible to make the overflow discoverable and usable. */
         @media (hover: none), (pointer: coarse) {
           .pipeline-scroll::-webkit-scrollbar {
             height: 0;
@@ -203,14 +201,8 @@ function StageColumn({
   const { setNodeRef, isOver } = useDroppable({ id: stage.id });
 
   return (
-    // On mobile each column is `w-[85vw]` (with a reasonable min/max)
-    // so the next column's edge peeks in — a "there's more here" hint.
-    // snap-start lands each column cleanly when swiping. On lg+ we
-    // restore the flex-1 share-the-row behavior. The droppable ref is
-    // on the inner messages region below — intentionally NOT here, so
-    // a drag over the column header doesn't highlight the whole column.
     <div className="flex w-[85vw] min-w-[260px] max-w-[320px] shrink-0 snap-start flex-col rounded-xl border border-border bg-card/60 p-4 lg:w-auto lg:max-w-none lg:flex-1 lg:basis-[260px] lg:shrink lg:snap-none">
-      {/* 3px colored top border — sits above the column's padding */}
+      {/* 3px colored top border */}
       <div
         className="-mx-4 -mt-4 h-[3px] rounded-t-xl"
         style={{ backgroundColor: stage.color }}
@@ -236,8 +228,9 @@ function StageColumn({
         }`}
       >
         {deals.length === 0 ? (
+          // [CUSTOMIZAÇÃO - TRADUÇÃO]: Adaptado para delivery de empanadas
           <div className="flex flex-1 items-center justify-center rounded-lg border-2 border-dashed border-border py-10 text-xs text-muted-foreground">
-            Drop a deal here
+            Solte o pedido aqui
           </div>
         ) : (
           deals.map((deal) => (
@@ -255,10 +248,11 @@ function StageColumn({
         variant="ghost"
         size="sm"
         onClick={() => onAddDeal(stage.id)}
+        // [CUSTOMIZAÇÃO - TRADUÇÃO]: Adaptado para delivery de empanadas
         className="mt-3 w-full justify-start border border-dashed border-border bg-transparent text-muted-foreground hover:border-border hover:bg-muted hover:text-foreground"
       >
         <Plus className="mr-1 h-3 w-3" />
-        Add Deal
+        Novo Pedido
       </Button>
     </div>
   );
