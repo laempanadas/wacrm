@@ -18,12 +18,16 @@ const inter = Inter({
   subsets: ["latin"],
 });
 
+// ------------------------------------------------------------------
+// [ADAPTAÇÃO DA MARCA - LA EMPANADA]:
+// Alteração dos títulos globais, descrição do aplicativo e metadados.
+// ------------------------------------------------------------------
 export const metadata: Metadata = {
   title: {
-    default: "wacrm",
-    template: "%s — wacrm",
+    default: "La Empanada CRM",
+    template: "%s — La Empanada",
   },
-  description: "Self-hostable CRM template for WhatsApp.",
+  description: "CRM de Vendas e Caixa de Entrada compartilhada para o La Empanada.",
   robots: {
     index: false,
     follow: false,
@@ -82,7 +86,7 @@ export default function RootLayout({
 }>) {
   return (
     <html
-      lang="en"
+      lang="pt-BR" // <- Alterado para Português do Brasil
       data-theme={DEFAULT_THEME}
       data-mode={DEFAULT_MODE}
       className={`${inter.variable} h-full antialiased`}
