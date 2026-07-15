@@ -116,12 +116,17 @@ function MediaImage({ url, alt }: { url: string; alt: string }) {
   );
 }
 
-function MessageContent({ message }: { message: Message }) {
+// ------------------------------------------------------------------
+// [REFATORAÇÃO - MESSAGE CONTENT SUPORTE A CONTRASTE]:
+// Recebe 'onPrimary' para ajustar dinamicamente as cores de badges e textos
+// de apoio, impedindo que textos de templates fiquem pretos ou da mesma cor do fundo.
+// ------------------------------------------------------------------
+function MessageContent({ message, onPrimary }: { message: Message; onPrimary: boolean }) {
   switch (message.content_type) {
     case "text":
       return (
         <p className="whitespace-pre-wrap break-words text-sm">
-          {message.content_text}
+          {message.content_text || "[Mensagem de texto vazia]"}
         </p>
       );
 
@@ -193,15 +198,19 @@ function MessageContent({ message }: { message: Message }) {
     case "template":
       return (
         <div>
-          <span className="mb-1 inline-flex items-center gap-1 rounded bg-primary/20 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+          {/* Se estiver no balão do agente (onPrimary), renderiza com contraste branco suave. Se for do cliente, usa o tom primário da marca */}
+          <span className={cn(
+            "mb-1 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium",
+            onPrimary 
+              ? "bg-white/20 text-white" 
+              : "bg-primary/10 text-primary"
+          )}>
             <LayoutTemplate className="h-3 w-3" />
-            Template
+            Template: {message.template_name || "Campanha"}
           </span>
-          {message.content_text && (
-            <p className="mt-1 whitespace-pre-wrap break-words text-sm">
-              {message.content_text}
-            </p>
-          )}
+          <p className="mt-1 whitespace-pre-wrap break-words text-sm">
+            {message.content_text || "[Template disparado com sucesso]"}
+          </p>
         </div>
       );
 
@@ -214,19 +223,17 @@ function MessageContent({ message }: { message: Message }) {
       );
 
     case "interactive": {
-      // Customer tapped a reply button or list row on a message the bot
-      // sent. We show the tapped option's title (already in content_text,
-      // set by parseMessageContent in the webhook) with a small affordance
-      // so agents reading the inbox can tell at a glance that this is a
-      // tap rather than the customer typing the same words.
       return (
         <div className="flex flex-col gap-0.5">
-          <span className="inline-flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+          <span className={cn(
+            "inline-flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide",
+            onPrimary ? "text-primary-foreground/75" : "text-muted-foreground"
+          )}>
             <CornerDownLeft className="h-3 w-3" />
-            Button reply
+            Resposta de Botão
           </span>
           <p className="whitespace-pre-wrap break-words text-sm">
-            {message.content_text || "[Interactive reply]"}
+            {message.content_text || "[Resposta Interativa]"}
           </p>
         </div>
       );
@@ -235,7 +242,7 @@ function MessageContent({ message }: { message: Message }) {
     default:
       return (
         <p className="whitespace-pre-wrap break-words text-sm">
-          {message.content_text || "[Unsupported message type]"}
+          {message.content_text || "[Tipo de mensagem não suportado]"}
         </p>
       );
   }
@@ -251,8 +258,6 @@ export function MessageBubble({
   const isAgent = message.sender_type === "agent" || message.sender_type === "bot";
   const time = format(new Date(message.created_at), "HH:mm");
 
-  // Row alignment + width cap are owned by <MessageActions> so its hover
-  // group matches the bubble's content area, not the full row.
   return (
     <div
       className={cn(
@@ -275,7 +280,8 @@ export function MessageBubble({
             onPrimary={isAgent}
           />
         )}
-        <MessageContent message={message} />
+        {/* Passamos isAgent como onPrimary para guiar as cores internas */}
+        <MessageContent message={message} onPrimary={isAgent} />
         <div
           className={cn(
             "mt-1 flex items-center gap-1",
@@ -285,10 +291,6 @@ export function MessageBubble({
           <span
             className={cn(
               "text-[10px]",
-              // Outbound bubbles sit on the primary fill, so the
-              // timestamp must read against that (not the neutral
-              // foreground) — otherwise it goes low-contrast in light
-              // mode. Inbound bubbles use the muted surface.
               isAgent ? "text-primary-foreground/70" : "text-muted-foreground",
             )}
           >
