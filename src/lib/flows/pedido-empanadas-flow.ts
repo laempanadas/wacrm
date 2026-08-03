@@ -45,25 +45,41 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
   slug: 'pedido_empanadas',
   name: 'Pedido de empanadas',
   description:
-    'Registra pedidos pelo WhatsApp: boas-vindas, tipo de entrega (delivery x retirada), endereço, forma de pagamento (Mercado Pago quando online) e confirmação. Delivery paga antes; retirada aceita dinheiro.',
+    'Dispara quando o cliente envia o carrinho pelo catálogo da Meta. Mostra o resumo do pedido e coleta tipo de entrega (delivery x retirada), endereço, forma de pagamento (Mercado Pago quando online) e confirmação. Delivery paga antes; retirada aceita dinheiro.',
   icon: 'MessageSquare',
-  trigger_type: 'first_inbound_message',
+  // Dispara automaticamente quando chega um pedido do catálogo da Meta
+  // (mensagem do tipo `order`). O engine injeta nas variáveis do run:
+  //   vars.itens_texto      → resumo legível do carrinho
+  //   vars.total            → total em número (ex: 27.5)
+  //   vars.total_formatado  → total formatado (ex: "R$ 27,50")
+  //   vars.itens            → itens estruturados (SKU, quantidade, preço)
+  trigger_type: 'catalog_order',
   trigger_config: {},
   entry_node_id: 'start',
   nodes: [
     {
       node_key: 'start',
       node_type: 'start',
-      config: { next_node_key: 'ask_name' },
+      config: { next_node_key: 'mostrar_carrinho' },
     },
 
-    // 1. Boas-vindas + captura do nome.
+    // 0. Resumo do carrinho recebido pelo catálogo da Meta.
+    {
+      node_key: 'mostrar_carrinho',
+      node_type: 'send_message',
+      config: {
+        text: '🫔 Recebemos seu pedido pelo catálogo!\n\n{{vars.itens_texto}}\n\nAgora vamos confirmar alguns dados para concluir. 👇',
+        next_node_key: 'ask_name',
+      } as SendMessageNodeConfig,
+    },
+
+    // 1. Captura do nome.
     {
       node_key: 'ask_name',
       node_type: 'collect_input',
       config: {
         prompt_text:
-          '🫔 Olá! Bem-vindo à La Empanadas!\nPara registrar seu pedido, preciso de algumas informações.\nQual é o seu nome completo?',
+          'Qual é o seu nome completo?',
         var_key: 'nome',
         next_node_key: 'ask_delivery_type',
       } as CollectInputNodeConfig,
@@ -169,7 +185,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
       node_key: 'confirm_pix',
       node_type: 'send_message',
       config: {
-        text: '✅ Pedido registrado!\n💚 Pix: laempanadas@email.com (ou chave: XX.XXX.XXX/XXXX-XX)\nValor: R$ {{vars.valor_total}}\n\nEnvie o comprovante aqui no chat para confirmarmos! 📲',
+        text: '✅ Pedido registrado!\n💚 Pix: laempanadas@email.com (ou chave: XX.XXX.XXX/XXXX-XX)\nValor: {{vars.total_formatado}}\n\nEnvie o comprovante aqui no chat para confirmarmos! 📲',
         next_node_key: 'handoff_pedido',
       } as SendMessageNodeConfig,
     },
@@ -193,7 +209,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
       node_key: 'confirm_mercado_pago',
       node_type: 'send_message',
       config: {
-        text: '✅ Pedido registrado! Gerando seu link de pagamento...\n🔗 {{vars.link_mercado_pago}}\n\nApós o pagamento confirmado, iniciaremos o preparo.\nTempo estimado: 30-40 minutos. 🍽️',
+        text: '✅ Pedido registrado!\nTotal do pedido: {{vars.total_formatado}}\n\nGerando seu link de pagamento...\n🔗 {{vars.link_mercado_pago}}\n\nApós o pagamento confirmado, iniciaremos o preparo.\nTempo estimado: 30-40 minutos. 🍽️',
         next_node_key: 'handoff_pedido',
       } as SendMessageNodeConfig,
     },
@@ -203,7 +219,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
       node_key: 'handoff_pedido',
       node_type: 'handoff',
       config: {
-        note: '🫔 Novo pedido — Cliente: {{vars.nome}}. Endereço (se delivery): {{vars.endereco}}. Confira a forma de pagamento na conversa e registre o pedido no pipeline "Pedidos Delivery".',
+        note: '🫔 Novo pedido (catálogo Meta) — Cliente: {{vars.nome}}.\nItens: {{vars.itens_texto}}\nTotal: {{vars.total_formatado}}\nEndereço (se delivery): {{vars.endereco}}.\nConfira a forma de pagamento na conversa e registre o pedido no pipeline "Pedidos Delivery".',
       } as HandoffNodeConfig,
     },
   ],

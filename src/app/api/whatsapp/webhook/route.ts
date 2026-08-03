@@ -57,6 +57,24 @@ interface WhatsAppMessage {
     button_reply?: { id: string; title: string }
     list_reply?: { id: string; title: string; description?: string }
   }
+  /**
+   * Present when the customer submits a cart from the Meta (WhatsApp
+   * Business) product catalog. Meta sends `type === 'order'` with the
+   * chosen line items. The product NAME is NOT included — only the
+   * retailer SKU (`product_retailer_id`) — so summaries reference the
+   * SKU. `item_price` is the unit price; the cart total is
+   * Σ quantity * item_price.
+   */
+  order?: {
+    catalog_id?: string
+    text?: string
+    product_items?: Array<{
+      product_retailer_id: string
+      quantity: number
+      item_price: number
+      currency?: string
+    }>
+  }
   /** Present when the customer swipe-replies to one of our messages. */
   context?: { id: string }
 }
@@ -612,7 +630,7 @@ async function processMessage(
   }
 
   // Parse message content based on type
-  const { contentText, mediaUrl, mediaType, interactiveReplyId } =
+  const { contentText, mediaUrl, mediaType, interactiveReplyId, order } =
     await parseMessageContent(message, accessToken)
 
   // Resolve swipe-reply context if present. A missing parent is fine —
@@ -726,24 +744,37 @@ async function processMessage(
   // no active flows take the runner's early-exit "no_match" path
   // basically for free (one indexed SELECT for the active run).
   // ============================================================
+  // Debug: log o tipo de mensagem recebida e se é catalog_order
+  console.log('[webhook] message.type:', message.type, '| order:', order ? 'sim' : 'não', '| kind será:', order ? 'catalog_order' : interactiveReplyId ? 'interactive_reply' : 'text')
+
   const flowResult = await dispatchInboundToFlows({
     accountId,
     userId: configOwnerUserId,
     contactId: contactRecord.id,
     conversationId: conversation.id,
     message:
-      interactiveReplyId
+      order
         ? {
-            kind: 'interactive_reply',
-            reply_id: interactiveReplyId,
-            reply_title: contentText ?? '',
+            // Cart from the Meta catalog — starts the ordering flow with
+            // the items + total already captured into the run's vars.
+            kind: 'catalog_order',
+            text: contentText ?? '',
+            total: order.total,
+            items: order.items,
             meta_message_id: message.id,
           }
-        : {
-            kind: 'text',
-            text: contentText ?? message.text?.body ?? '',
-            meta_message_id: message.id,
-          },
+        : interactiveReplyId
+          ? {
+              kind: 'interactive_reply',
+              reply_id: interactiveReplyId,
+              reply_title: contentText ?? '',
+              meta_message_id: message.id,
+            }
+          : {
+              kind: 'text',
+              text: contentText ?? message.text?.body ?? '',
+              meta_message_id: message.id,
+            },
     isFirstInboundMessage,
   })
   const flowConsumed = flowResult.consumed
@@ -830,6 +861,15 @@ async function parseMessageContent(
    * tap with the right affordance. Null for everything else.
    */
   interactiveReplyId: string | null
+  /**
+   * Populated only for `type === 'order'` (Meta catalog cart). Carries
+   * the structured line items + total so the caller can hand a
+   * `catalog_order` inbound to the Flows engine. Null otherwise.
+   */
+  order: {
+    total: number
+    items: Array<{ retailer_id: string; quantity: number; unit_price: number }>
+  } | null
 }> {
   // getMediaUrl signature is (mediaId, accessToken) — earlier code had
   // the args swapped, so every verification hit an invalid Meta URL and
@@ -857,6 +897,7 @@ async function parseMessageContent(
     mediaUrl: null,
     mediaType: null,
     interactiveReplyId: null,
+    order: null,
   }
 
   switch (message.type) {
@@ -950,6 +991,38 @@ async function parseMessageContent(
         }
       }
       return { ...empty, contentText: '[Interactive reply]' }
+    }
+
+    case 'order': {
+      // Cart submitted from the Meta product catalog. Build a readable
+      // PT-BR summary for the inbox bubble and hand the structured items
+      // up so the caller can start the ordering flow. Meta only gives us
+      // the retailer SKU (no product name), so lines reference the SKU.
+      const productItems = message.order?.product_items ?? []
+      const items = productItems.map((it) => ({
+        retailer_id: it.product_retailer_id,
+        quantity: it.quantity,
+        unit_price: it.item_price,
+      }))
+      const total = items.reduce(
+        (sum, it) => sum + it.quantity * it.unit_price,
+        0
+      )
+      const fmt = (v: number) => `R$ ${v.toFixed(2).replace('.', ',')}`
+      const lines = items.map(
+        (it) =>
+          `• ${it.quantity}x ${it.retailer_id} — ${fmt(it.quantity * it.unit_price)}`
+      )
+      const summary = [
+        '🛒 Novo pedido pelo catálogo:',
+        ...lines,
+        `Total: ${fmt(total)}`,
+      ].join('\n')
+      return {
+        ...empty,
+        contentText: summary,
+        order: { total, items },
+      }
     }
 
     default:

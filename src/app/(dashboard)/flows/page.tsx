@@ -46,7 +46,7 @@ interface FlowRow {
   name: string;
   description: string | null;
   status: "draft" | "active" | "archived";
-  trigger_type: "keyword" | "first_inbound_message" | "manual";
+  trigger_type: "keyword" | "first_inbound_message" | "catalog_order" | "manual";
   trigger_config: { keywords?: string[] } | Record<string, unknown>;
   execution_count: number;
   last_executed_at: string | null;
@@ -432,6 +432,9 @@ function describeTrigger(flow: FlowRow): string {
   }
   if (flow.trigger_type === "first_inbound_message") {
     return "Triggers on a contact's first-ever inbound message";
+  }
+  if (flow.trigger_type === "catalog_order") {
+    return "Dispara quando o cliente envia um pedido pelo catálogo do WhatsApp";
   }
   return "Manual trigger";
 }
