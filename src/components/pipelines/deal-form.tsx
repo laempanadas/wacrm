@@ -32,6 +32,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { toast } from "sonner";
+import { PaymentLinkButton } from "@/components/payments/payment-link-button";
 
 interface DealFormProps {
   open: boolean;
@@ -151,7 +152,7 @@ export function DealForm({
 
   async function handleSave() {
     if (!title.trim() || !contactId || !stageId) {
-      toast.error("Title, contact, and stage are required");
+      toast.error("Título, cliente e etapa são obrigatórios");
       return;
     }
     setSaving(true);
@@ -204,7 +205,7 @@ export function DealForm({
     }
 
     setSaving(false);
-    toast.success(deal ? "Deal updated" : "Deal created");
+    toast.success(deal ? "Pedido atualizado" : "Pedido criado");
     onOpenChange(false);
     onSaved();
   }
@@ -222,7 +223,7 @@ export function DealForm({
       return;
     }
     toast.success(
-      status === "won" ? "Marked as won" : status === "lost" ? "Marked as lost" : "Deal reopened",
+      status === "won" ? "Marcado como pago" : status === "lost" ? "Marcado como cancelado" : "Pedido reaberto",
     );
     onOpenChange(false);
     onSaved();
@@ -237,7 +238,7 @@ export function DealForm({
       toast.error("Failed to delete deal");
       return;
     }
-    toast.success("Deal deleted");
+    toast.success("Pedido excluído");
     setConfirmDelete(false);
     onOpenChange(false);
     onSaved();
@@ -252,29 +253,29 @@ export function DealForm({
         <div className="flex h-full flex-col">
           <SheetHeader className="border-b border-border/50 p-4">
             <SheetTitle className="text-popover-foreground">
-              {deal ? "Edit Deal" : "New Deal"}
+              {deal ? "Editar Pedido" : "Novo Pedido"}
             </SheetTitle>
           </SheetHeader>
 
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
             <div className="grid gap-2">
-              <Label className="text-muted-foreground">Title</Label>
+              <Label className="text-muted-foreground">Título</Label>
               <Input
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
-                placeholder="Deal title"
+                placeholder="Título do pedido"
                 className="border-border bg-muted text-foreground"
               />
             </div>
 
             <div className="grid gap-2">
-              <Label className="text-muted-foreground">Contact</Label>
+              <Label className="text-muted-foreground">Cliente</Label>
               <select
                 value={contactId}
                 onChange={(e) => setContactId(e.target.value)}
                 className="h-9 w-full rounded-lg border border-border bg-muted px-2.5 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary"
               >
-                <option value="">Select a contact</option>
+                <option value="">Selecione um cliente</option>
                 {contacts.map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.name || c.phone}
@@ -288,14 +289,14 @@ export function DealForm({
                   className="mt-1 inline-flex items-center gap-1.5 self-start rounded-md bg-primary/10 px-2 py-1 text-xs text-primary hover:bg-primary/20"
                 >
                   <MessageSquare className="h-3 w-3" />
-                  Link to Conversation
+                  Abrir conversa
                 </Link>
               )}
             </div>
 
             <div className="grid grid-cols-[1fr_110px] gap-3">
               <div className="grid gap-2">
-                <Label className="text-muted-foreground">Value</Label>
+                <Label className="text-muted-foreground">Valor</Label>
                 <div className="relative">
                   <DollarSign className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
                   <Input
@@ -308,7 +309,7 @@ export function DealForm({
                 </div>
               </div>
               <div className="grid gap-2">
-                <Label className="text-muted-foreground">Currency</Label>
+                <Label className="text-muted-foreground">Moeda</Label>
                 <select
                   value={currency}
                   onChange={(e) => setCurrency(e.target.value)}
@@ -324,7 +325,7 @@ export function DealForm({
             </div>
 
             <div className="grid gap-2">
-              <Label className="text-muted-foreground">Expected Close Date</Label>
+              <Label className="text-muted-foreground">Data prevista de entrega</Label>
               <Input
                 type="date"
                 value={expectedCloseDate}
@@ -334,7 +335,7 @@ export function DealForm({
             </div>
 
             <div className="grid gap-2">
-              <Label className="text-muted-foreground">Stage</Label>
+              <Label className="text-muted-foreground">Etapa</Label>
               <select
                 value={stageId}
                 onChange={(e) => setStageId(e.target.value)}
@@ -349,13 +350,13 @@ export function DealForm({
             </div>
 
             <div className="grid gap-2">
-              <Label className="text-muted-foreground">Assigned To</Label>
+              <Label className="text-muted-foreground">Responsável</Label>
               <select
                 value={assignedTo}
                 onChange={(e) => setAssignedTo(e.target.value)}
                 className="h-9 w-full rounded-lg border border-border bg-muted px-2.5 text-sm text-foreground outline-none focus:border-primary"
               >
-                <option value="">Unassigned</option>
+                <option value="">Sem responsável</option>
                 {profiles.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.full_name || p.email}
@@ -365,11 +366,11 @@ export function DealForm({
             </div>
 
             <div className="grid gap-2">
-              <Label className="text-muted-foreground">Notes</Label>
+              <Label className="text-muted-foreground">Observações</Label>
               <Textarea
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
-                placeholder="Add notes..."
+                placeholder="Adicionar observações..."
                 className="min-h-[100px] border-border bg-muted text-foreground"
               />
             </div>
@@ -391,7 +392,7 @@ export function DealForm({
                     ) : (
                       <>
                         <Check className="mr-1 h-4 w-4" />
-                        Mark as Won
+                        Marcar como Pago
                       </>
                     )}
                   </Button>
@@ -406,7 +407,7 @@ export function DealForm({
                     ) : (
                       <>
                         <X className="mr-1 h-4 w-4" />
-                        Mark as Lost
+                        Marcar como Cancelado
                       </>
                     )}
                   </Button>
@@ -419,10 +420,21 @@ export function DealForm({
                     disabled={!!statusAction}
                     className="w-full text-muted-foreground hover:text-foreground"
                   >
-                    Reopen deal
+                    Reabrir pedido
                   </Button>
                 )}
               </div>
+            )}
+
+            {deal && Number(value) > 0 && (
+              <PaymentLinkButton
+                title={`${title || "Pedido"} — La Empanadas`}
+                amount={Number(value)}
+                externalReference={deal.id}
+                payerName={
+                  contacts.find((c) => c.id === contactId)?.name ?? undefined
+                }
+              />
             )}
           </div>
 
@@ -433,21 +445,21 @@ export function DealForm({
                 onClick={() => onOpenChange(false)}
                 className="flex-1 border-border bg-transparent text-muted-foreground hover:bg-muted"
               >
-                Cancel
+                Cancelar
               </Button>
               <Button
                 onClick={handleSave}
                 disabled={saving || !title.trim() || !contactId || !stageId}
                 className="flex-1 bg-primary text-primary-foreground hover:bg-primary/90"
               >
-                {saving ? "Saving..." : deal ? "Save Changes" : "Create Deal"}
+                {saving ? "Salvando..." : deal ? "Salvar alterações" : "Criar pedido"}
               </Button>
             </div>
 
             {deal &&
               (confirmDelete ? (
                 <div className="mt-3 flex items-center justify-between gap-2 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs">
-                  <span className="text-red-300">Delete this deal?</span>
+                  <span className="text-red-300">Excluir este pedido?</span>
                   <div className="flex gap-1">
                     <button
                       type="button"
@@ -455,7 +467,7 @@ export function DealForm({
                       disabled={deleting}
                       className="rounded px-2 py-1 text-muted-foreground hover:bg-muted"
                     >
-                      Cancel
+                      Cancelar
                     </button>
                     <button
                       type="button"
@@ -463,7 +475,7 @@ export function DealForm({
                       disabled={deleting}
                       className="rounded bg-red-600 px-2 py-1 font-medium text-white hover:bg-red-700 disabled:opacity-50"
                     >
-                      {deleting ? "Deleting..." : "Confirm"}
+                      {deleting ? "Excluindo..." : "Confirmar"}
                     </button>
                   </div>
                 </div>
@@ -474,7 +486,7 @@ export function DealForm({
                   className="mt-3 flex w-full items-center justify-center gap-1 text-xs text-red-400 hover:text-red-300"
                 >
                   <Trash2 className="h-3 w-3" />
-                  Delete Deal
+                  Excluir pedido
                 </button>
               ))}
           </div>
