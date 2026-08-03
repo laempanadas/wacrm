@@ -900,6 +900,8 @@ async function parseMessageContent(
     order: null,
   }
 
+  console.log('[webhook] parseMessageContent - message.type:', message.type, '| tem order?:', !!message.order)
+
   switch (message.type) {
     case 'text':
       return { ...empty, contentText: message.text?.body || null }
