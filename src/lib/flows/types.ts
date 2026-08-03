@@ -217,6 +217,7 @@ export type FirstInboundTriggerConfig = Record<string, never>;
 export type FlowTriggerConfig =
   | { trigger_type: "keyword"; config: KeywordTriggerConfig }
   | { trigger_type: "first_inbound_message"; config: FirstInboundTriggerConfig }
+  | { trigger_type: "catalog_order"; config: Record<string, never> }
   | { trigger_type: "manual"; config: Record<string, never> };
 
 // ============================================================
@@ -234,7 +235,7 @@ export interface FlowRow {
   name: string;
   description: string | null;
   status: "draft" | "active" | "archived";
-  trigger_type: "keyword" | "first_inbound_message" | "manual";
+  trigger_type: "keyword" | "first_inbound_message" | "catalog_order" | "manual";
   trigger_config: KeywordTriggerConfig | FirstInboundTriggerConfig | Record<string, unknown>;
   entry_node_id: string | null;
   fallback_policy: FlowFallbackPolicy;
@@ -326,6 +327,28 @@ export type ParsedInbound =
       reply_id: string;
       /** The visible title of the tapped option (for logging). */
       reply_title: string;
+      meta_message_id: string;
+    }
+  | {
+      /**
+       * A cart submitted from the Meta (WhatsApp Business) product
+       * catalog. The customer picked items in the catalog and hit
+       * "Send order"; Meta delivers a `messages[0].type === 'order'`
+       * payload. The webhook lifts it into this shape so a flow with
+       * `trigger_type === 'catalog_order'` can start with the cart
+       * already captured into the run's vars.
+       */
+      kind: "catalog_order";
+      /** Human-readable PT-BR cart summary (one line per item + total). */
+      text: string;
+      /** Order total in the account currency (Σ quantity * unit_price). */
+      total: number;
+      /** Line items. Meta only sends the retailer SKU, not the name. */
+      items: Array<{
+        retailer_id: string;
+        quantity: number;
+        unit_price: number;
+      }>;
       meta_message_id: string;
     };
 

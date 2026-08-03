@@ -308,15 +308,26 @@ async function isDuplicateInbound(
   return (count ?? 0) > 0;
 }
 
+/**
+ * Format a number as Brazilian Real (e.g. 27.5 → "R$ 27,50"). Kept
+ * local to the engine so seeding a run's vars from a catalog cart
+ * doesn't pull in a UI-layer currency helper.
+ */
+function formatBRLNumber(value: number): string {
+  return `R$ ${value.toFixed(2).replace(".", ",")}`;
+}
+
 async function findEntryFlow(
   db: AdminClient,
   accountId: string,
   message: ParsedInbound,
   isFirstInbound: boolean,
 ): Promise<FlowRow | null> {
-  // Only text messages can match an entry trigger. Interactive replies
-  // are responses to existing prompts; they never start a new flow.
-  if (message.kind !== "text") return null;
+  // Interactive replies are responses to existing prompts; they never
+  // start a new flow. Text messages and catalog orders (a cart sent
+  // from the Meta product catalog) are the only inbound kinds that can
+  // match an entry trigger.
+  if (message.kind === "interactive_reply") return null;
 
   // Pull all active flows for this account. Active set is bounded
   // (the builder discourages double-trigger overlap; partial index
@@ -331,15 +342,32 @@ async function findEntryFlow(
 
   const typed = flows as FlowRow[];
   for (const flow of typed) {
-    if (flow.trigger_type === "keyword") {
-      if (matchesKeywordTrigger(
-        message.text,
-        flow.trigger_config as KeywordTriggerConfig,
-      )) {
+    if (flow.trigger_type === "catalog_order") {
+      // A catalog cart submission starts any flow wired to it. This is
+      // the La Empanadas ordering flow: the customer builds the cart in
+      // the Meta catalog, and the bot takes over to collect delivery +
+      // payment. Only catalog_order inbound matches this trigger.
+      if (message.kind === "catalog_order") {
+        return flow;
+      }
+    } else if (flow.trigger_type === "keyword") {
+      // Keyword triggers only ever fire on typed text.
+      if (
+        message.kind === "text" &&
+        matchesKeywordTrigger(
+          message.text,
+          flow.trigger_config as KeywordTriggerConfig,
+        )
+      ) {
         return flow;
       }
     } else if (flow.trigger_type === "first_inbound_message" && isFirstInbound) {
-      return flow;
+      // first_inbound fires on the contact's first message regardless of
+      // kind, but a catalog order should be reserved for catalog_order
+      // flows so it doesn't accidentally trip a generic welcome flow.
+      if (message.kind === "text") {
+        return flow;
+      }
     }
     // 'manual' triggers do not auto-start from inbound messages.
   }
@@ -1057,6 +1085,21 @@ async function startNewRun(
   // INSERT — partial unique index `idx_one_active_run_per_contact`
   // catches concurrent inserts with 23505. We catch and return as
   // consumed:true (the parallel webhook handles it).
+  // Seed the run's vars from a catalog cart when the flow was started
+  // by a Meta catalog order. This puts the cart summary, total and raw
+  // line items in scope so the ordering flow can render them with
+  // `{{vars.itens_texto}}` / `{{vars.total}}` and generate a Mercado
+  // Pago link for the exact cart amount without asking again.
+  const seedVars: Record<string, unknown> =
+    input.message.kind === "catalog_order"
+      ? {
+          itens_texto: input.message.text,
+          total: input.message.total,
+          total_formatado: formatBRLNumber(input.message.total),
+          itens: input.message.items,
+        }
+      : {};
+
   const { data: inserted, error: insErr } = await db
     .from("flow_runs")
     .insert({
@@ -1073,6 +1116,7 @@ async function startNewRun(
       conversation_id: input.conversationId,
       status: "active",
       current_node_key: flow.entry_node_id,
+      vars: seedVars,
     })
     .select("*")
     .maybeSingle();

@@ -294,6 +294,9 @@ function TriggerPanel({
               <SelectItem value="first_inbound_message">
                 Customer&apos;s first ever inbound message
               </SelectItem>
+              <SelectItem value="catalog_order">
+                Pedido enviado pelo catálogo do WhatsApp
+              </SelectItem>
               <SelectItem value="manual">
                 Manual only (no auto-trigger)
               </SelectItem>

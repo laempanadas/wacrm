@@ -37,7 +37,7 @@ export interface ValidationIssue {
 
 interface FlowInput {
   name: string;
-  trigger_type: "keyword" | "first_inbound_message" | "manual";
+  trigger_type: "keyword" | "first_inbound_message" | "catalog_order" | "manual";
   trigger_config: Record<string, unknown>;
   entry_node_id: string | null;
 }
@@ -173,7 +173,7 @@ function validateTrigger(
       }
     }
   }
-  // first_inbound_message / manual have no config; nothing to validate.
+  // first_inbound_message / catalog_order / manual have no config; nothing to validate.
 
   return issues;
 }
