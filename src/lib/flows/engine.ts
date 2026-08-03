@@ -338,7 +338,12 @@ async function findEntryFlow(
     .eq("account_id", accountId)
     .eq("status", "active")
     .order("created_at", { ascending: true });
-  if (error || !flows) return null;
+  if (error || !flows) {
+    console.error("[engine] findEntryFlow error ou sem flows:", error);
+    return null;
+  }
+
+  console.log("[engine] flows ativos encontrados:", flows.length, "| message.kind:", message.kind, "| triggers:", flows.map((f: FlowRow) => f.trigger_type).join(", "));
 
   const typed = flows as FlowRow[];
   for (const flow of typed) {

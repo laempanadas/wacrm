@@ -744,6 +744,9 @@ async function processMessage(
   // no active flows take the runner's early-exit "no_match" path
   // basically for free (one indexed SELECT for the active run).
   // ============================================================
+  // Debug: log o tipo de mensagem recebida e se é catalog_order
+  console.log('[webhook] message.type:', message.type, '| order:', order ? 'sim' : 'não', '| kind será:', order ? 'catalog_order' : interactiveReplyId ? 'interactive_reply' : 'text')
+
   const flowResult = await dispatchInboundToFlows({
     accountId,
     userId: configOwnerUserId,
