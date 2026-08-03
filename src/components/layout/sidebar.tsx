@@ -22,6 +22,7 @@ import {
   UserCog,
   Users,
   UsersRound,
+  UtensilsCrossed,
   Workflow,
   X,
   Zap,
@@ -38,7 +39,7 @@ const ROLE_CHIP: Record<
 > = {
   owner: {
     icon: Crown,
-    label: "Owner",
+    label: "Dono",
     // Amber: scarce, immutable, "the boss" — gets visual emphasis.
     className:
       "border-amber-500/40 bg-amber-500/10 text-amber-300",
@@ -52,14 +53,14 @@ const ROLE_CHIP: Record<
   },
   agent: {
     icon: UserCog,
-    label: "Agent",
+    label: "Atendente",
     // Neutral slate: the operational default.
     className:
       "border-border bg-muted text-foreground",
   },
   viewer: {
     icon: User,
-    label: "Viewer",
+    label: "Visualizador",
     // Muted slate: read-only role; visually quieter than agent.
     className:
       "border-border bg-card text-muted-foreground",
@@ -90,19 +91,20 @@ interface NavItem {
 }
 
 const navItems: NavItem[] = [
-  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/inbox", label: "Inbox", icon: MessageSquare },
-  { href: "/notifications", label: "Notifications", icon: Bell },
-  { href: "/contacts", label: "Contacts", icon: Users },
-  { href: "/pipelines", label: "Pipelines", icon: GitBranch },
-  { href: "/broadcasts", label: "Broadcasts", icon: Radio },
-  { href: "/automations", label: "Automations", icon: Zap },
-  { href: "/flows", label: "Flows", icon: Workflow, beta: true },
-  { href: "/agents", label: "AI Agents", icon: Bot },
+  { href: "/dashboard", label: "Painel", icon: LayoutDashboard },
+  { href: "/inbox", label: "Caixa de Entrada", icon: MessageSquare },
+  { href: "/notifications", label: "Notificações", icon: Bell },
+  { href: "/contacts", label: "Contatos", icon: Users },
+  { href: "/pipelines", label: "Pedidos", icon: GitBranch },
+  { href: "/cardapio", label: "Cardápio", icon: UtensilsCrossed },
+  { href: "/broadcasts", label: "Campanhas", icon: Radio },
+  { href: "/automations", label: "Automações", icon: Zap },
+  { href: "/flows", label: "Fluxos", icon: Workflow, beta: true },
+  { href: "/agents", label: "Agentes IA", icon: Bot },
 ];
 
 const bottomNavItems = [
-  { href: "/settings", label: "Settings", icon: Settings },
+  { href: "/settings", label: "Configurações", icon: Settings },
 ];
 
 interface SidebarProps {
@@ -189,7 +191,7 @@ export function Sidebar({ open = false, onClose }: SidebarProps) {
               <MessageSquare className="h-4 w-4" />
             </div>
             <span className="text-sm font-semibold text-foreground">
-              CRM Template for WhatsApp
+              La Empanadas CRM
             </span>
           </Link>
           <button
@@ -367,7 +369,7 @@ export function Sidebar({ open = false, onClose }: SidebarProps) {
                 }
               >
                 <User className="size-4" />
-                Profile
+                Perfil
               </DropdownMenuItem>
               <DropdownMenuItem
                 render={
@@ -379,7 +381,7 @@ export function Sidebar({ open = false, onClose }: SidebarProps) {
                 }
               >
                 <Settings className="size-4" />
-                Settings
+                Configurações
               </DropdownMenuItem>
               <DropdownMenuSeparator className="bg-border" />
               <DropdownMenuItem
@@ -387,7 +389,7 @@ export function Sidebar({ open = false, onClose }: SidebarProps) {
                 className="text-popover-foreground focus:bg-accent focus:text-accent-foreground"
               >
                 <LogOut className="size-4" />
-                Sign out
+                Sair
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
