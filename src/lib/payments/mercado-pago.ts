@@ -1,17 +1,20 @@
 /**
- * Mercado Pago — geração de link de pagamento.
+ * Mercado Pago — geração de link de pagamento e consulta de status.
+ *
+ * ⚠️ SERVER-SIDE ONLY. Este módulo usa `process.env.MP_ACCESS_TOKEN`
+ * (segredo) e NUNCA deve ser importado em componentes de cliente. Só
+ * pode ser usado dentro de API routes / Server Actions do Next.js.
  *
  * Integração opcional: só funciona quando `MP_ACCESS_TOKEN` está
- * configurado no ambiente (veja docs/mercado-pago-setup.md). Enquanto
- * a credencial não estiver disponível, `isMercadoPagoConfigured()`
- * retorna false e a UI mostra um aviso amigável em vez de quebrar.
+ * configurado no ambiente (veja docs/vercel-deploy.md e
+ * docs/mercado-pago-setup.md). Enquanto a credencial não estiver
+ * disponível, `isMercadoPagoConfigured()` retorna false e a UI mostra
+ * um aviso amigável em vez de quebrar.
  *
- * Usa a API de Preferences do Checkout Pro. Retornamos o
- * `init_point` (URL de pagamento) que pode ser enviado ao cliente
- * pelo WhatsApp.
+ * Usa o SDK oficial `mercadopago` (Checkout Pro / Preferences).
  */
 
-const MP_API_BASE = 'https://api.mercadopago.com';
+import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
 
 export interface PaymentLinkItem {
   /** Descrição do item (ex.: "Combo 12 empanadas"). */
@@ -22,6 +25,9 @@ export interface PaymentLinkItem {
   unitPrice: number;
 }
 
+/** Tipo de recebimento do pedido. */
+export type DeliveryKind = 'delivery' | 'retirada';
+
 export interface CreatePaymentLinkParams {
   /** Itens do pedido. */
   items: PaymentLinkItem[];
@@ -29,6 +35,10 @@ export interface CreatePaymentLinkParams {
   externalReference?: string;
   /** Nome do pagador, apenas para exibição na preferência. */
   payerName?: string;
+  /** Tipo de recebimento (informativo). */
+  deliveryKind?: DeliveryKind;
+  /** Endereço de entrega (apenas delivery, informativo). */
+  deliveryAddress?: string;
 }
 
 export interface PaymentLinkResult {
@@ -40,69 +50,149 @@ export interface PaymentLinkResult {
   sandboxUrl: string | null;
 }
 
+/** Status normalizado do pagamento para exibição na UI. */
+export type PaymentStatus =
+  'pending' | 'in_process' | 'approved' | 'rejected' | 'unknown';
+
+export interface PaymentStatusResult {
+  status: PaymentStatus;
+  /** Status bruto retornado pelo Mercado Pago (para diagnóstico). */
+  rawStatus: string | null;
+  /** ID do pagamento no Mercado Pago, quando encontrado. */
+  paymentId: string | null;
+}
+
+/** Mensagem padrão quando a integração não está configurada. */
+export const MP_NOT_CONFIGURED_MESSAGE =
+  'Mercado Pago não configurado. Adicione MP_ACCESS_TOKEN nas variáveis de ambiente (Vercel → Settings → Environment Variables) e faça um redeploy. Veja docs/vercel-deploy.md.';
+
 /** Indica se as credenciais do Mercado Pago estão configuradas. */
 export function isMercadoPagoConfigured(): boolean {
   return Boolean(process.env.MP_ACCESS_TOKEN);
 }
 
 /**
- * Cria uma preferência de pagamento no Mercado Pago e devolve a URL
- * de pagamento pronta para ser enviada ao cliente.
+ * Cria um client do SDK autenticado com o Access Token do ambiente.
+ * @throws Error quando `MP_ACCESS_TOKEN` não está configurado.
+ */
+function getClient(): MercadoPagoConfig {
+  const accessToken = process.env.MP_ACCESS_TOKEN;
+  if (!accessToken) {
+    throw new Error(MP_NOT_CONFIGURED_MESSAGE);
+  }
+  return new MercadoPagoConfig({ accessToken });
+}
+
+/**
+ * Normaliza o status bruto do Mercado Pago para um dos valores que a
+ * UI conhece.
+ */
+export function normalizePaymentStatus(
+  raw: string | null | undefined
+): PaymentStatus {
+  switch (raw) {
+    case 'approved':
+    case 'authorized':
+      return 'approved';
+    case 'in_process':
+    case 'in_mediation':
+      return 'in_process';
+    case 'pending':
+      return 'pending';
+    case 'rejected':
+    case 'cancelled':
+    case 'refunded':
+    case 'charged_back':
+      return 'rejected';
+    default:
+      return raw ? 'unknown' : 'pending';
+  }
+}
+
+/**
+ * Cria uma preferência de pagamento (Checkout Pro) e devolve a URL de
+ * pagamento pronta para enviar ao cliente pelo WhatsApp.
  *
- * @throws Error quando `MP_ACCESS_TOKEN` não está configurado ou a
- * API do Mercado Pago retorna erro.
+ * @throws Error quando `MP_ACCESS_TOKEN` não está configurado ou a API
+ * do Mercado Pago retorna erro.
  */
 export async function createPaymentLink(
   params: CreatePaymentLinkParams
 ): Promise<PaymentLinkResult> {
-  const accessToken = process.env.MP_ACCESS_TOKEN;
-  if (!accessToken) {
-    throw new Error(
-      'Mercado Pago não configurado. Defina MP_ACCESS_TOKEN no ambiente. Veja docs/mercado-pago-setup.md.'
-    );
-  }
-
   if (!params.items.length) {
     throw new Error('Informe ao menos um item para gerar o link de pagamento.');
   }
 
-  const body = {
-    items: params.items.map((item, index) => ({
-      id: String(index + 1),
-      title: item.title,
-      quantity: item.quantity,
-      unit_price: item.unitPrice,
-      currency_id: 'BRL',
-    })),
-    external_reference: params.externalReference,
-    payer: params.payerName ? { name: params.payerName } : undefined,
-  };
+  const client = getClient();
+  const preference = new Preference(client);
 
-  const response = await fetch(`${MP_API_BASE}/checkout/preferences`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${accessToken}`,
+  // Descrição do recebimento anexada como metadata (informativo).
+  const metadata: Record<string, unknown> = {};
+  if (params.deliveryKind) metadata.delivery_kind = params.deliveryKind;
+  if (params.deliveryAddress)
+    metadata.delivery_address = params.deliveryAddress;
+
+  const result = await preference.create({
+    body: {
+      items: params.items.map((item, index) => ({
+        id: String(index + 1),
+        title: item.title,
+        quantity: item.quantity,
+        unit_price: item.unitPrice,
+        currency_id: 'BRL',
+      })),
+      external_reference: params.externalReference,
+      payer: params.payerName ? { name: params.payerName } : undefined,
+      metadata: Object.keys(metadata).length ? metadata : undefined,
     },
-    body: JSON.stringify(body),
   });
 
-  if (!response.ok) {
-    const detail = await response.text().catch(() => '');
-    throw new Error(
-      `Falha ao criar link de pagamento no Mercado Pago (HTTP ${response.status}). ${detail}`
-    );
+  if (!result.id || !result.init_point) {
+    throw new Error('Mercado Pago não retornou um link de pagamento válido.');
   }
 
-  const data = (await response.json()) as {
-    id: string;
-    init_point: string;
-    sandbox_init_point?: string;
-  };
-
   return {
-    preferenceId: data.id,
-    paymentUrl: data.init_point,
-    sandboxUrl: data.sandbox_init_point ?? null,
+    preferenceId: result.id,
+    paymentUrl: result.init_point,
+    sandboxUrl: result.sandbox_init_point ?? null,
+  };
+}
+
+/**
+ * Consulta o status de pagamento associado a uma `external_reference`
+ * (o ID do pedido). Busca o pagamento mais recente que corresponde à
+ * referência.
+ *
+ * @throws Error quando `MP_ACCESS_TOKEN` não está configurado.
+ */
+export async function getPaymentStatusByExternalReference(
+  externalReference: string
+): Promise<PaymentStatusResult> {
+  const client = getClient();
+  const payment = new Payment(client);
+
+  const search = await payment.search({
+    options: {
+      external_reference: externalReference,
+      sort: 'date_created',
+      criteria: 'desc',
+      limit: 1,
+    },
+  });
+
+  const results = (search.results ?? []) as Array<{
+    id?: number | string;
+    status?: string;
+  }>;
+
+  if (!results.length) {
+    return { status: 'pending', rawStatus: null, paymentId: null };
+  }
+
+  const latest = results[0];
+  return {
+    status: normalizePaymentStatus(latest.status),
+    rawStatus: latest.status ?? null,
+    paymentId: latest.id != null ? String(latest.id) : null,
   };
 }

@@ -17,6 +17,8 @@ import { getCurrentAccount, toErrorResponse } from '@/lib/auth/account';
 import {
   createPaymentLink,
   isMercadoPagoConfigured,
+  MP_NOT_CONFIGURED_MESSAGE,
+  type DeliveryKind,
   type PaymentLinkItem,
 } from '@/lib/payments/mercado-pago';
 
@@ -36,11 +38,10 @@ export async function POST(request: Request) {
 
     if (!isMercadoPagoConfigured()) {
       return NextResponse.json(
+        { error: MP_NOT_CONFIGURED_MESSAGE },
         {
-          error:
-            'Mercado Pago não configurado. Defina MP_ACCESS_TOKEN no ambiente. Veja docs/mercado-pago-setup.md.',
-        },
-        { status: 503 }
+          status: 503,
+        }
       );
     }
 
@@ -48,6 +49,8 @@ export async function POST(request: Request) {
       items?: unknown;
       externalReference?: unknown;
       payerName?: unknown;
+      deliveryKind?: unknown;
+      deliveryAddress?: unknown;
     } | null;
 
     const rawItems = Array.isArray(body?.items) ? body!.items : [];
@@ -84,11 +87,21 @@ export async function POST(request: Request) {
         : undefined;
     const payerName =
       typeof body?.payerName === 'string' ? body.payerName : undefined;
+    const deliveryKind =
+      body?.deliveryKind === 'delivery' || body?.deliveryKind === 'retirada'
+        ? (body.deliveryKind as DeliveryKind)
+        : undefined;
+    const deliveryAddress =
+      typeof body?.deliveryAddress === 'string'
+        ? body.deliveryAddress
+        : undefined;
 
     const result = await createPaymentLink({
       items,
       externalReference,
       payerName,
+      deliveryKind,
+      deliveryAddress,
     });
 
     return NextResponse.json(result);
