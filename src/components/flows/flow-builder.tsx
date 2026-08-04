@@ -39,6 +39,7 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -97,6 +98,7 @@ export function FlowBuilder() {
   const addNode = useCallback(
     (type: NodeType) => {
       const key = addNodeCtx(type);
+      if (!key) return;
       setExpanded((prev) => new Set([...prev, key]));
     },
     [addNodeCtx]
@@ -141,6 +143,7 @@ export function FlowBuilder() {
     if (!flashKey || expanded.has(flashKey)) return expanded;
     return new Set([...expanded, flashKey]);
   }, [expanded, flashKey]);
+
   useEffect(() => {
     if (!flashKey) return;
     // requestAnimationFrame defers the scroll until after React has
@@ -581,6 +584,7 @@ function AddNodeButton({ onAdd }: { onAdd: (type: NodeType) => void }) {
     'handoff',
     'end',
   ];
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
@@ -592,7 +596,7 @@ function AddNodeButton({ onAdd }: { onAdd: (type: NodeType) => void }) {
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="border-border bg-popover">
         {groupNodeTypesByCategory(types).map((group, i) => (
-          <div key={group.id}>
+          <DropdownMenuGroup key={group.id}>
             {i > 0 && <DropdownMenuSeparator />}
             <DropdownMenuLabel className="text-muted-foreground text-[11px] font-semibold tracking-wider uppercase">
               {group.label}
@@ -600,13 +604,19 @@ function AddNodeButton({ onAdd }: { onAdd: (type: NodeType) => void }) {
             {group.types.map((t) => {
               const meta = NODE_META[t];
               return (
-                <DropdownMenuItem key={t} onClick={() => onAdd(t)}>
+                <DropdownMenuItem
+                  key={t}
+                  onSelect={(event) => {
+                    event.preventDefault();
+                    onAdd(t);
+                  }}
+                >
                   <meta.icon className={cn('h-3.5 w-3.5', meta.color)} />
                   {meta.label}
                 </DropdownMenuItem>
               );
             })}
-          </div>
+          </DropdownMenuGroup>
         ))}
       </DropdownMenuContent>
     </DropdownMenu>
