@@ -87,6 +87,7 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -94,6 +95,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { useFlowEditor } from './flow-editor-state';
 import { NodeConfigForm } from './forms/node-config-form';
+import type { CSSProperties } from 'react';
 
 // React-Flow node `data` payload — the bits our custom renderer needs.
 interface NodeData extends Record<string, unknown> {
@@ -158,7 +160,7 @@ function FlowNodeCard({ data, selected }: NodeProps) {
           boxShadow: selected
             ? `0 0 0 1px ${c.solid}, 0 14px 36px -12px ${c.ring}`
             : undefined,
-        } as React.CSSProperties
+        } as CSSProperties
       }
       className={cn(
         'bg-card relative max-w-[260px] min-w-[220px] rounded-xl border px-3.5 py-3 text-left shadow-[0_2px_6px_rgba(0,0,0,0.18)] transition-[box-shadow,border-color]',
@@ -699,29 +701,31 @@ function CanvasAddNodeButton() {
   const reactFlow = useReactFlow();
   const { addNode, updateNodePosition } = useFlowEditor();
 
-  const handleAdd = (type: NodeType) => {
-    const key = addNode(type);
-    // Place the new node at the visible canvas center. The Panel's
-    // own DOM lives inside ReactFlow so we can climb up to find the
-    // .react-flow root and read its bounding rect. If we can't find
-    // it (test envs, etc.), addNode's default (0, 0) is the fallback
-    // and the user can drag the node into view.
-    const root = document.querySelector('.react-flow') as HTMLElement | null;
-    if (!root) return;
-    const rect = root.getBoundingClientRect();
-    const center = reactFlow.screenToFlowPosition({
-      x: rect.left + rect.width / 2,
-      y: rect.top + rect.height / 2,
-    });
-    // NODE_WIDTH / NODE_HEIGHT are the dagre layout defaults; offset
-    // so the card sits visually centered rather than top-left at the
-    // viewport center.
-    updateNodePosition(
-      key,
-      center.x - NODE_WIDTH / 2,
-      center.y - NODE_HEIGHT / 2
-    );
-  };
+  const handleAdd = useCallback(
+    (type: NodeType) => {
+      try {
+        const key = addNode(type);
+        if (!key) return;
+
+        const center = reactFlow.screenToFlowPosition({
+          x: window.innerWidth / 2,
+          y: window.innerHeight / 2,
+        });
+
+        // NODE_WIDTH / NODE_HEIGHT are the dagre layout defaults; offset
+        // so the card sits visually centered rather than top-left at the
+        // viewport center.
+        updateNodePosition(
+          key,
+          center.x - NODE_WIDTH / 2,
+          center.y - NODE_HEIGHT / 2
+        );
+      } catch (error) {
+        console.error('Erro ao adicionar node:', error);
+      }
+    },
+    [addNode, reactFlow, updateNodePosition]
+  );
 
   return (
     <DropdownMenu>
@@ -737,7 +741,7 @@ function CanvasAddNodeButton() {
         className="border-border bg-popover w-[268px] p-1.5"
       >
         {groupNodeTypesByCategory(ADD_NODE_TYPES).map((group, i) => (
-          <div key={group.id}>
+          <DropdownMenuGroup key={group.id}>
             {i > 0 && <DropdownMenuSeparator />}
             <DropdownMenuLabel className="text-muted-foreground px-2 py-1.5 text-[11px] font-semibold tracking-wider uppercase">
               {group.label}
@@ -747,7 +751,10 @@ function CanvasAddNodeButton() {
               return (
                 <DropdownMenuItem
                   key={t}
-                  onClick={() => handleAdd(t)}
+                  onSelect={(event) => {
+                    event.preventDefault();
+                    handleAdd(t);
+                  }}
                   className="gap-3 py-2"
                 >
                   <NodeIconChip
@@ -767,7 +774,7 @@ function CanvasAddNodeButton() {
                 </DropdownMenuItem>
               );
             })}
-          </div>
+          </DropdownMenuGroup>
         ))}
       </DropdownMenuContent>
     </DropdownMenu>
