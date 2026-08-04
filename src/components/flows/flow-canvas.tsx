@@ -707,19 +707,25 @@ function CanvasAddNodeButton() {
         const key = addNode(type);
         if (!key) return;
 
-        const center = reactFlow.screenToFlowPosition({
-          x: window.innerWidth / 2,
-          y: window.innerHeight / 2,
-        });
+        requestAnimationFrame(() => {
+          try {
+            const center = reactFlow.screenToFlowPosition({
+              x: window.innerWidth / 2,
+              y: window.innerHeight / 2,
+            });
 
-        // NODE_WIDTH / NODE_HEIGHT are the dagre layout defaults; offset
-        // so the card sits visually centered rather than top-left at the
-        // viewport center.
-        updateNodePosition(
-          key,
-          center.x - NODE_WIDTH / 2,
-          center.y - NODE_HEIGHT / 2
-        );
+            // NODE_WIDTH / NODE_HEIGHT are the dagre layout defaults; offset
+            // so the card sits visually centered rather than top-left at the
+            // viewport center.
+            updateNodePosition(
+              key,
+              center.x - NODE_WIDTH / 2,
+              center.y - NODE_HEIGHT / 2
+            );
+          } catch (error) {
+            console.error('Erro ao posicionar node novo:', error);
+          }
+        });
       } catch (error) {
         console.error('Erro ao adicionar node:', error);
       }
@@ -751,10 +757,7 @@ function CanvasAddNodeButton() {
               return (
                 <DropdownMenuItem
                   key={t}
-                  onSelect={(event) => {
-                    event.preventDefault();
-                    handleAdd(t);
-                  }}
+                  onClick={() => handleAdd(t)}
                   className="gap-3 py-2"
                 >
                   <NodeIconChip
