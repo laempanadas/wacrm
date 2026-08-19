@@ -33,6 +33,7 @@
  */
 
 import { supabaseAdmin } from "./admin-client";
+import { createOrderDeal, type OrderDeliveryKind, type OrderPaymentMethod } from "@/lib/orders/create-order";
 import {
   engineSendInteractiveButtons,
   engineSendInteractiveList,
@@ -43,6 +44,7 @@ import { decideFallback, resolveFallbackPolicy } from "./fallback";
 import {
   type CollectInputNodeConfig,
   type ConditionNodeConfig,
+  type CustomActionNodeConfig,
   type DispatchInboundInput,
   type DispatchInboundResult,
   type FlowNodeRow,
@@ -54,6 +56,7 @@ import {
   type SendMediaNodeConfig,
   type SendMessageNodeConfig,
   type SetTagNodeConfig,
+  type SetVarNodeConfig,
   type StartNodeConfig,
   type KeywordTriggerConfig,
 } from "./types";
@@ -116,7 +119,9 @@ export function isAutoAdvancing(node_type: string): boolean {
     node_type === "send_message" ||
     node_type === "send_media" ||
     node_type === "condition" ||
-    node_type === "set_tag"
+    node_type === "set_tag" ||
+    node_type === "set_var" ||
+    node_type === "custom_action"
   );
 }
 
@@ -176,14 +181,6 @@ async function loadActiveRunForContact(
   accountId: string,
   contactId: string,
 ): Promise<FlowRunRow | null> {
-  // The partial unique index `idx_one_active_run_per_contact` was
-  // rebuilt in migration 017 over `(account_id, contact_id)` — so
-  // "two active runs for one contact in one account" is impossible
-  // by design. But a future migration glitch or manual SQL could
-  // create one, and .maybeSingle() throws on >1 row — which would
-  // kill dispatch for that contact's webhook entirely. .limit(1) is
-  // forgiving: pick the newest, let the cron sweep clean up the
-  // stale one.
   const { data, error } = await db
     .from("flow_runs")
     .select("*")
@@ -216,15 +213,6 @@ async function loadFlow(
   return (data as FlowRow | null) ?? null;
 }
 
-/**
- * Load every node of a flow in one round trip and key them by
- * `node_key`. The advance loop is then in-memory — a 5-node
- * auto-advancing chain costs one SELECT, not five.
- *
- * Returns an empty map on error so the caller can still dispatch
- * cleanly (every subsequent .get() returns undefined → the run
- * fails with node_not_found, same as the old per-node lookup).
- */
 async function loadAllNodes(
   db: AdminClient,
   flowId: string,
@@ -267,30 +255,16 @@ async function logEvent(
     payload,
   });
   if (error) {
-    // Logging failure is non-fatal — surface but don't throw.
     console.error("[flows] logEvent error:", error.message);
   }
 }
 
-/**
- * Idempotency check — has a `reply_received` event with this Meta
- * message_id already been recorded for any of the contact's flow
- * runs? If yes, the inbound is a duplicate (Meta retry) and we
- * exit without re-advancing.
- *
- * Implementation note: scoped to runs belonging to this user/contact
- * so the lookup is cheap (the index on flow_run_events(flow_run_id,
- * event_type) plus the small set of runs per contact).
- */
 async function isDuplicateInbound(
   db: AdminClient,
   accountId: string,
   contactId: string,
   metaMessageId: string,
 ): Promise<boolean> {
-  // Fetch ALL run ids for this contact in this account (active +
-  // historical). Bounded by how many flows the customer has been
-  // through — small.
   const { data: runs } = await db
     .from("flow_runs")
     .select("id")
@@ -308,11 +282,6 @@ async function isDuplicateInbound(
   return (count ?? 0) > 0;
 }
 
-/**
- * Format a number as Brazilian Real (e.g. 27.5 → "R$ 27,50"). Kept
- * local to the engine so seeding a run's vars from a catalog cart
- * doesn't pull in a UI-layer currency helper.
- */
 function formatBRLNumber(value: number): string {
   return `R$ ${value.toFixed(2).replace(".", ",")}`;
 }
@@ -323,15 +292,8 @@ async function findEntryFlow(
   message: ParsedInbound,
   isFirstInbound: boolean,
 ): Promise<FlowRow | null> {
-  // Interactive replies are responses to existing prompts; they never
-  // start a new flow. Text messages and catalog orders (a cart sent
-  // from the Meta product catalog) are the only inbound kinds that can
-  // match an entry trigger.
   if (message.kind === "interactive_reply") return null;
 
-  // Pull all active flows for this account. Active set is bounded
-  // (the builder discourages double-trigger overlap; partial index
-  // makes the lookup index-supported).
   const { data: flows, error } = await db
     .from("flows")
     .select("*")
@@ -348,15 +310,10 @@ async function findEntryFlow(
   const typed = flows as FlowRow[];
   for (const flow of typed) {
     if (flow.trigger_type === "catalog_order") {
-      // A catalog cart submission starts any flow wired to it. This is
-      // the La Empanadas ordering flow: the customer builds the cart in
-      // the Meta catalog, and the bot takes over to collect delivery +
-      // payment. Only catalog_order inbound matches this trigger.
       if (message.kind === "catalog_order") {
         return flow;
       }
     } else if (flow.trigger_type === "keyword") {
-      // Keyword triggers only ever fire on typed text.
       if (
         message.kind === "text" &&
         matchesKeywordTrigger(
@@ -367,22 +324,16 @@ async function findEntryFlow(
         return flow;
       }
     } else if (flow.trigger_type === "first_inbound_message" && isFirstInbound) {
-      // first_inbound fires on the contact's first message regardless of
-      // kind, but a catalog order should be reserved for catalog_order
-      // flows so it doesn't accidentally trip a generic welcome flow.
       if (message.kind === "text") {
         return flow;
       }
     }
-    // 'manual' triggers do not auto-start from inbound messages.
   }
   return null;
 }
 
 // ============================================================
-// Node executors — each handles ONE node type. send_buttons and
-// send_list also persist `last_prompt_message_id` so the inbox
-// thread can quote the prompt the customer is replying to.
+// Node executors — each handles ONE node type.
 // ============================================================
 
 async function sendButtonsAndSuspend(
@@ -405,8 +356,6 @@ async function sendButtonsAndSuspend(
     node_type: "send_buttons",
     whatsapp_message_id,
   });
-  // Look up our internal message id so we can stash it on the run.
-  // Cheap — indexed on `messages.message_id`.
   const { data: msg } = await db
     .from("messages")
     .select("id")
@@ -487,18 +436,6 @@ async function executeHandoff(
   await endRun(db, run.id, "handed_off", "handoff_node");
 }
 
-/**
- * Resolve a condition node's subject value from DB / run state, then
- * call the pure `evaluateConditionPredicate`. Splits out so the
- * predicate itself stays unit-testable without a Supabase mock.
- *
- * Subject sources:
- *   - `var` → `flow_runs.vars[subject_key]` (captured by collect_input
- *     or http_fetch in v2).
- *   - `tag` → present iff `contact_tags(contact_id, tag_id)` exists.
- *     `subject_key` IS the tag UUID; the SELECT returns 1 row or 0.
- *   - `contact_field` → one of name/email/phone/company on `contacts`.
- */
 async function evaluateConditionNode(
   db: AdminClient,
   run: FlowRunRow,
@@ -514,10 +451,6 @@ async function evaluateConditionNode(
       .select("contact_id", { count: "exact", head: true })
       .eq("contact_id", run.contact_id!)
       .eq("tag_id", cfg.subject_key);
-    // For tags, "present" really is the only meaningful test — the
-    // `present`/`absent` operators are the natural fit. equals/contains
-    // against a tag UUID would still work mechanically (compare its
-    // existence to the value).
     subjectValue = (count ?? 0) > 0 ? cfg.subject_key : undefined;
   } else {
     const ALLOWED = ["name", "email", "phone", "company"] as const;
@@ -540,12 +473,6 @@ async function evaluateConditionNode(
   });
 }
 
-/**
- * Tiny `{{vars.foo}}` interpolation. Used by send_message + collect_input
- * prompt text so a captured `name` can show up in the next prompt
- * ("Thanks {{vars.name}}, what's your email?"). Missing vars render as
- * empty string — the same behavior as the automations engine.
- */
 function interpolateVars(template: string, vars: Record<string, unknown>): string {
   if (!template) return "";
   return template.replace(/\{\{vars\.([a-zA-Z0-9_]+)\}\}/g, (_, key) => {
@@ -571,10 +498,7 @@ async function endRun(
 }
 
 // ============================================================
-// The synchronous advance loop. Walks through auto-advance nodes
-// until it hits one that suspends (send_buttons/send_list) or
-// terminates (handoff/end). Each suspending node persists the
-// new current_node_key before returning.
+// The synchronous advance loop.
 // ============================================================
 
 async function advanceFromNodeKey(
@@ -584,8 +508,6 @@ async function advanceFromNodeKey(
   nodes: Map<string, FlowNodeRow>,
 ): Promise<{ outcome: "advanced" | "completed" | "handed_off" }> {
   let currentKey: string | null = startNodeKey;
-  // Defensive cap — if a flow has a cycle (which the validator
-  // SHOULD catch but doesn't yet in v1), we bail rather than loop.
   for (let safety = 0; safety < 64; safety += 1) {
     if (!currentKey) {
       await logEvent(db, run.id, "error", null, {
@@ -615,7 +537,7 @@ async function advanceFromNodeKey(
       try {
         const { whatsapp_message_id } = await engineSendText({
           accountId: run.account_id,
-    userId: run.user_id,
+          userId: run.user_id,
           conversationId: run.conversation_id!,
           contactId: run.contact_id!,
           text: interpolateVars(cfg.text, run.vars),
@@ -640,7 +562,7 @@ async function advanceFromNodeKey(
       try {
         const { whatsapp_message_id } = await engineSendMedia({
           accountId: run.account_id,
-    userId: run.user_id,
+          userId: run.user_id,
           conversationId: run.conversation_id!,
           contactId: run.contact_id!,
           kind: cfg.media_type,
@@ -667,13 +589,11 @@ async function advanceFromNodeKey(
       continue;
     }
     if (node.node_type === "collect_input") {
-      // Send the prompt and suspend. Customer's next TEXT reply will
-      // wake us up via handleReplyForActiveRun's collect_input branch.
       const cfg = node.config as unknown as CollectInputNodeConfig;
       try {
         const { whatsapp_message_id } = await engineSendText({
           accountId: run.account_id,
-    userId: run.user_id,
+          userId: run.user_id,
           conversationId: run.conversation_id!,
           contactId: run.contact_id!,
           text: interpolateVars(cfg.prompt_text, run.vars),
@@ -755,8 +675,6 @@ async function advanceFromNodeKey(
             .eq("tag_id", cfg.tag_id);
         }
       } catch (err) {
-        // Non-fatal — log + advance. A tag-write failure shouldn't
-        // strand the customer mid-flow.
         await logEvent(db, run.id, "error", node.node_key, {
           reason: "set_tag_failed",
           detail: err instanceof Error ? err.message : String(err),
@@ -765,9 +683,85 @@ async function advanceFromNodeKey(
       currentKey = cfg.next_node_key;
       continue;
     }
+    if (node.node_type === "set_var") {
+      const cfg = node.config as unknown as SetVarNodeConfig;
+      try {
+        if (cfg.var_key) {
+          const interpolated = interpolateVars(cfg.value, run.vars);
+          const newVars = { ...run.vars, [cfg.var_key]: interpolated };
+          const { error } = await db
+            .from("flow_runs")
+            .update({ vars: newVars })
+            .eq("id", run.id);
+          if (!error) {
+            run.vars = newVars;
+            await logEvent(db, run.id, "node_entered", node.node_key, {
+              var_key: cfg.var_key,
+              var_value: interpolated,
+            });
+          }
+        }
+      } catch (err) {
+        await logEvent(db, run.id, "error", node.node_key, {
+          reason: "set_var_failed",
+          detail: err instanceof Error ? err.message : String(err),
+        });
+      }
+      currentKey = cfg.next_node_key;
+      continue;
+    }
+    if (node.node_type === "custom_action") {
+      const cfg = node.config as unknown as CustomActionNodeConfig;
+      
+      if (cfg.action === "create_order_deal") {
+        try {
+          const {
+            nome,
+            total,
+            endereco,
+            delivery_type,
+            payment_method,
+          } = run.vars as Record<string, unknown>;
+
+          if (!nome || total === undefined || !delivery_type) {
+            throw new Error("Missing required order vars: nome, total, delivery_type");
+          }
+
+          const result = await createOrderDeal(
+            supabaseAdmin(),
+            { accountId: run.account_id, userId: run.user_id },
+            {
+              contactId: run.contact_id!,
+              customerName: String(nome),
+              deliveryKind: String(delivery_type) as OrderDeliveryKind,
+              paymentMethod: (payment_method || "pix") as OrderPaymentMethod,
+              total: Number(total),
+              deliveryAddress:
+                delivery_type === "delivery" ? String(endereco) : undefined,
+              paidOnline: payment_method === "mercado_pago",
+              conversationId: run.conversation_id,
+            }
+          );
+
+          await logEvent(db, run.id, "node_entered", node.node_key, {
+            action_type: "create_order_deal",
+            deal_id: result.dealId,
+            tag: result.tagName,
+          });
+        } catch (err) {
+          console.error("[flows] create_order_deal error:", err);
+          await logEvent(db, run.id, "error", node.node_key, {
+            reason: "create_order_deal_failed",
+            detail: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      
+      currentKey = cfg.next_node_key;
+      continue;
+    }
     if (node.node_type === "send_buttons") {
       await sendButtonsAndSuspend(db, run, node);
-      // Persist the new current_node_key via optimistic UPDATE.
       const advanced = await advanceCurrentNodeKey(
         db,
         run.id,
@@ -805,14 +799,12 @@ async function advanceFromNodeKey(
       await endRun(db, run.id, "completed", "end_node");
       return { outcome: "completed" };
     }
-    // Unknown node type — shouldn't happen given the CHECK constraint.
     await logEvent(db, run.id, "error", node.node_key, {
       reason: `unknown_node_type:${node.node_type}`,
     });
     await endRun(db, run.id, "failed", "unknown_node_type");
     return { outcome: "completed" };
   }
-  // Safety break — log + fail.
   await logEvent(db, run.id, "error", currentKey, {
     reason: "advance_loop_safety_break",
   });
@@ -820,20 +812,12 @@ async function advanceFromNodeKey(
   return { outcome: "completed" };
 }
 
-/**
- * Optimistic UPDATE — only advance current_node_key when it matches
- * the value we read at the top of dispatch. If another webhook beat
- * us, the row's pointer has already moved and our UPDATE returns
- * zero rows; we treat that as a no-op and let the other run continue.
- */
 async function advanceCurrentNodeKey(
   db: AdminClient,
   runId: string,
   expectedOldKey: string | null,
   newKey: string,
 ): Promise<boolean> {
-  // PostgREST: when expectedOldKey is null we can't `.eq` (would match
-  // any row); use `.is('current_node_key', null)` instead.
   let q = db
     .from("flow_runs")
     .update({
@@ -870,9 +854,6 @@ export async function dispatchInboundToFlows(
       input.contactId,
     );
 
-    // Idempotency — only matters if there's already a run for this
-    // contact. For new runs, the partial unique index catches duplicate
-    // starts at INSERT time.
     if (activeRun) {
       const dupe = await isDuplicateInbound(
         db,
@@ -887,13 +868,10 @@ export async function dispatchInboundToFlows(
           outcome: "duplicate_inbound_ignored",
         };
       }
-      // One SELECT for the whole flow's nodes — advance loop is now
-      // in-memory. See loadAllNodes.
       const nodes = await loadAllNodes(db, activeRun.flow_id);
       return handleReplyForActiveRun(db, activeRun, input.message, nodes);
     }
 
-    // No active run → look for a flow whose entry trigger matches.
     const flow = await findEntryFlow(
       db,
       input.accountId,
@@ -920,13 +898,6 @@ async function handleReplyForActiveRun(
   message: ParsedInbound,
   nodes: Map<string, FlowNodeRow>,
 ): Promise<DispatchInboundResult> {
-  // Note: we intentionally do NOT persist the raw customer text. A
-  // `collect_input` prompt that asks "what's your card number?" would
-  // otherwise leave the PAN sitting in flow_run_events.payload forever,
-  // visible to anyone with access to the runs viewer or the events
-  // table. Length is enough for "did they actually reply?" debugging;
-  // for the captured value itself, the `node_entered` event already
-  // records `captured_key` + `captured_length` after the var is stored.
   await logEvent(db, run.id, "reply_received", run.current_node_key, {
     meta_message_id: message.meta_message_id,
     reply_kind: message.kind,
@@ -935,8 +906,6 @@ async function handleReplyForActiveRun(
   });
 
   if (!run.current_node_key) {
-    // Defensive — a run with status='active' but no current node is
-    // malformed. Fail the run rather than spin.
     await endRun(db, run.id, "failed", "active_run_missing_current_node");
     return {
       consumed: true,
@@ -951,11 +920,6 @@ async function handleReplyForActiveRun(
     return { consumed: true, flow_run_id: run.id, outcome: "no_match" };
   }
 
-  // Two ways a reply can advance:
-  //   1. Interactive button/list tap on a send_buttons/send_list node.
-  //   2. Text reply on a collect_input node — capture into vars.
-  //
-  // Everything else falls through to the fallback policy below.
   let matched: string | null = null;
   if (
     message.kind === "interactive_reply" &&
@@ -970,7 +934,6 @@ async function handleReplyForActiveRun(
     const cfg = currentNode.config as unknown as CollectInputNodeConfig;
     const captured = message.text.trim();
     if (captured.length > 0 && cfg.var_key) {
-      // Persist captured value + reset reprompt count atomically.
       const newVars = { ...run.vars, [cfg.var_key]: captured };
       const { error: capErr } = await db
         .from("flow_runs")
@@ -980,9 +943,6 @@ async function handleReplyForActiveRun(
         })
         .eq("id", run.id);
       if (!capErr) {
-        // Mirror the UPDATE in-memory so downstream interpolation in
-        // the advance loop sees the captured var without us having to
-        // re-SELECT the whole row.
         run.vars = newVars;
         run.reprompt_count = 0;
         await logEvent(db, run.id, "node_entered", currentNode.node_key, {
@@ -995,13 +955,6 @@ async function handleReplyForActiveRun(
   }
 
   if (matched) {
-    // Reset reprompt count on a successful match. Skip the write when
-    // already 0 — the collect_input capture branch above already
-    // zeroed it, and interactive-reply matches against a fresh run
-    // (post-prior-reset) are also already 0. The previous re-read of
-    // the whole row was needed only because we weren't mirroring the
-    // capture UPDATE into the in-memory `run`; now that we do, the
-    // local copy is the source of truth.
     if (run.reprompt_count !== 0) {
       const { error } = await db
         .from("flow_runs")
@@ -1017,7 +970,6 @@ async function handleReplyForActiveRun(
     };
   }
 
-  // No match → fallback. Apply the policy.
   const policy = resolveFallbackPolicy(
     (await loadFlow(db, run.flow_id))?.fallback_policy,
   );
@@ -1033,23 +985,19 @@ async function handleReplyForActiveRun(
     reprompt_count: newReprompts,
   });
   if (action.type === "ignore") {
-    // Don't consume — let automations have a shot at it.
     return { consumed: false, flow_run_id: run.id, outcome: "no_match" };
   }
   if (action.type === "reprompt") {
-    // Re-send the same prompt. Same node, no current_node_key change.
     if (currentNode.node_type === "send_buttons") {
       await sendButtonsAndSuspend(db, run, currentNode);
     } else if (currentNode.node_type === "send_list") {
       await sendListAndSuspend(db, run, currentNode);
     } else if (currentNode.node_type === "collect_input") {
-      // Customer typed something we couldn't accept (empty after trim,
-      // or var_key missing — rare). Re-send the prompt so they try again.
       const cfg = currentNode.config as unknown as CollectInputNodeConfig;
       try {
         await engineSendText({
           accountId: run.account_id,
-    userId: run.user_id,
+          userId: run.user_id,
           conversationId: run.conversation_id!,
           contactId: run.contact_id!,
           text: interpolateVars(cfg.prompt_text, run.vars),
@@ -1076,7 +1024,6 @@ async function handleReplyForActiveRun(
     await endRun(db, run.id, "handed_off", "fallback_exhausted");
     return { consumed: true, flow_run_id: run.id, outcome: "handed_off" };
   }
-  // action.type === 'end'
   await endRun(db, run.id, "completed", "fallback_exhausted_end");
   return { consumed: true, flow_run_id: run.id, outcome: "completed" };
 }
@@ -1087,14 +1034,6 @@ async function startNewRun(
   input: DispatchInboundInput,
   nodes: Map<string, FlowNodeRow>,
 ): Promise<DispatchInboundResult> {
-  // INSERT — partial unique index `idx_one_active_run_per_contact`
-  // catches concurrent inserts with 23505. We catch and return as
-  // consumed:true (the parallel webhook handles it).
-  // Seed the run's vars from a catalog cart when the flow was started
-  // by a Meta catalog order. This puts the cart summary, total and raw
-  // line items in scope so the ordering flow can render them with
-  // `{{vars.itens_texto}}` / `{{vars.total}}` and generate a Mercado
-  // Pago link for the exact cart amount without asking again.
   const seedVars: Record<string, unknown> =
     input.message.kind === "catalog_order"
       ? {
@@ -1109,13 +1048,7 @@ async function startNewRun(
     .from("flow_runs")
     .insert({
       flow_id: flow.id,
-      // Tenancy: NOT NULL post-017. The partial unique index
-      // `idx_one_active_run_per_contact` is over (account_id,
-      // contact_id) WHERE status='active', so two accounts sharing
-      // a contact phone number each run their own flows independently.
       account_id: flow.account_id,
-      // Audit: preserves the flow's author on the run row for log
-      // attribution.
       user_id: flow.user_id,
       contact_id: input.contactId,
       conversation_id: input.conversationId,
@@ -1126,7 +1059,6 @@ async function startNewRun(
     .select("*")
     .maybeSingle();
   if (insErr) {
-    // 23505 = unique_violation → another webhook is starting the run.
     const msg = insErr.message ?? "";
     if (msg.includes("23505") || msg.includes("duplicate key")) {
       return { consumed: true, outcome: "duplicate_inbound_ignored" };
@@ -1140,23 +1072,13 @@ async function startNewRun(
     trigger_type: flow.trigger_type,
     meta_message_id: input.message.meta_message_id,
   });
-  // Bump the flow's execution counter — used by the builder UI to
-  // surface "X runs since activation" on the flow card.
-  //
-  // Atomic RPC (migration 012) rather than read-modify-write: two
-  // concurrent webhooks starting runs for different contacts on the
-  // same flow would otherwise both read N and both write N+1, losing
-  // a count. Mirrors the automations engine's use of
-  // `increment_automation_execution_count` (migration 007).
   const { error: incErr } = await db.rpc("increment_flow_execution_count", {
     p_flow_id: flow.id,
   });
   if (incErr) {
-    // Non-fatal — the run itself succeeded; only the counter is off.
     console.error("[flows] execution_count rpc error:", incErr.message);
   }
 
-  // Run the advance loop starting from the entry node.
   const outcome = await advanceFromNodeKey(db, run, flow.entry_node_id!, nodes);
   return {
     consumed: true,
