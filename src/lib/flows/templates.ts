@@ -22,11 +22,13 @@
 import type {
   CollectInputNodeConfig,
   ConditionNodeConfig,
+  CustomActionNodeConfig,
   HandoffNodeConfig,
   KeywordTriggerConfig,
   SendButtonsNodeConfig,
   SendListNodeConfig,
   SendMessageNodeConfig,
+  SetVarNodeConfig,
   StartNodeConfig,
 } from './types';
 import { PEDIDO_EMPANADAS_FLOW } from './pedido-empanadas-flow';
@@ -39,6 +41,8 @@ export type FlowTemplateNodeType =
   | 'collect_input'
   | 'condition'
   | 'set_tag'
+  | 'set_var'
+  | 'custom_action'
   | 'handoff'
   | 'end';
 
@@ -52,6 +56,8 @@ export interface FlowTemplateNode {
     | SendListNodeConfig
     | CollectInputNodeConfig
     | ConditionNodeConfig
+    | SetVarNodeConfig
+    | CustomActionNodeConfig
     | HandoffNodeConfig
     | Record<string, unknown>;
 }
