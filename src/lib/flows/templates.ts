@@ -19,33 +19,28 @@
  * way to add the next template.
  */
 
+/* ⚠️ [CORREÇÃO]: Importando os tipos unificados direto de `./types` para evitar duplicidade e inconsistência */
 import type {
   CollectInputNodeConfig,
   ConditionNodeConfig,
   CustomActionNodeConfig,
+  FlowNodeType,
   HandoffNodeConfig,
   KeywordTriggerConfig,
   SendButtonsNodeConfig,
   SendListNodeConfig,
+  SendMediaNodeConfig,
   SendMessageNodeConfig,
+  SetTagNodeConfig,
   SetVarNodeConfig,
   StartNodeConfig,
 } from './types';
 import { PEDIDO_EMPANADAS_FLOW } from './pedido-empanadas-flow';
 
-export type FlowTemplateNodeType =
-  | 'start'
-  | 'send_message'
-  | 'send_buttons'
-  | 'send_list'
-  | 'collect_input'
-  | 'condition'
-  | 'set_tag'
-  | 'set_var'
-  | 'custom_action'
-  | 'handoff'
-  | 'end';
+/* ⚠️ [CORREÇÃO]: Reutiliza FlowNodeType de types.ts, garantindo sincronia total com 'set_var', 'send_media', etc. */
+export type FlowTemplateNodeType = FlowNodeType;
 
+/* ⚠️ [CORREÇÃO]: A união de config agora contempla todos os nós possíveis sem omitir nenhum */
 export interface FlowTemplateNode {
   node_key: string;
   node_type: FlowTemplateNodeType;
@@ -54,8 +49,10 @@ export interface FlowTemplateNode {
     | SendMessageNodeConfig
     | SendButtonsNodeConfig
     | SendListNodeConfig
+    | SendMediaNodeConfig
     | CollectInputNodeConfig
     | ConditionNodeConfig
+    | SetTagNodeConfig
     | SetVarNodeConfig
     | CustomActionNodeConfig
     | HandoffNodeConfig
@@ -67,7 +64,7 @@ export interface FlowTemplate {
   name: string;
   description: string;
   /** Used by the gallery to surface a relevant icon. lucide-react name. */
-  icon: 'MessageSquare' | 'HelpCircle' | 'UserPlus';
+  icon: 'MessageSquare' | 'HelpCircle' | 'UserPlus' | string;
   trigger_type: 'keyword' | 'first_inbound_message' | 'catalog_order' | 'manual';
   trigger_config: KeywordTriggerConfig | Record<string, unknown>;
   entry_node_id: string;
