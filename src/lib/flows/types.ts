@@ -11,7 +11,7 @@
  *     `FlowNodeConfig` so the engine's exhaustiveness checks light up.
  *   - Edges live INSIDE the config (each button row / list row carries
  *     `next_node_key`). The DB schema doesn't model this — the
- *     validator (PR #3) catches missing or orphan edges at save time.
+ *     validator catches missing or orphan edges at save time.
  *
  * `next_node_key` is the stable string id stored in `flow_nodes.node_key`,
  * not a UUID, so flows can be cloned / templated without rewriting
@@ -73,13 +73,6 @@ export interface SendListNodeConfig {
  * auto-advances. The media file is uploaded to the `flow-media`
  * Supabase Storage bucket by the builder; `media_url` is the public
  * URL Meta fetches at send time.
- *
- * Why one node with a `media_type` discriminator (rather than three
- * separate node types): Meta's send-side payload differs only in the
- * top-level key (`image` / `video` / `document`) and the
- * filename-on-document quirk. Modeling three node types would triple
- * the builder forms, engine cases, and add-menu entries for no
- * meaningful behavioural difference.
  */
 export interface SendMediaNodeConfig {
   media_type: "image" | "video" | "document";
@@ -89,8 +82,7 @@ export interface SendMediaNodeConfig {
   caption?: string;
   /**
    * Filename shown in the recipient's chat. Documents only — Meta
-   * ignores it for image/video. Defaults to the file's original name
-   * at upload time; the user can edit it.
+   * ignores it for image/video.
    */
   filename?: string;
   /** Auto-advance target after the send lands at Meta. */
@@ -110,24 +102,17 @@ export interface HandoffNodeConfig {
 /**
  * Captures the customer's next free-text reply into
  * `flow_runs.vars[var_key]`, then advances.
- *
- * v1.5 ships without runtime validation (`validation` is accepted on
- * the config for forward compat but ignored by the runner); the
- * builder still surfaces the field so users can author flows that
- * v2 will start enforcing.
  */
 export interface CollectInputNodeConfig {
   /** Prompt text sent to the customer before they reply. */
   prompt_text: string;
   /**
    * Key under which to store the captured text in
-   * `flow_runs.vars`. Stable identifier — used by downstream
-   * `condition` nodes and `handoff` notes via interpolation.
+   * `flow_runs.vars`.
    */
   var_key: string;
   /**
-   * Reserved for v2. Accepted on the config but ignored by the v1.5
-   * runner — captures any non-empty text.
+   * Reserved for validation (accepts 'any' | 'email' | 'phone' | 'regex').
    */
   validation?: "any" | "email" | "phone" | "regex";
   /** Used only when `validation === 'regex'`. */
@@ -146,19 +131,18 @@ export type ConditionSubject = "var" | "tag" | "contact_field";
 
 /**
  * Routes the run based on a predicate over the contact's tags,
- * profile fields, or stored vars. Always auto-advances — no Meta
- * call, no customer-side input.
+ * profile fields, or stored vars.
  */
 export interface ConditionNodeConfig {
   subject: ConditionSubject;
   /**
    * For `var`: the key in flow_runs.vars.
-   * For `tag`: the tag UUID (matched against contact_tags).
+   * For `tag`: the tag UUID.
    * For `contact_field`: one of 'name' | 'email' | 'phone' | 'company'.
    */
   subject_key: string;
   operator: ConditionOperator;
-  /** Compared against `subject` for `equals`/`contains`. Ignored for `present`/`absent`. */
+  /** Compared against `subject` for `equals`/`contains`. */
   value?: string;
   /** Node to advance to when the predicate evaluates true. */
   true_next: string;
@@ -168,7 +152,7 @@ export interface ConditionNodeConfig {
 
 export interface SetTagNodeConfig {
   mode: "add" | "remove";
-  /** Tag UUID. The builder picks from the user's existing tags. */
+  /** Tag UUID. */
   tag_id: string;
   next_node_key: string;
 }
@@ -196,8 +180,6 @@ export type EndNodeConfig = Record<string, never>;
 
 /**
  * Total union — every concrete node_type the engine understands.
- * Add new node types here and the engine's switch will flag missing
- * cases via TypeScript's exhaustiveness check.
  */
 export type FlowNodeConfig =
   | { node_type: "start"; config: StartNodeConfig }
@@ -215,7 +197,7 @@ export type FlowNodeConfig =
 
 export type FlowNodeType = FlowNodeConfig["node_type"];
 
-/** Alias para os templates estáticos exportados pelos utilitários de fluxo */
+/** Alias para os templates estáticos consumidos pelos fluxos */
 export type FlowTemplateNodeType = FlowNodeType;
 
 // ============================================================
@@ -223,15 +205,11 @@ export type FlowTemplateNodeType = FlowNodeType;
 // ============================================================
 
 export interface KeywordTriggerConfig {
-  /** One or more keywords. Match is case-insensitive by default. */
   keywords: string[];
   match_type?: "exact" | "contains";
   case_sensitive?: boolean;
 }
 
-// No knobs in v1 — the trigger has a single semantic. Kept as a type
-// alias (not an empty interface) for forward compat without tripping
-// the no-empty-object-type lint rule.
 export type FirstInboundTriggerConfig = Record<string, never>;
 
 export type FlowTriggerConfig =
@@ -246,11 +224,7 @@ export type FlowTriggerConfig =
 
 export interface FlowRow {
   id: string;
-  /** Account tenancy (NOT NULL post-017). The engine looks up active
-   *  flows for inbound dispatch using this field. */
   account_id: string;
-  /** Author. Used as a default sender-of-record on engine sends and
-   *  preserved on flow_runs for log/audit display. */
   user_id: string;
   name: string;
   description: string | null;
@@ -279,9 +253,7 @@ export interface FlowNodeRow {
 export interface FlowRunRow {
   id: string;
   flow_id: string;
-  /** Tenancy. Matches flows.account_id; NOT NULL post-017. */
   account_id: string;
-  /** Audit. Matches the parent flow.user_id. */
   user_id: string;
   contact_id: string | null;
   conversation_id: string | null;
@@ -307,13 +279,9 @@ export interface FlowRunRow {
 // ============================================================
 
 export interface FlowFallbackPolicy {
-  /** What to do when the customer reply doesn't match any option. */
   on_unknown_reply: "reprompt" | "handoff" | "ignore";
-  /** Max reprompts before applying `on_exhaust`. */
   max_reprompts: number;
-  /** Stale-run sweep cutoff. */
   on_timeout_hours: number;
-  /** What to do once max_reprompts has been hit. */
   on_exhaust: "handoff" | "end";
 }
 
@@ -328,42 +296,22 @@ export const DEFAULT_FALLBACK_POLICY: FlowFallbackPolicy = {
 // Engine input — what `dispatchInboundToFlows` accepts
 // ============================================================
 
-/**
- * Normalised view of an inbound message that the runner needs. The
- * webhook lifts this out of the raw Meta payload before invoking the
- * runner; keeps the runner free of any WhatsApp-API specifics.
- */
 export type ParsedInbound =
   | {
       kind: "text";
-      /** The user's typed message body. */
       text: string;
-      /** Meta's `messages[0].id` — used for idempotency. */
       meta_message_id: string;
     }
   | {
       kind: "interactive_reply";
-      /** The reply_id of the tapped button or list row. */
       reply_id: string;
-      /** The visible title of the tapped option (for logging). */
       reply_title: string;
       meta_message_id: string;
     }
   | {
-      /**
-       * A cart submitted from the Meta (WhatsApp Business) product
-       * catalog. The customer picked items in the catalog and hit
-       * "Send order"; Meta delivers a `messages[0].type === 'order'`
-       * payload. The webhook lifts it into this shape so a flow with
-       * `trigger_type === 'catalog_order'` can start with the cart
-       * already captured into the run's vars.
-       */
       kind: "catalog_order";
-      /** Human-readable PT-BR cart summary (one line per item + total). */
       text: string;
-      /** Order total in the account currency (Σ quantity * unit_price). */
       total: number;
-      /** Line items. Meta only sends the retailer SKU, not the name. */
       items: Array<{
         retailer_id: string;
         quantity: number;
@@ -373,11 +321,7 @@ export type ParsedInbound =
     };
 
 export interface DispatchInboundInput {
-  /** Account tenancy key. Drives the lookup of active flows and the
-   *  idempotency check for previously-seen inbound message_ids. */
   accountId: string;
-  /** Sender-of-record for the bot's outbound prompts on engine
-   *  sends. Set by the webhook to the WhatsApp config owner. */
   userId: string;
   contactId: string;
   conversationId: string;
@@ -385,15 +329,8 @@ export interface DispatchInboundInput {
 }
 
 export interface DispatchInboundResult {
-  /**
-   * True iff the runner handled the message — it either advanced an
-   * existing run or started a new one matching a flow trigger.
-   * Webhook uses this to decide whether to also fire automations.
-   */
   consumed: boolean;
-  /** For diagnostics / logging — null when not consumed. */
   flow_run_id?: string;
-  /** For diagnostics. */
   outcome?:
     | "advanced"
     | "started"
@@ -408,10 +345,6 @@ export interface DispatchInboundResult {
 // Helpers — exhaustiveness assertions
 // ============================================================
 
-/**
- * Throws a typed compile-time error if the switch over a discriminated
- * union forgets a case. Used in the engine's node-type switch.
- */
 export function assertNever(x: never): never {
   throw new Error(`Unhandled node type: ${JSON.stringify(x)}`);
 }
