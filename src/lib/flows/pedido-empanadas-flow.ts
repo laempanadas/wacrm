@@ -9,24 +9,18 @@
  *       (Pix / Cartão / Mercado Pago).
  *   3b. Retirada  → pagamento COM dinheiro
  *       (Pix / Cartão / Dinheiro / Mercado Pago).
- *   4. Confirmação final específica para cada forma de pagamento.
+ *   4. Gravação das variáveis de controle (`tipo_entrega`, `forma_pagamento`).
+ *   5. Execução da ação customizada `create_order_deal` para criação do card no pipeline.
+ *   6. Confirmação final específica para cada forma de pagamento e handoff.
  *
  * Regras de negócio (La Empanadas):
  *   - Delivery é feito via 99/Uber, então o cliente paga ANTES
  *     (Pix, Cartão ou link do Mercado Pago). Dinheiro não é aceito.
  *   - Retirada no local aceita Dinheiro, Pix, Cartão e Mercado Pago.
  *
- * Este é um TEMPLATE conversacional (mesma forma dos demais em
- * `templates.ts`) — usa apenas os tipos de nó já suportados pelo
- * engine (start / send_message / collect_input / send_buttons /
- * send_list / handoff). O engine de flows não cria negociações; a
- * criação automática do card no pipeline "Pedidos Delivery" é feita
- * pelo endpoint `/api/orders` (veja `src/lib/orders/create-order.ts`),
- * que o frontend/automação chama ao final do fluxo com os dados
- * coletados (nome, tipo, endereço, forma de pagamento e valor).
- *
- * O nó de `handoff` final entrega a conversa a um atendente com um
- * resumo do pedido na nota, para conferência e registro.
+ * O nó de `custom_action` (com `create_order_deal`) dispara no backend a criação
+ * do card de negociação na etapa/pipeline de pedidos. Em seguida, o nó de `handoff`
+ * entrega a conversa ao atendente com o resumo do pedido na nota.
  *
  * ⚠️ O texto das mensagens segue o roteiro aprovado do La Empanadas —
  * altere com cuidado.
@@ -35,10 +29,12 @@
 import type { FlowTemplate } from './templates';
 import type {
   CollectInputNodeConfig,
+  CustomActionNodeConfig,
   HandoffNodeConfig,
   SendButtonsNodeConfig,
   SendListNodeConfig,
   SendMessageNodeConfig,
+  SetVarNodeConfig,
 } from './types';
 
 export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
@@ -78,8 +74,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
       node_key: 'ask_name',
       node_type: 'collect_input',
       config: {
-        prompt_text:
-          'Qual é o seu nome completo?',
+        prompt_text: 'Qual é o seu nome completo?',
         var_key: 'nome',
         next_node_key: 'ask_delivery_type',
       } as CollectInputNodeConfig,
@@ -95,15 +90,35 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
           {
             reply_id: 'delivery',
             title: '1️⃣ Delivery',
-            next_node_key: 'ask_address',
+            next_node_key: 'set_delivery_type_delivery',
           },
           {
             reply_id: 'retirada',
             title: '2️⃣ Retirada',
-            next_node_key: 'ask_payment_retirada',
+            next_node_key: 'set_delivery_type_retirada',
           },
         ],
       } as SendButtonsNodeConfig,
+    },
+
+    // Gravadores do tipo de recebimento
+    {
+      node_key: 'set_delivery_type_delivery',
+      node_type: 'set_var',
+      config: {
+        var_key: 'tipo_entrega',
+        value: 'delivery',
+        next_node_key: 'ask_address',
+      } as SetVarNodeConfig,
+    },
+    {
+      node_key: 'set_delivery_type_retirada',
+      node_type: 'set_var',
+      config: {
+        var_key: 'tipo_entrega',
+        value: 'retirada',
+        next_node_key: 'ask_payment_retirada',
+      } as SetVarNodeConfig,
     },
 
     // 3a. Delivery → endereço.
@@ -128,17 +143,17 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
           {
             reply_id: 'pix',
             title: '1️⃣ Pix',
-            next_node_key: 'confirm_pix',
+            next_node_key: 'set_payment_pix',
           },
           {
             reply_id: 'cartao',
             title: '2️⃣ Cartão',
-            next_node_key: 'confirm_cartao_delivery',
+            next_node_key: 'set_payment_cartao_delivery',
           },
           {
             reply_id: 'mercado_pago',
             title: '3️⃣ Mercado Pago',
-            next_node_key: 'confirm_mercado_pago',
+            next_node_key: 'set_payment_mercado_pago',
           },
         ],
       } as SendButtonsNodeConfig,
@@ -157,27 +172,122 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
               {
                 reply_id: 'pix',
                 title: '1️⃣ Pix',
-                next_node_key: 'confirm_pix',
+                next_node_key: 'set_payment_pix',
               },
               {
                 reply_id: 'cartao',
                 title: '2️⃣ Cartão',
-                next_node_key: 'confirm_pagamento_retirada',
+                next_node_key: 'set_payment_cartao_retirada',
               },
               {
                 reply_id: 'dinheiro',
                 title: '3️⃣ Dinheiro',
-                next_node_key: 'confirm_pagamento_retirada',
+                next_node_key: 'set_payment_dinheiro',
               },
               {
                 reply_id: 'mercado_pago',
                 title: '4️⃣ Mercado Pago',
-                next_node_key: 'confirm_mercado_pago',
+                next_node_key: 'set_payment_mercado_pago',
               },
             ],
           },
         ],
       } as SendListNodeConfig,
+    },
+
+    // Sets de Forma de Pagamento
+    {
+      node_key: 'set_payment_pix',
+      node_type: 'set_var',
+      config: {
+        var_key: 'forma_pagamento',
+        value: 'pix',
+        next_node_key: 'create_order_deal_node',
+      } as SetVarNodeConfig,
+    },
+    {
+      node_key: 'set_payment_cartao_delivery',
+      node_type: 'set_var',
+      config: {
+        var_key: 'forma_pagamento',
+        value: 'cartao',
+        next_node_key: 'create_order_deal_node',
+      } as SetVarNodeConfig,
+    },
+    {
+      node_key: 'set_payment_cartao_retirada',
+      node_type: 'set_var',
+      config: {
+        var_key: 'forma_pagamento',
+        value: 'cartao',
+        next_node_key: 'create_order_deal_node',
+      } as SetVarNodeConfig,
+    },
+    {
+      node_key: 'set_payment_dinheiro',
+      node_type: 'set_var',
+      config: {
+        var_key: 'forma_pagamento',
+        value: 'dinheiro',
+        next_node_key: 'create_order_deal_node',
+      } as SetVarNodeConfig,
+    },
+    {
+      node_key: 'set_payment_mercado_pago',
+      node_type: 'set_var',
+      config: {
+        var_key: 'forma_pagamento',
+        value: 'mercado_pago',
+        next_node_key: 'create_order_deal_node',
+      } as SetVarNodeConfig,
+    },
+
+    // Ação Customizada: cria o card de negociação
+    {
+      node_key: 'create_order_deal_node',
+      node_type: 'custom_action',
+      config: {
+        action: 'create_order_deal',
+        next_node_key: 'route_confirmation',
+      } as CustomActionNodeConfig,
+    },
+
+    // Roteador de confirmação baseado na forma de pagamento
+    {
+      node_key: 'route_confirmation',
+      node_type: 'condition',
+      config: {
+        subject: 'var',
+        subject_key: 'forma_pagamento',
+        operator: 'equals',
+        value: 'pix',
+        true_next: 'confirm_pix',
+        false_next: 'route_confirmation_mercado_pago',
+      },
+    },
+    {
+      node_key: 'route_confirmation_mercado_pago',
+      node_type: 'condition',
+      config: {
+        subject: 'var',
+        subject_key: 'forma_pagamento',
+        operator: 'equals',
+        value: 'mercado_pago',
+        true_next: 'confirm_mercado_pago',
+        false_next: 'route_confirmation_delivery_vs_retirada',
+      },
+    },
+    {
+      node_key: 'route_confirmation_delivery_vs_retirada',
+      node_type: 'condition',
+      config: {
+        subject: 'var',
+        subject_key: 'tipo_entrega',
+        operator: 'equals',
+        value: 'delivery',
+        true_next: 'confirm_cartao_delivery',
+        false_next: 'confirm_pagamento_retirada',
+      },
     },
 
     // 4. Confirmações.
