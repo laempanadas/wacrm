@@ -215,6 +215,9 @@ export type FlowNodeConfig =
 
 export type FlowNodeType = FlowNodeConfig["node_type"];
 
+/** Alias para os templates estáticos exportados pelos utilitários de fluxo */
+export type FlowTemplateNodeType = FlowNodeType;
+
 // ============================================================
 // Triggers (matches `flows.trigger_type` + `trigger_config`)
 // ============================================================
