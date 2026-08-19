@@ -723,9 +723,19 @@ async function advanceFromNodeKey(
             payment_method,
           } = run.vars as Record<string, unknown>;
 
-          if (!nome || total === undefined || !delivery_type) {
-            throw new Error("Missing required order vars: nome, total, delivery_type");
+          if (!nome || total === undefined) {
+            throw new Error("Missing required order vars: nome ou total");
           }
+
+          const validDelivery: OrderDeliveryKind =
+            delivery_type === "delivery" ? "delivery" : "retirada";
+
+          const validPayment: OrderPaymentMethod =
+            payment_method === "cartao" ||
+            payment_method === "dinheiro" ||
+            payment_method === "mercado_pago"
+              ? payment_method
+              : "pix";
 
           const result = await createOrderDeal(
             supabaseAdmin(),
@@ -733,13 +743,13 @@ async function advanceFromNodeKey(
             {
               contactId: run.contact_id!,
               customerName: String(nome),
-              deliveryKind: String(delivery_type) as OrderDeliveryKind,
-              paymentMethod: (payment_method || "pix") as OrderPaymentMethod,
-              total: Number(total),
+              deliveryKind: validDelivery,
+              paymentMethod: validPayment,
+              total: Number(total || 0),
               deliveryAddress:
-                delivery_type === "delivery" ? String(endereco) : undefined,
-              paidOnline: payment_method === "mercado_pago",
-              conversationId: run.conversation_id,
+                validDelivery === "delivery" && endereco ? String(endereco) : undefined,
+              paidOnline: validPayment === "mercado_pago",
+              conversationId: run.conversation_id ?? undefined,
             }
           );
 
