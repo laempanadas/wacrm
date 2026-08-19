@@ -173,16 +173,31 @@ export interface SetTagNodeConfig {
   next_node_key: string;
 }
 
+/**
+ * Stores a key-value pair in flow_runs.vars and auto-advances.
+ */
+export interface SetVarNodeConfig {
+  var_key: string;
+  value: string;
+  next_node_key: string;
+}
+
+/**
+ * Triggers a backend side-effect action (e.g. create_order_deal)
+ * and auto-advances.
+ */
+export interface CustomActionNodeConfig {
+  action: "create_order_deal";
+  next_node_key: string;
+}
+
 // Terminal nodes carry no config — they just stop the run.
 export type EndNodeConfig = Record<string, never>;
 
 /**
- * Total union — every concrete node_type the v1 engine understands.
+ * Total union — every concrete node_type the engine understands.
  * Add new node types here and the engine's switch will flag missing
  * cases via TypeScript's exhaustiveness check.
- *
- * v1.5+ additions (collect_input, condition, set_tag, http_fetch) will
- * extend this union — out-of-scope for the v1 engine PR.
  */
 export type FlowNodeConfig =
   | { node_type: "start"; config: StartNodeConfig }
@@ -193,6 +208,8 @@ export type FlowNodeConfig =
   | { node_type: "collect_input"; config: CollectInputNodeConfig }
   | { node_type: "condition"; config: ConditionNodeConfig }
   | { node_type: "set_tag"; config: SetTagNodeConfig }
+  | { node_type: "set_var"; config: SetVarNodeConfig }
+  | { node_type: "custom_action"; config: CustomActionNodeConfig }
   | { node_type: "handoff"; config: HandoffNodeConfig }
   | { node_type: "end"; config: EndNodeConfig };
 
