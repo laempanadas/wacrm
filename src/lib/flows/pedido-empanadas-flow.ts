@@ -43,26 +43,20 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
   description:
     'Dispara quando o cliente envia o carrinho pelo catálogo da Meta. Mostra o resumo do pedido e coleta tipo de entrega (delivery x retirada), endereço, forma de pagamento (Mercado Pago quando online) e confirmação. Delivery paga antes; retirada aceita dinheiro.',
   icon: 'MessageSquare',
-  // Dispara automaticamente quando chega um pedido do catálogo da Meta
-  // (mensagem do tipo `order`). O engine injeta nas variáveis do run:
-  //   vars.itens_texto      → resumo legível do carrinho
-  //   vars.total            → total em número (ex: 27.5)
-  //   vars.total_formatado  → total formatado (ex: "R$ 27,50")
-  //   vars.itens            → itens estruturados (SKU, quantidade, preço)
   trigger_type: 'catalog_order',
   trigger_config: {},
   entry_node_id: 'start',
   nodes: [
     {
       node_key: 'start',
-      node_type: 'start',
+      node_type: 'start' as const,
       config: { next_node_key: 'mostrar_carrinho' },
     },
 
     // 0. Resumo do carrinho recebido pelo catálogo da Meta.
     {
       node_key: 'mostrar_carrinho',
-      node_type: 'send_message',
+      node_type: 'send_message' as const,
       config: {
         text: '🫔 Recebemos seu pedido pelo catálogo!\n\n{{vars.itens_texto}}\n\nAgora vamos confirmar alguns dados para concluir. 👇',
         next_node_key: 'ask_name',
@@ -72,7 +66,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
     // 1. Captura do nome.
     {
       node_key: 'ask_name',
-      node_type: 'collect_input',
+      node_type: 'collect_input' as const,
       config: {
         prompt_text: 'Qual é o seu nome completo?',
         var_key: 'nome',
@@ -83,7 +77,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
     // 2. Tipo de recebimento.
     {
       node_key: 'ask_delivery_type',
-      node_type: 'send_buttons',
+      node_type: 'send_buttons' as const,
       config: {
         text: 'Obrigado, {{vars.nome}}! 😊\nComo prefere receber seu pedido?\n\n1️⃣ Delivery (entregamos via 99 ou Uber Entrega)\n2️⃣ Retirada no local\n\nDigite 1 ou 2:',
         buttons: [
@@ -104,7 +98,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
     // Gravadores do tipo de recebimento
     {
       node_key: 'set_delivery_type_delivery',
-      node_type: 'set_var',
+      node_type: 'set_var' as const,
       config: {
         var_key: 'tipo_entrega',
         value: 'delivery',
@@ -113,7 +107,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
     },
     {
       node_key: 'set_delivery_type_retirada',
-      node_type: 'set_var',
+      node_type: 'set_var' as const,
       config: {
         var_key: 'tipo_entrega',
         value: 'retirada',
@@ -124,7 +118,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
     // 3a. Delivery → endereço.
     {
       node_key: 'ask_address',
-      node_type: 'collect_input',
+      node_type: 'collect_input' as const,
       config: {
         prompt_text:
           'Ótimo! Qual é o endereço completo para entrega?\n(Rua, número, complemento e bairro)',
@@ -136,7 +130,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
     // 3a. Delivery → pagamento (sem dinheiro).
     {
       node_key: 'ask_payment_delivery',
-      node_type: 'send_buttons',
+      node_type: 'send_buttons' as const,
       config: {
         text: 'Qual a forma de pagamento?\n\n1️⃣ Pix\n2️⃣ Cartão (débito/crédito)\n3️⃣ Mercado Pago (link de pagamento online)\n\n⚠️ Para delivery, não aceitamos pagamento em dinheiro.',
         buttons: [
@@ -162,7 +156,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
     // 3b. Retirada → pagamento (com dinheiro; 4 opções via lista).
     {
       node_key: 'ask_payment_retirada',
-      node_type: 'send_list',
+      node_type: 'send_list' as const,
       config: {
         text: 'Qual a forma de pagamento?\n\n1️⃣ Pix\n2️⃣ Cartão (débito/crédito)\n3️⃣ Dinheiro\n4️⃣ Mercado Pago (link de pagamento online)',
         button_label: 'Formas de pagamento',
@@ -198,7 +192,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
     // Sets de Forma de Pagamento
     {
       node_key: 'set_payment_pix',
-      node_type: 'set_var',
+      node_type: 'set_var' as const,
       config: {
         var_key: 'forma_pagamento',
         value: 'pix',
@@ -207,7 +201,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
     },
     {
       node_key: 'set_payment_cartao_delivery',
-      node_type: 'set_var',
+      node_type: 'set_var' as const,
       config: {
         var_key: 'forma_pagamento',
         value: 'cartao',
@@ -216,7 +210,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
     },
     {
       node_key: 'set_payment_cartao_retirada',
-      node_type: 'set_var',
+      node_type: 'set_var' as const,
       config: {
         var_key: 'forma_pagamento',
         value: 'cartao',
@@ -225,7 +219,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
     },
     {
       node_key: 'set_payment_dinheiro',
-      node_type: 'set_var',
+      node_type: 'set_var' as const,
       config: {
         var_key: 'forma_pagamento',
         value: 'dinheiro',
@@ -234,7 +228,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
     },
     {
       node_key: 'set_payment_mercado_pago',
-      node_type: 'set_var',
+      node_type: 'set_var' as const,
       config: {
         var_key: 'forma_pagamento',
         value: 'mercado_pago',
@@ -245,7 +239,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
     // Ação Customizada: cria o card de negociação
     {
       node_key: 'create_order_deal_node',
-      node_type: 'custom_action',
+      node_type: 'custom_action' as const,
       config: {
         action: 'create_order_deal',
         next_node_key: 'route_confirmation',
@@ -255,7 +249,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
     // Roteador de confirmação baseado na forma de pagamento
     {
       node_key: 'route_confirmation',
-      node_type: 'condition',
+      node_type: 'condition' as const,
       config: {
         subject: 'var',
         subject_key: 'forma_pagamento',
@@ -267,7 +261,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
     },
     {
       node_key: 'route_confirmation_mercado_pago',
-      node_type: 'condition',
+      node_type: 'condition' as const,
       config: {
         subject: 'var',
         subject_key: 'forma_pagamento',
@@ -279,7 +273,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
     },
     {
       node_key: 'route_confirmation_delivery_vs_retirada',
-      node_type: 'condition',
+      node_type: 'condition' as const,
       config: {
         subject: 'var',
         subject_key: 'tipo_entrega',
@@ -293,7 +287,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
     // 4. Confirmações.
     {
       node_key: 'confirm_pix',
-      node_type: 'send_message',
+      node_type: 'send_message' as const,
       config: {
         text: '✅ Pedido registrado!\n💚 Pix: laempanadas@email.com (ou chave: XX.XXX.XXX/XXXX-XX)\nValor: {{vars.total_formatado}}\n\nEnvie o comprovante aqui no chat para confirmarmos! 📲',
         next_node_key: 'handoff_pedido',
@@ -301,7 +295,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
     },
     {
       node_key: 'confirm_cartao_delivery',
-      node_type: 'send_message',
+      node_type: 'send_message' as const,
       config: {
         text: '✅ Pedido registrado!\n💳 Pagamento na entrega.\nTempo estimado: 30-40 minutos. 🍽️',
         next_node_key: 'handoff_pedido',
@@ -309,7 +303,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
     },
     {
       node_key: 'confirm_pagamento_retirada',
-      node_type: 'send_message',
+      node_type: 'send_message' as const,
       config: {
         text: '✅ Pedido registrado!\n💳 Pagamento na retirada.\nTempo estimado: 30-40 minutos. 🍽️',
         next_node_key: 'handoff_pedido',
@@ -317,7 +311,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
     },
     {
       node_key: 'confirm_mercado_pago',
-      node_type: 'send_message',
+      node_type: 'send_message' as const,
       config: {
         text: '✅ Pedido registrado!\nTotal do pedido: {{vars.total_formatado}}\n\nGerando seu link de pagamento...\n🔗 {{vars.link_mercado_pago}}\n\nApós o pagamento confirmado, iniciaremos o preparo.\nTempo estimado: 30-40 minutos. 🍽️',
         next_node_key: 'handoff_pedido',
@@ -327,7 +321,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
     // Entrega ao atendente com resumo do pedido para registro no pipeline.
     {
       node_key: 'handoff_pedido',
-      node_type: 'handoff',
+      node_type: 'handoff' as const,
       config: {
         note: '🫔 Novo pedido (catálogo Meta) — Cliente: {{vars.nome}}.\nItens: {{vars.itens_texto}}\nTotal: {{vars.total_formatado}}\nEndereço (se delivery): {{vars.endereco}}.\nConfira a forma de pagamento na conversa e registre o pedido no pipeline "Pedidos Delivery".',
       } as HandoffNodeConfig,
