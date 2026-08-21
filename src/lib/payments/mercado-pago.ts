@@ -1,15 +1,12 @@
 /**
  * Mercado Pago — Módulo Seguro de Pagamentos (Checkout Pro & Webhooks).
  *
- * ⚠️ SERVER-SIDE ONLY. Este módulo acessa `process.env.MP_ACCESS_TOKEN`
- * e só deve ser executado no backend (API Routes, Server Actions e Webhooks).
+ * ⚠️ Regras de Negócio aplicadas:
+ * - Exclusão de Boletos (ticket) para delivery de alimentos.
+ * - Habilitação prioritária para Pix e Cartões.
  */
 
 import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
-
-// ============================================================
-// Tipagens
-// ============================================================
 
 export interface PaymentLinkItem {
   title: string;
@@ -50,10 +47,6 @@ export interface PaymentStatusResult {
   paidAmount?: number;
 }
 
-// ============================================================
-// Constantes e Utilitários de Segurança
-// ============================================================
-
 export const MP_NOT_CONFIGURED_MESSAGE =
   'Mercado Pago não configurado. Adicione MP_ACCESS_TOKEN nas variáveis de ambiente (Vercel → Settings → Environment Variables) e faça um redeploy.';
 
@@ -92,10 +85,6 @@ export function normalizePaymentStatus(
   }
 }
 
-// ============================================================
-// Criação de Link de Pagamento (Checkout Pro)
-// ============================================================
-
 export async function createPaymentLink(
   params: CreatePaymentLinkParams
 ): Promise<PaymentLinkResult> {
@@ -132,12 +121,22 @@ export async function createPaymentLink(
     params.externalReference?.trim() ||
     `PED-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
 
+  // ⚠️ [DOCUMENTAÇÃO MERCADO PAGO]: Configuração de Meios de Pagamento
   const result = await preference.create({
     body: {
       items: validItems,
       external_reference: extRef,
       payer: params.payerName ? { name: params.payerName } : undefined,
       metadata: Object.keys(metadata).length ? metadata : undefined,
+      
+      // 🚫 BLOQUEIA BOLETO e permite apenas PIX e CARTÃO
+      payment_methods: {
+        excluded_payment_types: [
+          { id: 'ticket' }, // Exclui Boleto Bancário e Lotéricas
+        ],
+        installments: 3, // Máximo de 3x para cartões
+      },
+
       notification_url: `${appBaseUrl}/api/webhooks/mercadopago`,
       back_urls: {
         success: 'https://www.laempanadas.com.br/',
@@ -160,10 +159,6 @@ export async function createPaymentLink(
     sandboxUrl: result.sandbox_init_point ?? null,
   };
 }
-
-// ============================================================
-// Consulta de Status
-// ============================================================
 
 export async function getPaymentById(
   paymentId: string | number
