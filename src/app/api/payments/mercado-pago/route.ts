@@ -73,17 +73,16 @@ export async function POST(request: Request) {
       return NextResponse.json(
         {
           error:
-            'Informe ao menos um item válido com título, quantidade e preço (ex: { title, quantity, unitPrice }).',
+            'Informe ao menos um item válido (title, quantity, unitPrice).',
         },
         { status: 400 }
       );
     }
 
-    // ⚠️ [CORREÇÃO]: Garante externalReference única se não vier informada
     const externalReference =
       typeof body?.externalReference === 'string' && body.externalReference.trim().length > 0
         ? body.externalReference.trim()
-        : `PED-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+        : undefined;
 
     const payerName =
       typeof body?.payerName === 'string' ? body.payerName.trim() : undefined;
@@ -98,7 +97,7 @@ export async function POST(request: Request) {
         ? body.deliveryAddress.trim()
         : undefined;
 
-    // Chamada à função blindada do Mercado Pago
+    // ⚠️ [CORREÇÃO]: createPaymentLink lança erro tratado no catch em caso de falha
     const result = await createPaymentLink({
       items,
       externalReference,
@@ -107,14 +106,6 @@ export async function POST(request: Request) {
       deliveryKind,
       deliveryAddress,
     });
-
-    // ⚠️ [CORREÇÃO]: Trata falhas na criação da preferência sem quebrar o servidor
-    if (!result.ok) {
-      return NextResponse.json(
-        { error: result.errorMessage },
-        { status: 502 }
-      );
-    }
 
     return NextResponse.json(result);
   } catch (err) {
