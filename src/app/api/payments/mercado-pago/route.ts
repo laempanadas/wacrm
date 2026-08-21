@@ -8,7 +8,6 @@
 //
 // Requer sessão autenticada (contexto de conta). As credenciais do
 // Mercado Pago ficam no ambiente (MP_ACCESS_TOKEN) — nunca no cliente.
-// Veja docs/mercado-pago-setup.md.
 // ============================================================
 
 import { NextResponse } from 'next/server';
@@ -39,9 +38,7 @@ export async function POST(request: Request) {
     if (!isMercadoPagoConfigured()) {
       return NextResponse.json(
         { error: MP_NOT_CONFIGURED_MESSAGE },
-        {
-          status: 503,
-        }
+        { status: 503 }
       );
     }
 
@@ -49,6 +46,7 @@ export async function POST(request: Request) {
       items?: unknown;
       externalReference?: unknown;
       payerName?: unknown;
+      payerPhone?: unknown;
       deliveryKind?: unknown;
       deliveryAddress?: unknown;
     } | null;
@@ -75,34 +73,48 @@ export async function POST(request: Request) {
       return NextResponse.json(
         {
           error:
-            'Informe ao menos um item válido (title, quantity, unitPrice).',
+            'Informe ao menos um item válido com título, quantidade e preço (ex: { title, quantity, unitPrice }).',
         },
         { status: 400 }
       );
     }
 
+    // ⚠️ [CORREÇÃO]: Garante externalReference única se não vier informada
     const externalReference =
-      typeof body?.externalReference === 'string'
-        ? body.externalReference
-        : undefined;
+      typeof body?.externalReference === 'string' && body.externalReference.trim().length > 0
+        ? body.externalReference.trim()
+        : `PED-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+
     const payerName =
-      typeof body?.payerName === 'string' ? body.payerName : undefined;
+      typeof body?.payerName === 'string' ? body.payerName.trim() : undefined;
+    const payerPhone =
+      typeof body?.payerPhone === 'string' ? body.payerPhone.trim() : undefined;
     const deliveryKind =
       body?.deliveryKind === 'delivery' || body?.deliveryKind === 'retirada'
         ? (body.deliveryKind as DeliveryKind)
         : undefined;
     const deliveryAddress =
       typeof body?.deliveryAddress === 'string'
-        ? body.deliveryAddress
+        ? body.deliveryAddress.trim()
         : undefined;
 
+    // Chamada à função blindada do Mercado Pago
     const result = await createPaymentLink({
       items,
       externalReference,
       payerName,
+      payerPhone,
       deliveryKind,
       deliveryAddress,
     });
+
+    // ⚠️ [CORREÇÃO]: Trata falhas na criação da preferência sem quebrar o servidor
+    if (!result.ok) {
+      return NextResponse.json(
+        { error: result.errorMessage },
+        { status: 502 }
+      );
+    }
 
     return NextResponse.json(result);
   } catch (err) {
