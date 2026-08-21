@@ -1,39 +1,14 @@
 /**
- * Flow runner.
+ * Flow runner — La Empanadas.
  *
- * The single entry point `dispatchInboundToFlows` is called by the
- * WhatsApp webhook on every inbound message *for an account that has
- * opted into the Flows beta*. It decides whether the message belongs
- * to an active conversation flow (advance it) or matches the entry
- * trigger of an active flow (start a new run) — and reports back to
- * the webhook so the webhook knows whether to also fire automations.
- *
- * Architecture in a sentence: the runner walks the customer through
- * a DB-stored node graph, suspending only at nodes that need
- * customer input. Each tap or text reply wakes it back up.
- *
- * What lives here vs elsewhere:
- *   - Pure decision logic (which button matched, where to advance to,
- *     when to fallback) — here.
- *   - DB shape (table reads/writes) — here.
- *   - Meta API calls — `meta-send.ts` (engineSendInteractive*).
- *   - Policy resolution (reprompt vs handoff vs end) — `fallback.ts`.
- *   - Type definitions — `types.ts`.
- *
- * Concurrency model:
- *   - Idempotency on `meta_message_id`: the runner refuses to advance
- *     an active run twice for the same Meta message — protects against
- *     Meta's retries.
- *   - Optimistic UPDATE with `current_node_key` precondition: two
- *     simultaneous taps for the same run collide at the DB layer; the
- *     second is a no-op.
- *   - Partial unique index `idx_one_active_run_per_contact`: two
- *     simultaneous starts for the same contact collide; the second
- *     INSERT raises 23505 and the runner catches & exits.
+ * Processa o grafo de nós conversacionais, interpola variáveis em todos
+ * os tipos de mensagem (texto, botões, listas) e integra a geração
+ * automática de link do Mercado Pago na ação customizada `create_order_deal`.
  */
 
 import { supabaseAdmin } from "./admin-client";
 import { createOrderDeal, type OrderDeliveryKind, type OrderPaymentMethod } from "@/lib/orders/create-order";
+import { createPaymentLink } from "@/lib/payments/mercado-pago";
 import {
   engineSendInteractiveButtons,
   engineSendInteractiveList,
@@ -62,14 +37,9 @@ import {
 } from "./types";
 
 // ============================================================
-// Pure helpers — extracted so engine.test.ts can exercise them
-// without a Supabase / Meta mock.
+// Pure helpers
 // ============================================================
 
-/**
- * Given a node + the customer's reply_id, return the next_node_key
- * to advance to, or `null` if no option matches.
- */
 export function matchReplyId(
   node: { node_type: string; config: Record<string, unknown> },
   reply_id: string,
@@ -90,11 +60,6 @@ export function matchReplyId(
   return null;
 }
 
-/**
- * Case-insensitive contains/exact match against a list of keywords.
- * Used by the trigger evaluator. Stable enough that the v3 builder
- * UI can preview matches by passing canned strings.
- */
 export function matchesKeywordTrigger(
   text: string,
   cfg: KeywordTriggerConfig,
@@ -112,7 +77,6 @@ export function matchesKeywordTrigger(
   return false;
 }
 
-/** Nodes that advance to a next_node_key without waiting for input. */
 export function isAutoAdvancing(node_type: string): boolean {
   return (
     node_type === "start" ||
@@ -125,7 +89,6 @@ export function isAutoAdvancing(node_type: string): boolean {
   );
 }
 
-/** Nodes that send a prompt and suspend awaiting a customer reply. */
 export function isSuspending(node_type: string): boolean {
   return (
     node_type === "send_buttons" ||
@@ -134,25 +97,13 @@ export function isSuspending(node_type: string): boolean {
   );
 }
 
-/** Nodes that end the run. */
 export function isTerminal(node_type: string): boolean {
   return node_type === "handoff" || node_type === "end";
 }
 
-/**
- * Evaluate a `condition` node's predicate against the current run
- * state. Exported pure for unit testing — the engine wraps it with a
- * DB lookup for `tag` / `contact_field` subjects.
- */
 export function evaluateConditionPredicate(args: {
   operator: ConditionNodeConfig["operator"];
-  /**
-   * Resolved value of the subject. `undefined` means the subject is
-   * absent (no var with that key / no such tag / contact field is
-   * null). Pure function: caller does the DB lookup.
-   */
   subjectValue: string | undefined;
-  /** The configured comparison value, when applicable. */
   configValue: string | undefined;
 }): boolean {
   switch (args.operator) {
@@ -170,11 +121,25 @@ export function evaluateConditionPredicate(args: {
 }
 
 // ============================================================
-// DB I/O — wrapped in tiny helpers so the dispatch flow stays
-// readable. Errors surface as thrown — the entry point catches.
+// DB Helpers & Interpolação Segura
 // ============================================================
 
 type AdminClient = ReturnType<typeof supabaseAdmin>;
+
+/**
+ * ⚠️ [CORREÇÃO]: Interpola variáveis {{vars.nome}} e {{nome}} em qualquer texto
+ */
+function interpolateVars(template: string, vars: Record<string, unknown>): string {
+  if (!template) return "";
+  return template.replace(/\{\{(?:vars\.)?([a-zA-Z0-9_]+)\}\}/g, (_, key) => {
+    const v = vars[key];
+    return v === undefined || v === null ? "" : String(v);
+  });
+}
+
+function formatBRLNumber(value: number): string {
+  return `R$ ${value.toFixed(2).replace(".", ",")}`;
+}
 
 async function loadActiveRunForContact(
   db: AdminClient,
@@ -282,10 +247,6 @@ async function isDuplicateInbound(
   return (count ?? 0) > 0;
 }
 
-function formatBRLNumber(value: number): string {
-  return `R$ ${value.toFixed(2).replace(".", ",")}`;
-}
-
 async function findEntryFlow(
   db: AdminClient,
   accountId: string,
@@ -301,11 +262,9 @@ async function findEntryFlow(
     .eq("status", "active")
     .order("created_at", { ascending: true });
   if (error || !flows) {
-    console.error("[engine] findEntryFlow error ou sem flows:", error);
+    console.error("[engine] findEntryFlow error:", error);
     return null;
   }
-
-  console.log("[engine] flows ativos encontrados:", flows.length, "| message.kind:", message.kind, "| triggers:", flows.map((f: FlowRow) => f.trigger_type).join(", "));
 
   const typed = flows as FlowRow[];
   for (const flow of typed) {
@@ -333,7 +292,7 @@ async function findEntryFlow(
 }
 
 // ============================================================
-// Node executors — each handles ONE node type.
+// Executores de Nós
 // ============================================================
 
 async function sendButtonsAndSuspend(
@@ -342,31 +301,44 @@ async function sendButtonsAndSuspend(
   node: FlowNodeRow,
 ): Promise<{ outcome: "advanced"; node_key: string }> {
   const cfg = node.config as unknown as SendButtonsNodeConfig;
+  
+  // ⚠️ [CORREÇÃO]: Interpola variáveis no texto, cabeçalho e rodapé dos botões
+  const bodyText = interpolateVars(cfg.text, run.vars);
+  const headerText = cfg.header_text ? interpolateVars(cfg.header_text, run.vars) : undefined;
+  const footerText = cfg.footer_text ? interpolateVars(cfg.footer_text, run.vars) : undefined;
+
   const { whatsapp_message_id } = await engineSendInteractiveButtons({
     accountId: run.account_id,
     userId: run.user_id,
     conversationId: run.conversation_id!,
     contactId: run.contact_id!,
-    bodyText: cfg.text,
-    headerText: cfg.header_text,
-    footerText: cfg.footer_text,
-    buttons: cfg.buttons.map((b) => ({ id: b.reply_id, title: b.title })),
+    bodyText,
+    headerText,
+    footerText,
+    buttons: cfg.buttons.map((b) => ({
+      id: b.reply_id,
+      title: interpolateVars(b.title, run.vars),
+    })),
   });
+
   await logEvent(db, run.id, "message_sent", node.node_key, {
     node_type: "send_buttons",
     whatsapp_message_id,
   });
+
   const { data: msg } = await db
     .from("messages")
     .select("id")
     .eq("message_id", whatsapp_message_id)
     .maybeSingle();
+
   await db
     .from("flow_runs")
     .update({
       last_prompt_message_id: (msg as { id: string } | null)?.id ?? null,
     })
     .eq("id", run.id);
+
   return { outcome: "advanced", node_key: node.node_key };
 }
 
@@ -376,39 +348,49 @@ async function sendListAndSuspend(
   node: FlowNodeRow,
 ): Promise<{ outcome: "advanced"; node_key: string }> {
   const cfg = node.config as unknown as SendListNodeConfig;
+  
+  // ⚠️ [CORREÇÃO]: Interpola variáveis na lista interativa
+  const bodyText = interpolateVars(cfg.text, run.vars);
+  const headerText = cfg.header_text ? interpolateVars(cfg.header_text, run.vars) : undefined;
+  const footerText = cfg.footer_text ? interpolateVars(cfg.footer_text, run.vars) : undefined;
+
   const { whatsapp_message_id } = await engineSendInteractiveList({
     accountId: run.account_id,
     userId: run.user_id,
     conversationId: run.conversation_id!,
     contactId: run.contact_id!,
-    bodyText: cfg.text,
+    bodyText,
     buttonLabel: cfg.button_label,
-    headerText: cfg.header_text,
-    footerText: cfg.footer_text,
+    headerText,
+    footerText,
     sections: cfg.sections.map((s) => ({
-      title: s.title,
+      title: s.title ? interpolateVars(s.title, run.vars) : undefined,
       rows: s.rows.map((r) => ({
         id: r.reply_id,
-        title: r.title,
-        description: r.description,
+        title: interpolateVars(r.title, run.vars),
+        description: r.description ? interpolateVars(r.description, run.vars) : undefined,
       })),
     })),
   });
+
   await logEvent(db, run.id, "message_sent", node.node_key, {
     node_type: "send_list",
     whatsapp_message_id,
   });
+
   const { data: msg } = await db
     .from("messages")
     .select("id")
     .eq("message_id", whatsapp_message_id)
     .maybeSingle();
+
   await db
     .from("flow_runs")
     .update({
       last_prompt_message_id: (msg as { id: string } | null)?.id ?? null,
     })
     .eq("id", run.id);
+
   return { outcome: "advanced", node_key: node.node_key };
 }
 
@@ -418,6 +400,8 @@ async function executeHandoff(
   node: FlowNodeRow,
 ): Promise<void> {
   const cfg = node.config as { assign_to?: string; note?: string };
+  const interpolatedNote = cfg.note ? interpolateVars(cfg.note, run.vars) : undefined;
+
   const convUpdate: Record<string, unknown> = {
     status: "pending",
     updated_at: new Date().toISOString(),
@@ -430,7 +414,7 @@ async function executeHandoff(
       .eq("id", run.conversation_id);
   }
   await logEvent(db, run.id, "handoff", node.node_key, {
-    note: cfg.note ?? null,
+    note: interpolatedNote ?? null,
     assigned_to: cfg.assign_to ?? null,
   });
   await endRun(db, run.id, "handed_off", "handoff_node");
@@ -473,14 +457,6 @@ async function evaluateConditionNode(
   });
 }
 
-function interpolateVars(template: string, vars: Record<string, unknown>): string {
-  if (!template) return "";
-  return template.replace(/\{\{vars\.([a-zA-Z0-9_]+)\}\}/g, (_, key) => {
-    const v = vars[key];
-    return v === undefined || v === null ? "" : String(v);
-  });
-}
-
 async function endRun(
   db: AdminClient,
   runId: string,
@@ -498,7 +474,7 @@ async function endRun(
 }
 
 // ============================================================
-// The synchronous advance loop.
+// Loop de Avanço Síncrono
 // ============================================================
 
 async function advanceFromNodeKey(
@@ -649,8 +625,7 @@ async function advanceFromNodeKey(
         await endRun(db, run.id, "failed", "condition_evaluation_failed");
         return { outcome: "completed" };
       }
-      currentKey =
-        branch === "true" ? cfg.true_next : cfg.false_next;
+      currentKey = branch === "true" ? cfg.true_next : cfg.false_next;
       await logEvent(db, run.id, "node_entered", node.node_key, {
         condition_result: branch,
         advancing_to: currentKey,
@@ -710,6 +685,10 @@ async function advanceFromNodeKey(
       currentKey = cfg.next_node_key;
       continue;
     }
+
+    // ============================================================
+    // ⚡ AÇÃO CUSTOMIZADA: CRIAÇÃO DO PEDIDO + LINK DO MERCADO PAGO
+    // ============================================================
     if (node.node_type === "custom_action") {
       const cfg = node.config as unknown as CustomActionNodeConfig;
       
@@ -717,38 +696,81 @@ async function advanceFromNodeKey(
         try {
           const {
             nome,
+            name,
             total,
             endereco,
+            address,
+            tipo_entrega,
             delivery_type,
+            forma_pagamento,
             payment_method,
+            itens,
           } = run.vars as Record<string, unknown>;
 
-          if (!nome || total === undefined) {
-            throw new Error("Missing required order vars: nome ou total");
-          }
-
+          const customerName = String(nome || name || "Cliente");
           const validDelivery: OrderDeliveryKind =
-            delivery_type === "delivery" ? "delivery" : "retirada";
+            tipo_entrega === "delivery" || delivery_type === "delivery" ? "delivery" : "retirada";
 
           const validPayment: OrderPaymentMethod =
-            payment_method === "cartao" ||
-            payment_method === "dinheiro" ||
-            payment_method === "mercado_pago"
-              ? payment_method
+            forma_pagamento === "cartao" || payment_method === "cartao"
+              ? "cartao"
+              : forma_pagamento === "dinheiro" || payment_method === "dinheiro"
+              ? "dinheiro"
               : "pix";
 
+          const orderTotal = Number(total || 0);
+          const orderAddress = validDelivery === "delivery" ? String(endereco || address || "") : undefined;
+
+          // ⚠️ [CORREÇÃO]: Gera o Link do Mercado Pago automaticamente se houver total
+          let mpUrl = "";
+          if (orderTotal > 0) {
+            try {
+              const rawItems = Array.isArray(itens) ? itens : [];
+              const mpItems =
+                rawItems.length > 0
+                  ? rawItems.map((it: Record<string, unknown>) => ({
+                      title: String(it.retailer_id || it.title || "Empanada"),
+                      quantity: Number(it.quantity || 1),
+                      unitPrice: Number(it.unit_price || it.unitPrice || orderTotal / (rawItems.length || 1)),
+                    }))
+                  : [{ title: "Pedido La Empanadas", quantity: 1, unitPrice: orderTotal }];
+
+              const mpRes = await createPaymentLink({
+                items: mpItems,
+                externalReference: `PED-${Date.now()}-${run.id.substring(0, 5)}`,
+                payerName: customerName,
+                deliveryKind: validDelivery,
+                deliveryAddress: orderAddress,
+              });
+
+              if (mpRes.paymentUrl) {
+                mpUrl = mpRes.paymentUrl;
+              }
+            } catch (mpErr) {
+              console.error("[flows] Erro ao criar link do Mercado Pago:", mpErr);
+            }
+          }
+
+          // ⚠️ [CORREÇÃO]: Salva o link retornado em vars.link_mercado_pago
+          const newVars = {
+            ...run.vars,
+            link_mercado_pago: mpUrl || "https://www.laempanadas.com.br",
+          };
+          await db.from("flow_runs").update({ vars: newVars }).eq("id", run.id);
+          run.vars = newVars;
+
+          // Criação do card no Pipeline CRM
           const result = await createOrderDeal(
             supabaseAdmin(),
             { accountId: run.account_id, userId: run.user_id },
             {
               contactId: run.contact_id!,
-              customerName: String(nome),
+              customerName,
               deliveryKind: validDelivery,
               paymentMethod: validPayment,
-              total: Number(total || 0),
-              deliveryAddress:
-                validDelivery === "delivery" && endereco ? String(endereco) : undefined,
-              paidOnline: validPayment === "mercado_pago",
+              total: orderTotal,
+              deliveryAddress: orderAddress,
+              paidOnline: true,
               conversationId: run.conversation_id ?? undefined,
             }
           );
@@ -757,6 +779,7 @@ async function advanceFromNodeKey(
             action_type: "create_order_deal",
             deal_id: result.dealId,
             tag: result.tagName,
+            payment_url: mpUrl,
           });
         } catch (err) {
           console.error("[flows] create_order_deal error:", err);
@@ -770,6 +793,7 @@ async function advanceFromNodeKey(
       currentKey = cfg.next_node_key;
       continue;
     }
+
     if (node.node_type === "send_buttons") {
       await sendButtonsAndSuspend(db, run, node);
       const advanced = await advanceCurrentNodeKey(
@@ -850,7 +874,7 @@ async function advanceCurrentNodeKey(
 }
 
 // ============================================================
-// Public entry point — the webhook calls this on every inbound.
+// Ponto de Entrada Público (Chamado pelo Webhook)
 // ============================================================
 
 export async function dispatchInboundToFlows(
