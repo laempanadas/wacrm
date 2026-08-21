@@ -2,11 +2,9 @@
  * Mercado Pago — Módulo Seguro de Pagamentos (Checkout Pro & Webhooks).
  *
  * ⚠️ SERVER-SIDE ONLY. Este módulo acessa `process.env.MP_ACCESS_TOKEN`
- * e só deve ser executado no backend (API Routes, Server Actions e Runners de Flow).
+ * e só deve ser executado no backend (API Routes, Server Actions e Webhooks).
  *
- * Blindagem contra falhas:
- * - Funções retornam flags de sucesso/erro sem interromper a execução do Next.js.
- * - Suporta pedidos do Catálogo da Meta e do Cardápio Web (laempanadas.com.br).
+ * Usa o SDK oficial `mercadopago` (Checkout Pro / Preferences).
  */
 
 import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
@@ -16,44 +14,37 @@ import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
 // ============================================================
 
 export interface PaymentLinkItem {
-  /** Nome / Descrição do item */
+  /** Descrição / Nome do item */
   title: string;
-  /** Quantidade solicitada */
+  /** Quantidade */
   quantity: number;
-  /** Preço unitário em BRL (formato numérico, ex: 14.50) */
+  /** Preço unitário em BRL (número decimal, ex: 14.00) */
   unitPrice: number;
 }
 
 export type DeliveryKind = 'delivery' | 'retirada';
 
 export interface CreatePaymentLinkParams {
-  /** Lista de itens do pedido */
+  /** Itens do pedido */
   items: PaymentLinkItem[];
-  /** Referência externa única (ex: ID do deal ou PED-123456) */
-  externalReference: string;
-  /** Nome do cliente para identificação */
+  /** Referência externa única (ex: PED-12345) */
+  externalReference?: string;
+  /** Nome do pagador */
   payerName?: string;
-  /** Telefone do cliente (opcional) */
+  /** Telefone do pagador */
   payerPhone?: string;
-  /** Tipo de entrega */
+  /** Tipo de recebimento */
   deliveryKind?: DeliveryKind;
-  /** Endereço completo para entrega */
+  /** Endereço de entrega */
   deliveryAddress?: string;
 }
 
-export interface PaymentLinkSuccessResult {
-  ok: true;
+export interface PaymentLinkResult {
+  ok: boolean;
   preferenceId: string;
   paymentUrl: string;
   sandboxUrl: string | null;
 }
-
-export interface PaymentLinkErrorResult {
-  ok: false;
-  errorMessage: string;
-}
-
-export type PaymentLinkResponse = PaymentLinkSuccessResult | PaymentLinkErrorResult;
 
 export type PaymentStatus =
   | 'pending'
@@ -71,24 +62,32 @@ export interface PaymentStatusResult {
 }
 
 // ============================================================
-// Funções Auxiliares de Segurança
+// Constantes e Utilitários de Segurança
 // ============================================================
 
-/** Verifica se a credencial do Mercado Pago está presente no ambiente */
+/** ⚠️ [CORREÇÃO]: Exportação exigida pelas rotas de status e API */
+export const MP_NOT_CONFIGURED_MESSAGE =
+  'Mercado Pago não configurado. Adicione MP_ACCESS_TOKEN nas variáveis de ambiente (Vercel → Settings → Environment Variables) e faça um redeploy. Veja docs/vercel-deploy.md.';
+
+/** Indica se as credenciais do Mercado Pago estão configuradas no ambiente */
 export function isMercadoPagoConfigured(): boolean {
   const token = process.env.MP_ACCESS_TOKEN;
   return Boolean(token && token.trim().length > 10);
 }
 
-/** Cria instância segura do client Mercado Pago */
-function getClient(): MercadoPagoConfig | null {
+/** Cria um client do SDK autenticado com o Access Token */
+function getClient(): MercadoPagoConfig {
   const accessToken = process.env.MP_ACCESS_TOKEN?.trim();
-  if (!accessToken) return null;
+  if (!accessToken) {
+    throw new Error(MP_NOT_CONFIGURED_MESSAGE);
+  }
   return new MercadoPagoConfig({ accessToken });
 }
 
-/** Normaliza status da API para padrões simples do CRM */
-export function normalizePaymentStatus(raw: string | null | undefined): PaymentStatus {
+/** Normaliza status bruto retornado pelo Mercado Pago */
+export function normalizePaymentStatus(
+  raw: string | null | undefined
+): PaymentStatus {
   switch (raw?.toLowerCase()) {
     case 'approved':
     case 'authorized':
@@ -113,91 +112,72 @@ export function normalizePaymentStatus(raw: string | null | undefined): PaymentS
 // ============================================================
 
 /**
- * Cria a preferência de pagamento no Mercado Pago.
- * Nunca lança erros não tratados (retorna { ok: false, errorMessage } em caso de falha).
+ * Cria uma preferência de pagamento no Mercado Pago e devolve a URL
+ * pronta para envio no WhatsApp.
  */
 export async function createPaymentLink(
   params: CreatePaymentLinkParams
-): Promise<PaymentLinkResponse> {
-  try {
-    const client = getClient();
-    if (!client) {
-      console.warn('[MercadoPago] MP_ACCESS_TOKEN não configurado nas variáveis de ambiente.');
-      return {
-        ok: false,
-        errorMessage: 'Mercado Pago não configurado no servidor.',
-      };
-    }
-
-    // Sanitização e validação dos itens
-    const validItems = params.items
-      .filter((item) => item.quantity > 0 && item.unitPrice > 0)
-      .map((item, idx) => ({
-        id: `item-${idx + 1}`,
-        title: item.title.trim().substring(0, 250),
-        quantity: Number(item.quantity),
-        unit_price: Number(item.unitPrice),
-        currency_id: 'BRL' as const,
-      }));
-
-    if (validItems.length === 0) {
-      return {
-        ok: false,
-        errorMessage: 'Nenhum item com valor válido foi informado.',
-      };
-    }
-
-    const appBaseUrl =
-      process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, '') || 'https://wacrm-eta-ten.vercel.app';
-
-    const preference = new Preference(client);
-
-    const preferenceData = {
-      body: {
-        items: validItems,
-        external_reference: params.externalReference,
-        payer: {
-          name: params.payerName?.trim() || 'Cliente',
-        },
-        metadata: {
-          delivery_kind: params.deliveryKind || 'delivery',
-          delivery_address: params.deliveryAddress || '',
-          payer_phone: params.payerPhone || '',
-        },
-        notification_url: `${appBaseUrl}/api/webhooks/mercadopago`,
-        back_urls: {
-          success: 'https://www.laempanadas.com.br/',
-          failure: 'https://www.laempanadas.com.br/',
-          pending: 'https://www.laempanadas.com.br/',
-        },
-        auto_return: 'approved' as const,
-        statement_descriptor: 'LA EMPANADAS',
-      },
-    };
-
-    const result = await preference.create(preferenceData);
-
-    if (!result.id || !result.init_point) {
-      return {
-        ok: false,
-        errorMessage: 'Resposta inválida recebida da API do Mercado Pago.',
-      };
-    }
-
-    return {
-      ok: true,
-      preferenceId: result.id,
-      paymentUrl: result.init_point,
-      sandboxUrl: result.sandbox_init_point || null,
-    };
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : 'Erro desconhecido ao gerar link.';
-    console.error('[MercadoPago Error] Falha ao criar preferência:', message);
-    return {
-      ok: false,
-      errorMessage: message,
-    };
+): Promise<PaymentLinkResult> {
+  if (!params.items.length) {
+    throw new Error('Informe ao menos um item para gerar o link de pagamento.');
   }
+
+  const client = getClient();
+  const preference = new Preference(client);
+
+  const validItems = params.items
+    .filter((item) => item.quantity > 0 && item.unitPrice > 0)
+    .map((item, index) => ({
+      id: String(index + 1),
+      title: item.title.trim().substring(0, 250),
+      quantity: Number(item.quantity),
+      unit_price: Number(item.unitPrice),
+      currency_id: 'BRL' as const,
+    }));
+
+  if (validItems.length === 0) {
+    throw new Error('Nenhum item com preço válido informado.');
+  }
+
+  const metadata: Record<string, unknown> = {};
+  if (params.deliveryKind) metadata.delivery_kind = params.deliveryKind;
+  if (params.deliveryAddress) metadata.delivery_address = params.deliveryAddress;
+  if (params.payerPhone) metadata.payer_phone = params.payerPhone;
+
+  const appBaseUrl =
+    process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, '') || 'https://wacrm-eta-ten.vercel.app';
+
+  const extRef =
+    params.externalReference?.trim() ||
+    `PED-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+
+  const result = await preference.create({
+    body: {
+      items: validItems,
+      external_reference: extRef,
+      payer: params.payerName ? { name: params.payerName } : undefined,
+      metadata: Object.keys(metadata).length ? metadata : undefined,
+      notification_url: `${appBaseUrl}/api/webhooks/mercadopago`,
+      back_urls: {
+        success: 'https://www.laempanadas.com.br/',
+        failure: 'https://www.laempanadas.com.br/',
+        pending: 'https://www.laempanadas.com.br/',
+      },
+      auto_return: 'approved' as const,
+      statement_descriptor: 'LA EMPANADAS',
+    },
+  });
+
+  if (!result.id || !result.init_point) {
+    throw new Error('Mercado Pago não retornou um link de pagamento válido.');
+  }
+
+  return {
+    ok: true,
+    preferenceId: result.id,
+    paymentUrl: result.init_point,
+    sandboxUrl: result.sandbox_init_point ?? null,
+  };
 }
 
 // ============================================================
@@ -205,22 +185,20 @@ export async function createPaymentLink(
 // ============================================================
 
 /**
- * Consulta status de pagamento direto por ID do Mercado Pago (para Webhooks).
+ * Consulta status de pagamento direto por ID do Mercado Pago.
  */
-export async function getPaymentById(paymentId: string | number): Promise<PaymentStatusResult> {
+export async function getPaymentById(
+  paymentId: string | number
+): Promise<PaymentStatusResult> {
   try {
     const client = getClient();
-    if (!client) {
-      return { ok: false, status: 'unknown', rawStatus: null, paymentId: null };
-    }
-
     const payment = new Payment(client);
     const result = await payment.get({ id: String(paymentId) });
 
     return {
       ok: true,
       status: normalizePaymentStatus(result.status),
-      rawStatus: result.status || null,
+      rawStatus: result.status ?? null,
       paymentId: String(result.id),
       paidAmount: result.transaction_amount,
     };
@@ -231,18 +209,15 @@ export async function getPaymentById(paymentId: string | number): Promise<Paymen
 }
 
 /**
- * Consulta status de pagamento por externalReference (ID do pedido).
+ * Consulta status de pagamento associado a uma external_reference (ID do pedido).
  */
 export async function getPaymentStatusByExternalReference(
   externalReference: string
 ): Promise<PaymentStatusResult> {
   try {
     const client = getClient();
-    if (!client) {
-      return { ok: false, status: 'pending', rawStatus: null, paymentId: null };
-    }
-
     const payment = new Payment(client);
+
     const search = await payment.search({
       options: {
         external_reference: externalReference,
@@ -252,7 +227,7 @@ export async function getPaymentStatusByExternalReference(
       },
     });
 
-    const results = (search.results || []) as Array<{
+    const results = (search.results ?? []) as Array<{
       id?: number | string;
       status?: string;
       transaction_amount?: number;
@@ -266,12 +241,12 @@ export async function getPaymentStatusByExternalReference(
     return {
       ok: true,
       status: normalizePaymentStatus(latest.status),
-      rawStatus: latest.status || null,
+      rawStatus: latest.status ?? null,
       paymentId: latest.id != null ? String(latest.id) : null,
       paidAmount: latest.transaction_amount,
     };
   } catch (error) {
-    console.error('[MercadoPago Error] Falha ao consultar external_reference:', externalReference, error);
+    console.error('[MercadoPago Error] Falha ao buscar external_reference:', externalReference, error);
     return { ok: false, status: 'unknown', rawStatus: null, paymentId: null };
   }
 }
