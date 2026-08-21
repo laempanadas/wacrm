@@ -122,7 +122,7 @@ export async function GET(request: Request) {
           break
         }
       } catch {
-        // ignora token invalido
+        // ignora erro de chave
       }
     }
 
@@ -235,7 +235,6 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
   }
 }
 
-// Status transitions
 const RECIPIENT_STATUS_LADDER = ['pending', 'sent', 'delivered', 'read', 'replied'] as const
 
 function ladderLevel(s: string): number {
@@ -381,9 +380,6 @@ async function handleReaction(
     )
 }
 
-/**
- * ⚠️ [CORREÇÃO]: Parser monetário resiliente (suporta 14.00, 14,00, 1.400,00)
- */
 function parseCurrencyString(raw: string): number {
   if (!raw) return 0
   const cleaned = raw.trim().replace(/[^\d.,]/g, '')
@@ -412,14 +408,13 @@ function parseCurrencyString(raw: string): number {
 }
 
 /**
- * 🥟 Parser para pedidos enviados a partir do site laempanadas.com.br
+ * 🥟 Parser resiliente para pedidos do site laempanadas.com.br
  */
 function parseWebsiteOrder(text: string) {
   if (!text || !text.toUpperCase().includes('LA EMPANADAS - NOVO PEDIDO')) {
     return null
   }
 
-  // Extração flexível (com ou sem asteriscos *)
   const clienteMatch = text.match(/(?:\*?Cliente:\*?)\s*([^\n\r*]+)/i)
   const cliente = clienteMatch ? clienteMatch[1].trim() : 'Cliente'
 
@@ -430,7 +425,8 @@ function parseWebsiteOrder(text: string) {
   const total = totalMatch ? parseCurrencyString(totalMatch[1]) : 0
 
   const items: Array<{ title: string; quantity: number; unitPrice: number }> = []
-  const itemRegex = /(?:-\s*)?(\d+)x\s*([^[—\n\r]+)(?:\[([^\]]+)\])?/gi
+  // Suporta: - 1x, • 1 x, 1x, etc.
+  const itemRegex = /(?:[-•*]\s*)?(\d+)\s*x\s*([^[—\n\r]+)(?:\[([^\]]+)\])?/gi
   let match: RegExpExecArray | null
   while ((match = itemRegex.exec(text)) !== null) {
     const quantity = parseInt(match[1], 10) || 1
@@ -456,9 +452,9 @@ function parseWebsiteOrder(text: string) {
 }
 
 /**
- * 🌟 [CORREÇÃO]: Envia Mensagem com BOTÃO OFICIAL (CTA Button) no WhatsApp
+ * 🛡️ [BLINDAGEM TOTAL]: Envia Botão CTA (≤20 chars) com Fallback para Mensagem de Texto
  */
-async function sendWhatsAppCtaButtonMessage(params: {
+async function sendWhatsAppPaymentMessage(params: {
   phoneNumberId: string
   accessToken: string
   toPhone: string
@@ -467,7 +463,11 @@ async function sendWhatsAppCtaButtonMessage(params: {
   footerText: string
   buttonText: string
   buttonUrl: string
-}) {
+}): Promise<{ messageId: string | null; formattedText: string }> {
+  // Limite estrito de 20 caracteres da Meta para o botão
+  const label = (params.buttonText || '💳 Pagar Agora').trim().substring(0, 20)
+
+  // 1. Tenta enviar como Botão CTA Nativo
   try {
     const res = await fetch(
       `https://graph.facebook.com/v21.0/${params.phoneNumberId}/messages`,
@@ -497,7 +497,7 @@ async function sendWhatsAppCtaButtonMessage(params: {
             action: {
               name: 'cta_url',
               parameters: {
-                display_text: params.buttonText,
+                display_text: label,
                 url: params.buttonUrl,
               },
             },
@@ -506,10 +506,49 @@ async function sendWhatsAppCtaButtonMessage(params: {
       }
     )
     const data = await res.json()
-    return data?.messages?.[0]?.id || null
+    if (data?.messages?.[0]?.id) {
+      return {
+        messageId: data.messages[0].id,
+        formattedText: `${params.bodyText}\n[Botão: ${label}]`,
+      }
+    }
+    console.warn('[WhatsApp CTA Button Failed] Tentando fallback de texto:', data)
   } catch (error) {
-    console.error('[WhatsApp CTA Button Error]:', error)
-    return null
+    console.error('[WhatsApp CTA Error]:', error)
+  }
+
+  // 2. Plano de contingência garantido (Mensagem de Texto)
+  const fallbackText =
+    `${params.bodyText}\n\n` +
+    `👉 *Link para pagamento (Pix ou Cartão):*\n${params.buttonUrl}\n\n` +
+    `_${params.footerText}_`
+
+  try {
+    const resText = await fetch(
+      `https://graph.facebook.com/v21.0/${params.phoneNumberId}/messages`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${params.accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to: params.toPhone,
+          type: 'text',
+          text: { body: fallbackText },
+        }),
+      }
+    )
+    const dataText = await resText.json()
+    return {
+      messageId: dataText?.messages?.[0]?.id || null,
+      formattedText: fallbackText,
+    }
+  } catch (err) {
+    console.error('[WhatsApp Fallback Error]:', err)
+    return { messageId: null, formattedText: fallbackText }
   }
 }
 
@@ -581,7 +620,6 @@ async function processMessage(
     .eq('sender_type', 'customer')
   const isFirstInboundMessage = (priorCustomerMsgCount ?? 0) === 0
 
-  // Salva mensagem recebida no banco
   const { error: msgError } = await supabaseAdmin().from('messages').insert({
     conversation_id: conversation.id,
     sender_type: 'customer',
@@ -613,15 +651,14 @@ async function processMessage(
   await flagBroadcastReplyIfAny(accountId, contactRecord.id)
 
   // ============================================================
-  // ⚡ PEDIDO VINDO DO SITE (laempanadas.com.br) COM BOTÃO CTA
+  // ⚡ PEDIDO VINDO DO SITE (laempanadas.com.br)
   // ============================================================
   const siteOrder = parseWebsiteOrder(contentText || '')
   if (siteOrder && siteOrder.total > 0) {
-    console.log('[webhook] Pedido site detectado. Total correto:', siteOrder.total)
+    console.log('[webhook] Processando pedido do site. Total:', siteOrder.total)
 
     const externalRef = `SITE-${Date.now()}-${contactRecord.id.substring(0, 5)}`
 
-    // Gera o link do Mercado Pago com o total correto
     const paymentResult = await createPaymentLink({
       items: siteOrder.items,
       externalReference: externalRef,
@@ -633,30 +670,30 @@ async function processMessage(
 
     if (paymentResult.paymentUrl) {
       const bodyText =
-        `Olá, *${siteOrder.cliente}*! Recebemos seu pedido! ✨\n\n` +
+        `Olá, *${siteOrder.cliente}*! Recebemos seu pedido com sucesso! ✨\n\n` +
         `📍 *Entrega em:* ${siteOrder.endereco || 'A combinar'}\n` +
         `💵 *Total:* ${siteOrder.totalFormatado}\n\n` +
         `Clique no botão abaixo para pagar com segurança via Pix (aprovação imediata) ou Cartão:`
 
-      // Envia com Botão Nativo CTA (sem link feio no texto)
-      const sentMsgId = await sendWhatsAppCtaButtonMessage({
+      // Envia via CTA ou Fallback garantido
+      const sendResult = await sendWhatsAppPaymentMessage({
         phoneNumberId,
         accessToken,
         toPhone: senderPhone,
         headerText: '🥟 La Empanadas',
         bodyText,
-        footerText: 'Mercado Pago • Produção após confirmação',
-        buttonText: '💳 Pagar Agora (Pix/Cartão)',
+        footerText: 'Mercado Pago • Produção imediata após confirmação',
+        buttonText: '💳 Pagar Agora',
         buttonUrl: paymentResult.paymentUrl,
       })
 
-      if (sentMsgId) {
+      if (sendResult.messageId) {
         await supabaseAdmin().from('messages').insert({
           conversation_id: conversation.id,
           sender_type: 'bot',
           content_type: 'interactive',
-          content_text: `${bodyText}\n[Botão: Pagar Agora]`,
-          message_id: sentMsgId,
+          content_text: sendResult.formattedText,
+          message_id: sendResult.messageId,
           status: 'sent',
           created_at: new Date().toISOString(),
         })
@@ -667,7 +704,7 @@ async function processMessage(
   }
 
   // ============================================================
-  // 🔄 FLUXOS NORMAIS (Catálogo Meta / Menus)
+  // 🔄 FLUXOS NORMAIS
   // ============================================================
   const flowResult = await dispatchInboundToFlows({
     accountId,
