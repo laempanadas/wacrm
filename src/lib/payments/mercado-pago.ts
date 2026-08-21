@@ -3,8 +3,6 @@
  *
  * ⚠️ SERVER-SIDE ONLY. Este módulo acessa `process.env.MP_ACCESS_TOKEN`
  * e só deve ser executado no backend (API Routes, Server Actions e Webhooks).
- *
- * Usa o SDK oficial `mercadopago` (Checkout Pro / Preferences).
  */
 
 import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
@@ -14,28 +12,19 @@ import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
 // ============================================================
 
 export interface PaymentLinkItem {
-  /** Descrição / Nome do item */
   title: string;
-  /** Quantidade */
   quantity: number;
-  /** Preço unitário em BRL (número decimal, ex: 14.00) */
   unitPrice: number;
 }
 
 export type DeliveryKind = 'delivery' | 'retirada';
 
 export interface CreatePaymentLinkParams {
-  /** Itens do pedido */
   items: PaymentLinkItem[];
-  /** Referência externa única (ex: PED-12345) */
   externalReference?: string;
-  /** Nome do pagador */
   payerName?: string;
-  /** Telefone do pagador */
   payerPhone?: string;
-  /** Tipo de recebimento */
   deliveryKind?: DeliveryKind;
-  /** Endereço de entrega */
   deliveryAddress?: string;
 }
 
@@ -65,17 +54,14 @@ export interface PaymentStatusResult {
 // Constantes e Utilitários de Segurança
 // ============================================================
 
-/** ⚠️ [CORREÇÃO]: Exportação exigida pelas rotas de status e API */
 export const MP_NOT_CONFIGURED_MESSAGE =
-  'Mercado Pago não configurado. Adicione MP_ACCESS_TOKEN nas variáveis de ambiente (Vercel → Settings → Environment Variables) e faça um redeploy. Veja docs/vercel-deploy.md.';
+  'Mercado Pago não configurado. Adicione MP_ACCESS_TOKEN nas variáveis de ambiente (Vercel → Settings → Environment Variables) e faça um redeploy.';
 
-/** Indica se as credenciais do Mercado Pago estão configuradas no ambiente */
 export function isMercadoPagoConfigured(): boolean {
   const token = process.env.MP_ACCESS_TOKEN;
   return Boolean(token && token.trim().length > 10);
 }
 
-/** Cria um client do SDK autenticado com o Access Token */
 function getClient(): MercadoPagoConfig {
   const accessToken = process.env.MP_ACCESS_TOKEN?.trim();
   if (!accessToken) {
@@ -84,7 +70,6 @@ function getClient(): MercadoPagoConfig {
   return new MercadoPagoConfig({ accessToken });
 }
 
-/** Normaliza status bruto retornado pelo Mercado Pago */
 export function normalizePaymentStatus(
   raw: string | null | undefined
 ): PaymentStatus {
@@ -111,14 +96,10 @@ export function normalizePaymentStatus(
 // Criação de Link de Pagamento (Checkout Pro)
 // ============================================================
 
-/**
- * Cria uma preferência de pagamento no Mercado Pago e devolve a URL
- * pronta para envio no WhatsApp.
- */
 export async function createPaymentLink(
   params: CreatePaymentLinkParams
 ): Promise<PaymentLinkResult> {
-  if (!params.items.length) {
+  if (!params.items || !params.items.length) {
     throw new Error('Informe ao menos um item para gerar o link de pagamento.');
   }
 
@@ -181,12 +162,9 @@ export async function createPaymentLink(
 }
 
 // ============================================================
-// Consulta e Verificação de Status
+// Consulta de Status
 // ============================================================
 
-/**
- * Consulta status de pagamento direto por ID do Mercado Pago.
- */
 export async function getPaymentById(
   paymentId: string | number
 ): Promise<PaymentStatusResult> {
@@ -208,9 +186,6 @@ export async function getPaymentById(
   }
 }
 
-/**
- * Consulta status de pagamento associado a uma external_reference (ID do pedido).
- */
 export async function getPaymentStatusByExternalReference(
   externalReference: string
 ): Promise<PaymentStatusResult> {
