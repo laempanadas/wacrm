@@ -24,6 +24,7 @@ import {
 } from '@/lib/payments/mercado-pago';
 
 // Instância com Service Role para gravação segura na tabela 'orders'
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _adminClient: any = null;
 function supabaseAdmin() {
   if (!_adminClient) {
@@ -46,8 +47,10 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    // 1. Garante sessão válida e obtém o account_id autenticado
-    const account = await getCurrentAccount();
+    // 1. Garante sessão válida e obtém o contexto da conta
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const accountContext: any = await getCurrentAccount();
+    const accountId = accountContext.accountId || accountContext.id || accountContext.account_id;
 
     if (!isMercadoPagoConfigured()) {
       return NextResponse.json(
@@ -140,7 +143,7 @@ export async function POST(request: Request) {
     if (result.ok && result.paymentUrl) {
       try {
         await supabaseAdmin().from('orders').insert({
-          account_id: account.id,
+          account_id: accountId,
           contact_id: contactId,
           external_reference: externalReference,
           preference_id: result.preferenceId,
