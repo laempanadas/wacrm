@@ -649,7 +649,7 @@ async function processMessage(
     .eq('id', conversation.id)
 
   await flagBroadcastReplyIfAny(accountId, contactRecord.id)
-
+ 
   // ============================================================
   // ⚡ PEDIDO VINDO DO SITE (laempanadas.com.br)
   // ============================================================
@@ -669,9 +669,29 @@ async function processMessage(
     })
 
     if (paymentResult.paymentUrl) {
+      // 🛡️ SALVA NA TABELA ORDERS PARA O CRON DE 15 MIN E O WEBHOOK DO MERCADO PAGO ENCONTRAREM
+      try {
+        await supabaseAdmin().from('orders').insert({
+          account_id: accountId,
+          contact_id: contactRecord.id,
+          external_reference: externalRef,
+          preference_id: paymentResult.preferenceId,
+          payment_url: paymentResult.paymentUrl,
+          total: siteOrder.total,
+          items: siteOrder.items,
+          delivery_address: siteOrder.endereco,
+          payer_phone: senderPhone,
+          payer_name: siteOrder.cliente,
+          status: 'pending',
+        })
+        console.log('[webhook] Pedido do site gravado na tabela orders:', externalRef)
+      } catch (insertErr) {
+        console.error('[webhook] Erro ao gravar pedido na tabela orders:', insertErr)
+      }
+
       const bodyText =
-        `Olá, *${siteOrder.cliente}*! Recebemos seu pedido com sucesso! ✨\n\n` +
-        `📍 *Entrega em:* ${siteOrder.endereco || 'A combinar'}\n` +
+        `Olá, *${siteOrder.cliente}*! Recebemos seu pedido com sucesso! 🥟✨\n\n` +
+        `📍 *Entrega:* ${siteOrder.endereco || 'A combinar'}\n` +
         `💵 *Total:* ${siteOrder.totalFormatado}\n\n` +
         `Clique no botão abaixo para pagar com segurança via Pix (aprovação imediata) ou Cartão:`
 
@@ -702,7 +722,6 @@ async function processMessage(
 
     return
   }
-
   // ============================================================
   // 🔄 FLUXOS NORMAIS
   // ============================================================
