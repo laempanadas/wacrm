@@ -25,14 +25,13 @@ export async function GET(request: Request) {
     const targetDate = new Date(Date.now() - minutesToWait * 60 * 1000).toISOString();
     const maxWindowDate = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
-    console.log(`[Cron Reminder] Buscando pedidos criados antes de ${targetDate}...`);
-
     let query = supabaseAdmin()
       .from('orders')
       .select('*')
       .eq('status', 'pending')
       .lte('created_at', targetDate)
-      .gte('created_at', maxWindowDate);
+      .gte('created_at', maxWindowDate)
+      .order('created_at', { ascending: false });
 
     if (!forceTest) {
       query = query.is('reminded_at', null);
@@ -41,7 +40,7 @@ export async function GET(request: Request) {
     const { data: pendingOrders, error: ordersError } = await query;
 
     if (ordersError) {
-      console.error('[Cron Reminder] Erro ao consultar tabela orders:', ordersError);
+      console.error('[Cron Reminder] Erro ao consultar orders:', ordersError);
       return NextResponse.json({ error: 'Erro ao consultar tabela orders', details: ordersError }, { status: 500 });
     }
 
@@ -52,14 +51,11 @@ export async function GET(request: Request) {
         .eq('status', 'pending');
 
       return NextResponse.json({
-        message: 'Nenhum pedido elegível no momento.',
+        message: 'Nenhum pedido pendente elegível.',
         pedidosPendentesNoBanco: totalPending || 0,
         criterioTempo: `Mais de ${minutesToWait} minutos atrás`,
-        dica: 'Para testar imediatamente sem esperar 15min, acesse com ?force=true',
       });
     }
-
-    console.log(`[Cron Reminder] Encontrados ${pendingOrders.length} pedidos pendentes.`);
 
     const { data: allConfigs } = await supabaseAdmin()
       .from('whatsapp_config')
@@ -72,7 +68,15 @@ export async function GET(request: Request) {
       }, { status: 500 });
     }
 
-    // Tipagem com messageId opcional para resolver o erro
+    // Garante que só envia para cada número de telefone 1 única vez por rodada (o pedido mais recente)
+    const seenPhones = new Set<string>();
+    const uniqueOrders = pendingOrders.filter((order: any) => {
+      let raw = String(order.payer_phone || '').replace(/\D/g, '');
+      if (seenPhones.has(raw)) return false;
+      seenPhones.add(raw);
+      return true;
+    });
+
     const results: Array<{
       orderId: string;
       phone: string;
@@ -81,7 +85,7 @@ export async function GET(request: Request) {
       error?: any;
     }> = [];
 
-    for (const order of pendingOrders) {
+    for (const order of uniqueOrders) {
       if (!order.payer_phone || !order.payment_url) {
         results.push({ orderId: order.id, phone: order.payer_phone, status: 'skipped_no_phone_or_url' });
         continue;
@@ -102,14 +106,17 @@ export async function GET(request: Request) {
       const valorFormatado = Number(order.total || 0).toFixed(2).replace('.', ',');
       const nomeCliente = order.payer_name || 'Cliente';
 
-      const reminderText =
+      // Mensagem limpa: sem a URL no meio do texto, com o botão interativo direto
+      const headerText = '🥟 La Empanadas';
+      const bodyText =
         `Oi, *${nomeCliente}*! Tudo bem? 😊\n\n` +
         `Passando para lembrar que o seu pedido de *R$ ${valorFormatado}* ainda está aguardando confirmação.\n\n` +
-        `Para garantir que suas empanadas saiam quentinhas do forno no horário, você pode concluir o pagamento pelo link abaixo via Pix ou Cartão:\n\n` +
-        `👉 ${order.payment_url}\n\n` +
-        `Se precisar de alguma alteração no pedido ou ajuda, basta responder aqui! 🥟✨`;
+        `Para garantir que suas empanadas saiam quentinhas do forno no horário, você pode concluir o pagamento pelo botão abaixo via Pix ou Cartão:`;
+      const footerText = 'Mercado Pago • Produção imediata após confirmação';
+      const buttonLabel = '💳 Pagar Agora';
 
       try {
+        // 1. Tenta enviar como Botão Interativo Nativo CTA da Meta
         const res = await fetch(
           `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`,
           {
@@ -122,21 +129,70 @@ export async function GET(request: Request) {
               messaging_product: 'whatsapp',
               recipient_type: 'individual',
               to: rawPhone,
-              type: 'text',
-              text: { body: reminderText },
+              type: 'interactive',
+              interactive: {
+                type: 'cta_url',
+                header: {
+                  type: 'text',
+                  text: headerText,
+                },
+                body: {
+                  text: bodyText,
+                },
+                footer: {
+                  text: footerText,
+                },
+                action: {
+                  name: 'cta_url',
+                  parameters: {
+                    display_text: buttonLabel,
+                    url: order.payment_url,
+                  },
+                },
+              },
             }),
           }
         );
 
-        const resData = await res.json();
+        let resData = await res.json();
+
+        // 2. Se o botão falhar por restrição da Meta, usa o fallback de texto
+        if (!resData?.messages?.[0]?.id) {
+          console.warn('[Cron Reminder] Botão CTA falhou, enviando fallback de texto:', resData);
+          const fallbackText =
+            `${bodyText}\n\n` +
+            `👉 *Link para pagamento:*\n${order.payment_url}\n\n` +
+            `_${footerText}_`;
+
+          const fallbackRes = await fetch(
+            `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`,
+            {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${accessToken}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                messaging_product: 'whatsapp',
+                recipient_type: 'individual',
+                to: rawPhone,
+                type: 'text',
+                text: { body: fallbackText },
+              }),
+            }
+          );
+          resData = await fallbackRes.json();
+        }
 
         if (resData?.messages?.[0]?.id) {
+          // Marca TODOS os pedidos pendentes anteriores desse mesmo telefone como lembrados
           await supabaseAdmin()
             .from('orders')
             .update({
               reminded_at: new Date().toISOString(),
             })
-            .eq('id', order.id);
+            .eq('payer_phone', order.payer_phone)
+            .eq('status', 'pending');
 
           results.push({
             orderId: order.id,
