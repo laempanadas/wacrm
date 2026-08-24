@@ -4,6 +4,7 @@ import { decrypt } from '@/lib/whatsapp/encryption';
 
 export const dynamic = 'force-dynamic';
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _adminClient: any = null;
 function supabaseAdmin() {
   if (!_adminClient) {
@@ -16,56 +17,87 @@ function supabaseAdmin() {
 
 export async function GET(request: Request) {
   try {
-    const authHeader = request.headers.get('authorization');
-    if (
-      process.env.CRON_SECRET &&
-      authHeader !== `Bearer ${process.env.CRON_SECRET}`
-    ) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    const { searchParams } = new URL(request.url);
+    const forceTest = searchParams.get('force') === 'true';
+    const customMinutes = parseInt(searchParams.get('minutes') || '15', 10);
 
-    const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
-    const twoHoursAgo = new Date(Date.now() - 120 * 60 * 1000).toISOString();
+    const minutesToWait = forceTest ? 0 : customMinutes;
+    const targetDate = new Date(Date.now() - minutesToWait * 60 * 1000).toISOString();
+    const maxWindowDate = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
-    const { data: pendingOrders, error: ordersError } = await supabaseAdmin()
+    console.log(`[Cron Reminder] Buscando pedidos criados antes de ${targetDate}...`);
+
+    let query = supabaseAdmin()
       .from('orders')
       .select('*')
       .eq('status', 'pending')
-      .lte('created_at', fifteenMinutesAgo)
-      .gte('created_at', twoHoursAgo)
-      .is('reminded_at', null);
+      .lte('created_at', targetDate)
+      .gte('created_at', maxWindowDate);
+
+    if (!forceTest) {
+      query = query.is('reminded_at', null);
+    }
+
+    const { data: pendingOrders, error: ordersError } = await query;
 
     if (ordersError) {
-      console.error('[Cron Reminder] Erro ao consultar pedidos:', ordersError);
-      return NextResponse.json({ error: 'Database query failed' }, { status: 500 });
+      console.error('[Cron Reminder] Erro ao consultar tabela orders:', ordersError);
+      return NextResponse.json({ error: 'Erro ao consultar tabela orders', details: ordersError }, { status: 500 });
     }
 
     if (!pendingOrders || pendingOrders.length === 0) {
+      const { count: totalPending } = await supabaseAdmin()
+        .from('orders')
+        .select('*', { count: 'exact', head: true })
+        .eq('status', 'pending');
+
       return NextResponse.json({
-        message: 'Nenhum pedido pendente para envio de lembrete.',
-        processed: 0,
+        message: 'Nenhum pedido elegível no momento.',
+        pedidosPendentesNoBanco: totalPending || 0,
+        criterioTempo: `Mais de ${minutesToWait} minutos atrás`,
+        dica: 'Para testar imediatamente sem esperar 15min, acesse com ?force=true',
       });
     }
 
-    console.log(`[Cron Reminder] ${pendingOrders.length} pedido(s) pendentes encontrados.`);
-    let remindersSent = 0;
+    console.log(`[Cron Reminder] Encontrados ${pendingOrders.length} pedidos pendentes.`);
+
+    const { data: allConfigs } = await supabaseAdmin()
+      .from('whatsapp_config')
+      .select('*')
+      .limit(5);
+
+    if (!allConfigs || allConfigs.length === 0) {
+      return NextResponse.json({
+        error: 'Nenhuma conta do WhatsApp encontrada na tabela whatsapp_config.',
+      }, { status: 500 });
+    }
+
+    // Tipagem com messageId opcional para resolver o erro
+    const results: Array<{
+      orderId: string;
+      phone: string;
+      status: string;
+      messageId?: string;
+      error?: any;
+    }> = [];
 
     for (const order of pendingOrders) {
-      if (!order.payer_phone || !order.payment_url) continue;
-
-      const { data: configRows } = await supabaseAdmin()
-        .from('whatsapp_config')
-        .select('*')
-        .eq('account_id', order.account_id)
-        .limit(1);
-
-      if (!configRows || configRows.length === 0) {
+      if (!order.payer_phone || !order.payment_url) {
+        results.push({ orderId: order.id, phone: order.payer_phone, status: 'skipped_no_phone_or_url' });
         continue;
       }
 
-      const config = configRows[0];
+      const config =
+        allConfigs.find((c: any) => c.account_id === order.account_id) ||
+        allConfigs[0];
+
       const accessToken = decrypt(config.access_token);
       const phoneNumberId = config.phone_number_id;
+
+      let rawPhone = String(order.payer_phone).replace(/\D/g, '');
+      if (rawPhone.length <= 11 && !rawPhone.startsWith('55')) {
+        rawPhone = '55' + rawPhone;
+      }
 
       const valorFormatado = Number(order.total || 0).toFixed(2).replace('.', ',');
       const nomeCliente = order.payer_name || 'Cliente';
@@ -89,7 +121,7 @@ export async function GET(request: Request) {
             body: JSON.stringify({
               messaging_product: 'whatsapp',
               recipient_type: 'individual',
-              to: order.payer_phone,
+              to: rawPhone,
               type: 'text',
               text: { body: reminderText },
             }),
@@ -106,20 +138,37 @@ export async function GET(request: Request) {
             })
             .eq('id', order.id);
 
-          remindersSent++;
+          results.push({
+            orderId: order.id,
+            phone: rawPhone,
+            status: 'sent',
+            messageId: resData.messages[0].id,
+          });
+        } else {
+          results.push({
+            orderId: order.id,
+            phone: rawPhone,
+            status: 'failed_meta',
+            error: resData,
+          });
         }
-      } catch (sendError) {
-        console.error('[Cron Reminder] Falha no envio:', sendError);
+      } catch (err: any) {
+        results.push({
+          orderId: order.id,
+          phone: rawPhone,
+          status: 'error',
+          error: err.message,
+        });
       }
     }
 
     return NextResponse.json({
       success: true,
-      remindersSent,
-      totalEligible: pendingOrders.length,
+      processed: results.length,
+      details: results,
     });
-  } catch (error) {
-    console.error('[Cron Reminder Global Error]:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  } catch (error: any) {
+    console.error('[Cron Reminder Fatal Error]:', error);
+    return NextResponse.json({ error: 'Internal Error', message: error?.message }, { status: 500 });
   }
 }
