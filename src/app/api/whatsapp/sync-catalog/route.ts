@@ -27,28 +27,25 @@ export async function GET() {
     const accessToken = decrypt(config.access_token);
     const phoneNumberId = config.phone_number_id;
 
-    // 1. Envia a ativação forçada para a Meta
+    // 1. Força a ativação via Query Params (Padrão estrito da Graph API Meta)
     const metaResponse = await fetch(
-      `https://graph.facebook.com/v21.0/${phoneNumberId}/whatsapp_commerce_settings`,
+      `https://graph.facebook.com/v21.0/${phoneNumberId}/whatsapp_commerce_settings?is_catalog_visible=true&is_cart_enabled=true`,
       {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          is_catalog_visible: true,
-          is_cart_enabled: true,
-        }),
       }
     );
 
     const result = await metaResponse.json();
 
-    // 2. Consulta o status retornado pela Meta
+    // 2. Consulta o status real atualizado na Meta
     const checkResponse = await fetch(
       `https://graph.facebook.com/v21.0/${phoneNumberId}/whatsapp_commerce_settings`,
       {
+        method: 'GET',
         headers: {
           Authorization: `Bearer ${accessToken}`,
         },
