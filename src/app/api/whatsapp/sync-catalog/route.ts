@@ -14,11 +14,12 @@ const supabaseAdmin = createClient(
 /**
  * Helpers
  */
-function normalizePhone(phone?: string) {
+function normalizePhone(phone?: string | null) {
   return String(phone ?? '').replace(/\D/g, '');
 }
-function isValidPhone(phone?: string) {
-  return /^\d{8,15}$/.test(String(phone ?? ''));
+function isValidPhone(phone?: string | null) {
+  const p = String(phone ?? '');
+  return /^\d{8,15}$/.test(p);
 }
 function nowISO() {
   return new Date().toISOString();
@@ -37,7 +38,6 @@ async function syncCatalogWithMeta(
   products: any[],
   requestId?: string
 ): Promise<{ success: boolean; metaResult?: any; error?: string }> {
-  // Simulate latency for now
   await new Promise((r) => setTimeout(r, 300));
   return { success: true, metaResult: { synced: products.length, requestId } };
 }
@@ -48,12 +48,13 @@ async function syncCatalogWithMeta(
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
-    const targetPhone = searchParams.get('phone');
+    const targetPhoneRaw = searchParams.get('phone'); // string | null
+    const targetPhone = normalizePhone(targetPhoneRaw);
 
-    if (!isValidPhone(normalizePhone(targetPhone))) {
+    if (!isValidPhone(targetPhone)) {
       return NextResponse.json({ success: false, error: 'missing_or_invalid_phone' }, { status: 400 });
     }
-    const phone = normalizePhone(targetPhone);
+    const phone = targetPhone;
 
     // Fetch products from Supabase
     const { data: products, error: prodErr } = await supabaseAdmin
@@ -112,18 +113,15 @@ export async function GET(request: Request) {
  * {
  *   "phone": "551126690644",
  *   "requestId": "optional-idempotency-key",
+ *   "sendToPhone": true,
  *   "products": [{ "external_id":"sku1", "name":"Empanada Atum", "price":10.5, "currency":"BRL", "image_url":"https://..." }, ...]
  * }
  */
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as
-      | {
-          phone?: string;
-          requestId?: string;
-          products?: any[];
-        }
-      | undefined;
+    const rawBody = await request.json();
+    const body: { phone?: string | null; requestId?: string | null; products?: any[]; sendToPhone?: boolean } =
+      rawBody ?? {};
 
     if (!body || !body.phone) {
       return NextResponse.json({ success: false, error: 'missing_phone_in_body' }, { status: 400 });
@@ -144,7 +142,6 @@ export async function POST(request: Request) {
 
     if (existingErr) {
       console.error('Supabase error checking existing sync:', existingErr);
-      // proceed; we'll handle potential unique constraint on insert
     }
     if (existingSync) {
       return NextResponse.json({ success: true, phone, requestId, message: 'request_already_processed', status: existingSync.status }, { status: 200 });
@@ -197,7 +194,6 @@ export async function POST(request: Request) {
 
     if (createSyncErr) {
       console.error('Supabase create catalog_syncs error:', createSyncErr);
-      // If it's a unique-constraint collision on request_id, treat as idempotent
       if (String(createSyncErr.message ?? '').includes('duplicate') || String(createSyncErr.code ?? '').includes('23505')) {
         return NextResponse.json({ success: true, phone, requestId, message: 'request_already_processed' }, { status: 200 });
       }
@@ -227,7 +223,6 @@ export async function POST(request: Request) {
           },
         }
       );
-      // consume response for logging/debug (without exposing token)
       const confText = await confRes.text();
       let confJson: any = null;
       try {
@@ -237,7 +232,6 @@ export async function POST(request: Request) {
       }
       if (!confRes.ok) {
         console.error('Error setting whatsapp_commerce_settings', { status: confRes.status, response: confJson });
-        // continue but mark sync as failed
         await supabaseAdmin.from('catalog_syncs').update({ status: 'failed', meta_response: confJson }).eq('request_id', requestId);
         return NextResponse.json({ success: false, error: 'meta_config_failed', details: confJson }, { status: 502 });
       }
@@ -249,16 +243,13 @@ export async function POST(request: Request) {
 
     // 2) If the request body asked to send the catalog to a phone, send interactive product_list message
     let sendResult: any = null;
-    // BEGIN: Replaced block (old catalog_message payload is left commented below)
-    if (body && body.sendToPhone) {
-      // The client can opt-in to request sending to a phone by passing { sendToPhone: true } and the phone in body.phone
+    if (body.sendToPhone) {
       const cleanPhone = phone; // already normalized above
 
       // Validate catalog id config
-      const catalogId = process.env.META_CATALOG_ID ?? config.catalog_id ?? null;
+      const catalogId = process.env.META_CATALOG_ID ?? (config as any).catalog_id ?? null;
       if (!catalogId) {
         console.error('META_CATALOG_ID missing and not found in config');
-        // Update sync as failed
         await supabaseAdmin.from('catalog_syncs').update({ status: 'failed', meta_response: { error: 'catalog_id_missing' } }).eq('request_id', requestId);
         return NextResponse.json({ success: false, error: 'catalog_id_missing' }, { status: 500 });
       }
@@ -310,7 +301,6 @@ export async function POST(request: Request) {
 
         if (!sendRes.ok) {
           console.error('Meta API error sending product_list', { status: sendRes.status, response: sendResult });
-          // mark sync failed with meta response
           await supabaseAdmin
             .from('catalog_syncs')
             .update({ status: 'failed', meta_response: sendResult })
@@ -322,11 +312,7 @@ export async function POST(request: Request) {
         await supabaseAdmin.from('catalog_syncs').update({ status: 'failed', meta_response: { error: String(err) } }).eq('request_id', requestId);
         return NextResponse.json({ success: false, error: 'meta_message_network_error' }, { status: 502 });
       }
-    } else {
-      // If sendToPhone not requested, we just performed upsert + created sync record
-      // Optionally: enqueue a background job to sync large catalogs with Meta.
     }
-    // END: Replaced block
 
     // Update catalog_syncs as success and attach meta response (if any)
     const finalMeta = sendResult ?? { note: 'no_send_performed' };
@@ -347,38 +333,3 @@ export async function POST(request: Request) {
     console.error('POST /api/whatsapp/sync-catalog unexpected error:', err);
     return NextResponse.json({ success: false, error: err.message ?? 'internal_error' }, { status: 500 });
   }
-}
-
-/**
- * ------------------------------------------------------------
- * Old (problematic) payload that caused (#100) Invalid parameter:
- *
- * // body: JSON.stringify({
- * //   messaging_product: 'whatsapp',
- * //   recipient_type: 'individual',
- * //   to: cleanPhone,
- * //   type: 'interactive',
- * //   interactive: {
- * //     type: 'catalog_message',
- * //     body: {
- * //       text: '🥟 Bem-vindo à La Empanadas!\n\nToque no botão abaixo para abrir nosso cardápio completo e fazer seu pedido:',
- * //     },
- * //     action: {
- * //       name: 'catalog_message',
- * //       parameters: {
- * //         thumbnail_product_retailer_id: 'emp_Atum', // ID real do seu catálogo
- * //       },
- * //     },
- * //     footer: {
- * //       text: 'La Empanadas Delivery',
- * //     },
- * //   },
- * // })
- *
- * Reason it failed:
- * - interactive.type = 'catalog_message' and action.parameters.thumbnail_product_retailer_id do not match Graph API documented schema.
- * - Use interactive.type 'product_list' with action.catalog_id or 'product' with action.product_retailer_id.
- *
- * Keep the commented snippet above for reference while debugging.
- * ------------------------------------------------------------
- */
