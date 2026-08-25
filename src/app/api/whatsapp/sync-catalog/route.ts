@@ -1,90 +1,46 @@
-import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
-import { decrypt } from '@/lib/whatsapp/encryption';
+# GET /api/whatsapp/send-catalog-test
 
-export const dynamic = 'force-dynamic';
+Status: 404
 
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+## Request
 
-export async function GET(request: Request) {
-  try {
-    const { searchParams } = new URL(request.url);
-    const targetPhone = searchParams.get('phone');
+Started: Aug 25 10:22:21.75 GMT-3
 
-    const { data: configs, error } = await supabaseAdmin
-      .from('whatsapp_config')
-      .select('*')
-      .limit(1);
+Request ID: 7zk5c-1787664141758-4e65f98eaef8
 
-    if (error || !configs || configs.length === 0) {
-      return NextResponse.json(
-        { error: 'Configuração do WhatsApp não encontrada no banco.' },
-        { status: 404 }
-      );
-    }
+Path: /api/whatsapp/send-catalog-test
 
-    const config = configs[0];
-    const accessToken = decrypt(config.access_token);
-    const phoneNumberId = config.phone_number_id;
+Host: wacrm-eta-ten.vercel.app
 
-    // 1. Ativação de visibilidade na Meta
-    await fetch(
-      `https://graph.facebook.com/v21.0/${phoneNumberId}/whatsapp_commerce_settings?is_catalog_visible=true&is_cart_enabled=true`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
+User Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
 
-    // 2. Se você passou um telefone na URL, envia o catálogo direto para esse número
-    let sendResult = null;
-    if (targetPhone) {
-      const cleanPhone = targetPhone.replace(/\D/g, '');
-      const sendRes = await fetch(
-        `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            messaging_product: 'whatsapp',
-            recipient_type: 'individual',
-            to: cleanPhone,
-            type: 'interactive',
-            interactive: {
-              type: 'catalog_message',
-              body: {
-                text: '🥟 Bem-vindo à La Empanadas!\n\nClique no botão abaixo para explorar nosso cardápio completo e fazer seu pedido:',
-              },
-              action: {
-                name: 'catalog_message',
-              },
-              footer: {
-                text: 'La Empanadas Delivery',
-              },
-            },
-          }),
-        }
-      );
-      sendResult = await sendRes.json();
-    }
+Parâmetros de pesquisa
 
-    return NextResponse.json({
-      success: true,
-      message: targetPhone
-        ? `Catálogo ativado e enviado para o número ${targetPhone}`
-        : 'Catálogo ativado com sucesso na Meta.',
-      sendResult,
-    });
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
-  }
-}
+- phone=551126690644
+
+Recebido em São Paulo, Brasil (gru1)
+
+### Firewall
+
+Permitido
+
+### Middleware
+
+200
+
+Memory Used: 222 MB
+
+### APIs externas
+
+**APIs externas**
+
+|  | de solicitação | de método |
+| - | - | - |
+| PEGAR |  |
+
+Resposta concluída em 807ms
+
+## Informações sobre o destacamento
+Deployment ID: dpl_7fCBzTUNUVNpjgCKkTFg5Eot2xaT
+Environment: production
+Branch: main
