@@ -143,9 +143,10 @@ export async function POST(request: Request) {
     }
 
     if (deduped.length > 0) {
+      // Note: onConflict expects a comma-separated string in this @supabase/supabase-js version
       const { error: upsertErr } = await supabaseAdmin
         .from('products')
-        .upsert(deduped.map((r) => ({ ...r, phone })), { onConflict: ['phone', 'external_id'], returning: 'minimal' });
+        .upsert(deduped.map((r) => ({ ...r, phone })), { onConflict: 'phone,external_id', returning: 'minimal' });
       if (upsertErr) {
         console.error('Supabase upsert products error:', upsertErr);
         return NextResponse.json({ success: false, error: 'db_error_upsert_products' }, { status: 500 });
