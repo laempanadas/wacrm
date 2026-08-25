@@ -9,54 +9,57 @@ const supabaseAdmin = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    const { data: configs, error } = await supabaseAdmin
+    const { searchParams } = new URL(request.url);
+    // Passe seu telefone na URL: ?phone=5511999999999
+    const toPhone = searchParams.get('phone') || '5511999999999'; 
+
+    const { data: configs } = await supabaseAdmin
       .from('whatsapp_config')
       .select('*')
       .limit(1);
 
-    if (error || !configs || configs.length === 0) {
-      return NextResponse.json(
-        { error: 'Configuração do WhatsApp não encontrada no banco.' },
-        { status: 404 }
-      );
+    if (!configs || configs.length === 0) {
+      return NextResponse.json({ error: 'Configuração não encontrada' }, { status: 404 });
     }
 
     const config = configs[0];
     const accessToken = decrypt(config.access_token);
     const phoneNumberId = config.phone_number_id;
 
-    // 1. Força a ativação via Query Params (Padrão estrito da Graph API Meta)
-    const metaResponse = await fetch(
-      `https://graph.facebook.com/v21.0/${phoneNumberId}/whatsapp_commerce_settings?is_catalog_visible=true&is_cart_enabled=true`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
+    // Dispara a mensagem oficial de catálogo da Meta
+    const res = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: toPhone,
+        type: 'interactive',
+        interactive: {
+          type: 'catalog_message',
+          body: {
+            text: '🥟 Bem-vindo à La Empanadas!\n\nClique no botão abaixo para explorar nosso cardápio completo e fazer seu pedido:',
+          },
+          action: {
+            name: 'catalog_message',
+          },
+          footer: {
+            text: 'La Empanadas Delivery',
+          },
         },
-      }
-    );
+      }),
+    });
 
-    const result = await metaResponse.json();
-
-    // 2. Consulta o status real atualizado na Meta
-    const checkResponse = await fetch(
-      `https://graph.facebook.com/v21.0/${phoneNumberId}/whatsapp_commerce_settings`,
-      {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-      }
-    );
-    const currentSettings = await checkResponse.json();
+    const data = await res.json();
 
     return NextResponse.json({
-      success: result.success === true,
-      metaPostResult: result,
-      currentSettingsOnMeta: currentSettings,
+      statusSent: res.ok,
+      metaResponse: data,
     });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
