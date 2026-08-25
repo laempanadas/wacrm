@@ -5,15 +5,12 @@ import { decrypt } from '@/lib/whatsapp/encryption';
 
 export const dynamic = 'force-dynamic';
 
-// Supabase admin client (server-side)
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-/**
- * Helpers
- */
+/* Helpers */
 function normalizePhone(phone?: string | null) {
   return String(phone ?? '').replace(/\D/g, '');
 }
@@ -26,13 +23,7 @@ function nowISO() {
 }
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
-/**
- * Placeholder: implement Graph API integration here.
- * This stub should be replaced by real implementation that:
- * - upserts catalog items, stores product_retailer_id in your DB,
- * - handles uploads for images if necessary,
- * - returns structured metaResult for logging.
- */
+/* Placeholder sync function (stub) */
 async function syncCatalogWithMeta(
   phone: string,
   products: any[],
@@ -42,13 +33,11 @@ async function syncCatalogWithMeta(
   return { success: true, metaResult: { synced: products.length, requestId } };
 }
 
-/**
- * GET handler: returns local products and last sync info for a phone
- */
+/* GET handler */
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
-    const targetPhoneRaw = searchParams.get('phone'); // string | null
+    const targetPhoneRaw = searchParams.get('phone');
     const targetPhone = normalizePhone(targetPhoneRaw);
 
     if (!isValidPhone(targetPhone)) {
@@ -56,7 +45,6 @@ export async function GET(request: Request) {
     }
     const phone = targetPhone;
 
-    // Fetch products from Supabase
     const { data: products, error: prodErr } = await supabaseAdmin
       .from('products')
       .select('external_id, name, price_cents, currency, image_url, description, availability, updated_at')
@@ -69,7 +57,6 @@ export async function GET(request: Request) {
       return NextResponse.json({ success: false, error: 'db_error_fetch_products' }, { status: 500 });
     }
 
-    // Fetch last sync
     const { data: lastSyncs, error: syncErr } = await supabaseAdmin
       .from('catalog_syncs')
       .select('request_id, status, synced_count, meta_response, created_at')
@@ -96,32 +83,18 @@ export async function GET(request: Request) {
 
     const lastSync = Array.isArray(lastSyncs) && lastSyncs.length > 0 ? lastSyncs[0] : null;
 
-    return NextResponse.json(
-      { success: true, phone, items_count: items.length, lastSync, items },
-      { status: 200, headers: JSON_HEADERS }
-    );
+    return NextResponse.json({ success: true, phone, items_count: items.length, lastSync, items }, { status: 200, headers: JSON_HEADERS });
   } catch (err: any) {
     console.error('GET /api/whatsapp/sync-catalog error:', err);
     return NextResponse.json({ success: false, error: 'internal_error' }, { status: 500 });
   }
 }
 
-/**
- * POST handler: upsert products, create catalog_sync record, call Meta and update record
- *
- * Request body (example):
- * {
- *   "phone": "551126690644",
- *   "requestId": "optional-idempotency-key",
- *   "sendToPhone": true,
- *   "products": [{ "external_id":"sku1", "name":"Empanada Atum", "price":10.5, "currency":"BRL", "image_url":"https://..." }, ...]
- * }
- */
+/* POST handler */
 export async function POST(request: Request) {
   try {
     const rawBody = await request.json();
-    const body: { phone?: string | null; requestId?: string | null; products?: any[]; sendToPhone?: boolean } =
-      rawBody ?? {};
+    const body: { phone?: string | null; requestId?: string | null; products?: any[]; sendToPhone?: boolean } = rawBody ?? {};
 
     if (!body || !body.phone) {
       return NextResponse.json({ success: false, error: 'missing_phone_in_body' }, { status: 400 });
@@ -133,7 +106,6 @@ export async function POST(request: Request) {
 
     const requestId = body.requestId ?? `rid:${phone}:${Date.now()}`;
 
-    // Idempotency check: if request already processed return existing status
     const { data: existingSync, error: existingErr } = await supabaseAdmin
       .from('catalog_syncs')
       .select('id, status')
@@ -147,7 +119,6 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: true, phone, requestId, message: 'request_already_processed', status: existingSync.status }, { status: 200 });
     }
 
-    // Normalize & dedupe products
     const productsIn = Array.isArray(body.products) ? body.products : [];
     const deduped: any[] = [];
     const seen = new Set<string>();
@@ -171,21 +142,16 @@ export async function POST(request: Request) {
       });
     }
 
-    // Upsert products in Supabase
     if (deduped.length > 0) {
       const { error: upsertErr } = await supabaseAdmin
         .from('products')
-        .upsert(
-          deduped.map((r) => ({ ...r, phone })),
-          { onConflict: ['phone', 'external_id'], returning: 'minimal' }
-        );
+        .upsert(deduped.map((r) => ({ ...r, phone })), { onConflict: ['phone', 'external_id'], returning: 'minimal' });
       if (upsertErr) {
         console.error('Supabase upsert products error:', upsertErr);
         return NextResponse.json({ success: false, error: 'db_error_upsert_products' }, { status: 500 });
       }
     }
 
-    // Create catalog_syncs record (pending)
     const { data: createdSync, error: createSyncErr } = await supabaseAdmin
       .from('catalog_syncs')
       .insert([{ phone, request_id: requestId, status: 'pending', synced_count: deduped.length, meta_response: null }])
@@ -200,8 +166,6 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error: 'db_error_create_sync' }, { status: 500 });
     }
 
-    // Call external Meta APIs: (1) ensure catalog visible, (2) send message (if phone param requested)
-    // Load whatsapp_config
     const { data: configs, error: cfgErr } = await supabaseAdmin.from('whatsapp_config').select('*').limit(1);
     if (cfgErr || !configs || configs.length === 0) {
       console.error('Missing whatsapp_config in DB', cfgErr);
@@ -211,7 +175,6 @@ export async function POST(request: Request) {
     const accessToken = decrypt(config.access_token);
     const phoneNumberId = config.phone_number_id;
 
-    // 1) Ensure catalog visibility & cart enabled
     try {
       const confRes = await fetch(
         `https://graph.facebook.com/v21.0/${phoneNumberId}/whatsapp_commerce_settings?is_catalog_visible=true&is_cart_enabled=true`,
@@ -241,12 +204,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error: 'meta_config_network_error' }, { status: 502 });
     }
 
-    // 2) If the request body asked to send the catalog to a phone, send interactive product_list message
     let sendResult: any = null;
     if (body.sendToPhone) {
-      const cleanPhone = phone; // already normalized above
-
-      // Validate catalog id config
+      const cleanPhone = phone;
       const catalogId = process.env.META_CATALOG_ID ?? (config as any).catalog_id ?? null;
       if (!catalogId) {
         console.error('META_CATALOG_ID missing and not found in config');
@@ -254,7 +214,6 @@ export async function POST(request: Request) {
         return NextResponse.json({ success: false, error: 'catalog_id_missing' }, { status: 500 });
       }
 
-      // Build payload for product_list (open full catalog)
       const payload = {
         messaging_product: 'whatsapp',
         to: cleanPhone,
@@ -274,7 +233,6 @@ export async function POST(request: Request) {
         },
       };
 
-      // Safe logging (no token)
       console.info('Sending product_list interactive message', {
         phone: cleanPhone,
         catalogId,
@@ -314,7 +272,6 @@ export async function POST(request: Request) {
       }
     }
 
-    // Update catalog_syncs as success and attach meta response (if any)
     const finalMeta = sendResult ?? { note: 'no_send_performed' };
     const finalStatus = sendResult ? (sendResult.error ? 'failed' : 'success') : 'success';
     await supabaseAdmin
@@ -333,3 +290,4 @@ export async function POST(request: Request) {
     console.error('POST /api/whatsapp/sync-catalog unexpected error:', err);
     return NextResponse.json({ success: false, error: err.message ?? 'internal_error' }, { status: 500 });
   }
+}
