@@ -126,10 +126,45 @@ export async function POST(request: Request) {
         ? body.externalReference.trim()
         : `PED-${Date.now()}-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
 
-    // Calcula o valor total do pedido
+    // Calcula o valor total do pedido (server-side)
     const totalAmount = items.reduce((acc, it) => acc + it.quantity * it.unitPrice, 0);
 
-    // 2. Cria o link de pagamento no Mercado Pago
+    // --- IDENTITY / IDEMPOTENCY: tentar reusar pedido pendente existente quando externalReference for fornecido
+    if (externalReference) {
+      try {
+        const { data: existingOrders, error: findErr } = await supabaseAdmin()
+          .from('orders')
+          .select('*')
+          .eq('external_reference', externalReference)
+          .eq('status', 'pending')
+          .order('created_at', { ascending: false })
+          .limit(1);
+
+        if (findErr) {
+          console.error('[Mercado Pago] Erro ao consultar orders por external_reference', { externalReference, err: findErr });
+        } else if (existingOrders && existingOrders.length > 0) {
+          const existing = existingOrders[0] as any;
+          const createdAt = new Date(existing.created_at);
+          const ageMin = (Date.now() - createdAt.getTime()) / 60000;
+          if (ageMin <= 30 && existing.preference_id && existing.payment_url) {
+            console.log(`[Mercado Pago] Reutilizando preferência existente para externalReference=${externalReference}, orderId=${existing.id}`);
+            // Retornar no mesmo formato que o cliente espera (compatível)
+            return NextResponse.json({
+              ok: true,
+              paymentUrl: existing.payment_url,
+              preferenceId: existing.preference_id,
+              reused: true,
+              orderId: existing.id,
+            });
+          }
+        }
+      } catch (qe) {
+        console.error('[Mercado Pago] Falha ao verificar order existente', { externalReference, err: qe });
+        // Continua — fallback é criar nova preferência
+      }
+    }
+
+    // 2. Cria o link de pagamento no Mercado Pago (mesma função utilitária usada hoje)
     const result = await createPaymentLink({
       items,
       externalReference,
@@ -139,10 +174,10 @@ export async function POST(request: Request) {
       deliveryAddress,
     });
 
-    // 3. 🛡️ Salva o pedido na tabela 'orders' para permitir Lembretes de 15 min e Confirmação de Pagamento
+    // 3. 🛡️ Salva o pedido na tabela 'orders' para permitir lembretes e confirmação de pagamento
     if (result.ok && result.paymentUrl) {
       try {
-        await supabaseAdmin().from('orders').insert({
+        const insertPayload: any = {
           account_id: accountId,
           contact_id: contactId,
           external_reference: externalReference,
@@ -154,14 +189,27 @@ export async function POST(request: Request) {
           payer_phone: payerPhone,
           payer_name: payerName,
           status: 'pending',
-        });
-        console.log(`[Mercado Pago] Pedido ${externalReference} gravado com sucesso na tabela orders.`);
+        };
+        // se externalReference vier do orquestrador como dealId, gravar também deal_id
+        if (externalReference) {
+          insertPayload.deal_id = externalReference;
+        }
+
+        const { error: insertErr } = await supabaseAdmin().from('orders').insert(insertPayload);
+        if (insertErr) {
+          // Logamos a falha mas não impedimos a resposta ao cliente (mantemos compatibilidade)
+          console.error('[Mercado Pago] Erro ao gravar pedido na tabela orders:', insertErr, { payload: insertPayload });
+        } else {
+          console.log(`[Mercado Pago] Pedido ${externalReference} gravado com sucesso na tabela orders.`);
+        }
       } catch (dbError) {
-        console.error('[Mercado Pago] Erro ao gravar pedido na tabela orders:', dbError);
+        console.error('[Mercado Pago] Erro ao gravar pedido na tabela orders (catch):', dbError);
       }
     }
 
-    return NextResponse.json(result);
+    // Retorna o resultado original (compatível) e enriquece com flags úteis
+    const responsePayload: any = { ...result, reused: false };
+    return NextResponse.json(responsePayload);
   } catch (err) {
     if (err instanceof Error && err.message.includes('Mercado Pago')) {
       return NextResponse.json({ error: err.message }, { status: 502 });
