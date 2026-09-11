@@ -406,7 +406,29 @@ function parseCurrencyString(raw: string): number {
 
   return parseFloat(cleaned) || 0
 }
+/**
+ * ETAPA 2 — Detecta se o cliente quer pagar
+ */
+function isPaymentConfirmation(text: string): boolean {
+  if (!text) return false
 
+  const normalized = text
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+
+  const triggers = [
+    'pagar', 'pago', 'paguei',
+    'credito', 'debito', 'cartao',
+    'pix', 'link', 'pagamento',
+    'quero pagar', 'pode mandar',
+    'manda o link', 'como pago',
+    'confirmar', 'confirmo',
+  ]
+
+  return triggers.some((t) => normalized.includes(t))
+}
 /**
  * 🥟 Parser resiliente para pedidos do site laempanadas.com.br
  */
