@@ -782,6 +782,99 @@ async function processMessage(
     return
   }
   // ============================================================
+  // 💳 ETAPA 4 — PAGAMENTO VIA AGENTE IA
+  // Detecta intenção de pagar e gera link do Mercado Pago
+  // ============================================================
+  if (!siteOrder && isPaymentConfirmation(contentText || '')) {
+
+    // Busca o total que a IA deixou marcado na conversa
+    const totalDoAgente = await extractTotalFromLastBotMessage(conversation.id)
+
+    if (totalDoAgente && totalDoAgente > 0) {
+      console.log('[agente] Pagamento solicitado. Total encontrado:', totalDoAgente)
+
+      // Gera um ID único para esse pedido
+      const externalRef = `AGENTE-${Date.now()}-${contactRecord.id.substring(0, 5)}`
+
+      // Chama a mesma função que já funciona para o site
+      const paymentResult = await createPaymentLink({
+        items: [
+          {
+            title: 'Pedido La Empanadas (WhatsApp)',
+            quantity: 1,
+            unitPrice: totalDoAgente,
+          },
+        ],
+        externalReference: externalRef,
+        payerName: contactRecord.name || contactName,
+        payerPhone: senderPhone,
+        deliveryKind: 'delivery',
+        deliveryAddress: '',
+      })
+
+      if (paymentResult.paymentUrl) {
+
+        // Salva o pedido na tabela orders (igual ao fluxo do site)
+        try {
+          await supabaseAdmin().from('orders').insert({
+            account_id: accountId,
+            contact_id: contactRecord.id,
+            external_reference: externalRef,
+            preference_id: paymentResult.preferenceId,
+            payment_url: paymentResult.paymentUrl,
+            total: totalDoAgente,
+            items: [{ title: 'Pedido WhatsApp', quantity: 1, unitPrice: totalDoAgente }],
+            delivery_address: '',
+            payer_phone: senderPhone,
+            payer_name: contactRecord.name || contactName,
+            status: 'pending',
+          })
+          console.log('[agente] Pedido gravado na tabela orders:', externalRef)
+        } catch (insertErr) {
+          console.error('[agente] Erro ao gravar pedido:', insertErr)
+        }
+
+        // Formata o total para exibir: 140 → "R$ 140,00"
+        const fmt = (v: number) => `R$ ${v.toFixed(2).replace('.', ',')}`
+
+        // Monta o corpo da mensagem
+        const bodyText =
+          `Perfeito, *${contactRecord.name || contactName}*! 🥟\n\n` +
+          `💵 *Total: ${fmt(totalDoAgente)}*\n` +
+          `🚚 Frete: GRÁTIS\n\n` +
+          `Clique no botão abaixo para pagar com Pix (aprovação imediata) ou Cartão:`
+
+        // Envia o botão de pagamento (CTA ou texto como fallback)
+        const sendResult = await sendWhatsAppPaymentMessage({
+          phoneNumberId,
+          accessToken,
+          toPhone: senderPhone,
+          headerText: '🥟 La Empanadas',
+          bodyText,
+          footerText: 'Mercado Pago • Produção imediata após confirmação',
+          buttonText: '💳 Pagar Agora',
+          buttonUrl: paymentResult.paymentUrl,
+        })
+
+        // Salva a mensagem enviada no histórico da conversa
+        if (sendResult.messageId) {
+          await supabaseAdmin().from('messages').insert({
+            conversation_id: conversation.id,
+            sender_type: 'bot',
+            content_type: 'interactive',
+            content_text: sendResult.formattedText,
+            message_id: sendResult.messageId,
+            status: 'sent',
+            created_at: new Date().toISOString(),
+          })
+        }
+
+        // Para aqui — não aciona a IA nessa rodada
+        return
+      }
+    }
+  }
+  // ============================================================
   // 🔄 FLUXOS NORMAIS
   // ============================================================
   const flowResult = await dispatchInboundToFlows({
