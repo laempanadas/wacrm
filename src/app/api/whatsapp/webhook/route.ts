@@ -430,6 +430,43 @@ function isPaymentConfirmation(text: string): boolean {
   return triggers.some((t) => normalized.includes(t))
 }
 /**
+ * ETAPA 3 — Lê o [TOTAL:XXX.XX] deixado pela IA nas últimas mensagens
+ * Busca nas últimas 5 mensagens do bot e extrai o valor numérico
+ */
+async function extractTotalFromLastBotMessage(
+  conversationId: string
+): Promise<number | null> {
+
+  // 1. Busca as últimas 5 mensagens do bot nessa conversa
+  const { data: botMessages } = await supabaseAdmin()
+    .from('messages')
+    .select('content_text')
+    .eq('conversation_id', conversationId)
+    .eq('sender_type', 'bot')
+    .order('created_at', { ascending: false })
+    .limit(5)
+
+  // 2. Se não encontrou nenhuma mensagem do bot, retorna null
+  if (!botMessages || botMessages.length === 0) return null
+
+  // 3. Percorre as mensagens procurando o marcador [TOTAL:XXX.XX]
+  for (const msg of botMessages) {
+    const text = msg.content_text || ''
+
+    // Regex: procura exatamente [TOTAL:] seguido de números e ponto decimal
+    const match = text.match(/\[TOTAL:([\d.]+)\]/i)
+
+    if (match) {
+      const total = parseFloat(match[1])  // converte "140.00" → 140
+      if (total > 0) return total          // retorna se for um valor válido
+    }
+  }
+
+  // 4. Não encontrou marcador em nenhuma das 5 mensagens
+  return null
+}
+
+/**
  * 🥟 Parser resiliente para pedidos do site laempanadas.com.br
  */
 function parseWebsiteOrder(text: string) {
