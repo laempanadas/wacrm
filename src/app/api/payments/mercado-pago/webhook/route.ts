@@ -60,11 +60,11 @@ export async function POST(req: NextRequest) {
     }
 
     // Fetch full payment details from Mercado Pago API using the new service instance
-    // A correção está aqui: paymentService.get({ id: ... })
+    // A correção está aqui: removemos o .body
     const payment = await paymentService.get({ id: data.data.id });
-    const paymentStatus = payment.body.status;
-    const externalReference = payment.body.external_reference;
-    const paymentAmount = payment.body.transaction_amount;
+    const paymentStatus = payment.status; // Corrigido
+    const externalReference = payment.external_reference; // Corrigido
+    const paymentAmount = payment.transaction_amount; // Corrigido
 
     // Retrieve the order from your database using Supabase client
     const { data: order, error: orderError } = await supabase
