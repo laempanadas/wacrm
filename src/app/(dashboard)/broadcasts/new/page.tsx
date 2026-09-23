@@ -104,7 +104,7 @@ export default function NewBroadcastPage() {
       account_id: accountId,
       name: name.trim(),
       template_name: template.name,
-      template_language: template.language ?? 'en_US',
+      template_language: template.language ?? 'pt_BR',
       template_variables: variables,
       audience_filter: {
         type: audience.type,

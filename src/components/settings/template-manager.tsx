@@ -79,7 +79,7 @@ interface TemplateFormData {
 const emptyForm: TemplateFormData = {
   name: '',
   category: 'Marketing',
-  language: 'en_US',
+  language: 'pt_BR',
   header_format: 'none',
   header_content: '',
   header_media_url: '',
@@ -215,7 +215,7 @@ export function TemplateManager() {
     return {
       name: form.name.trim(),
       category: form.category,
-      language: form.language.trim() || 'en_US',
+      language: form.language.trim() || 'pt_BR',
       header_type: form.header_format === 'none' ? undefined : form.header_format,
       header_content:
         form.header_format === 'text' ? form.header_content.trim() : undefined,
@@ -236,7 +236,7 @@ export function TemplateManager() {
     setForm({
       name: template.name,
       category: template.category,
-      language: template.language || 'en_US',
+      language: template.language || 'pt_BR',
       header_format: (template.header_type ?? 'none') as HeaderFormat,
       header_content: template.header_content ?? '',
       header_media_url: template.header_media_url ?? '',
