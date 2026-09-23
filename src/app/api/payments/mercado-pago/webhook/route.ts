@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import mercadopago from 'mercadopago';
-import { getSession } from '@/lib/auth';
-import { sendTemplateMessage } from '@/lib/whatsapp/send-message'; // Assuming this function exists or will be added
-import { db } from '@/lib/db'; // Assuming your Prisma/DB client is named 'db'
+import { sendPaymentConfirmationWhatsApp } from '@/lib/whatsapp/send-message'; // Importa a nova função
+import { createClient } from '@/lib/supabase/server'; // Importa o createClient do Supabase
 
 mercadopago.configure({
   access_token: process.env.MERCADO_PAGO_ACCESS_TOKEN!,
@@ -10,19 +9,19 @@ mercadopago.configure({
 
 export async function POST(req: NextRequest) {
   try {
+    const supabase = await createClient(); // Cria a instância do cliente Supabase
+
     // 1. Validate signature (HMAC-SHA256)
     const signature = req.headers.get('x-signature');
-    const body = await req.text(); // Read body as text for signature validation
-    
-    // Mercado Pago SDK's validateWebhook requires raw body and signature header
-    // Assuming 'mercadopago.configurations.validateWebhook' is available and correctly configured
+    const body = await req.text();
+
     if (!signature || !mercadopago.configurations.validateWebhook(body, signature)) {
       console.warn('Invalid Mercado Pago webhook signature detected.');
       return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
     }
 
-    const data = JSON.parse(body); // Now parse the body
-    
+    const data = JSON.parse(body);
+
     // Only process payment updates
     if (data.action !== 'payment.updated') {
       console.log('Mercado Pago webhook: Ignored non-payment.updated action.');
@@ -32,14 +31,20 @@ export async function POST(req: NextRequest) {
     // Fetch full payment details from Mercado Pago API
     const payment = await mercadopago.payment.findById(data.data.id);
     const paymentStatus = payment.body.status;
-    const externalReference = payment.body.external_reference; // This should be your order ID
+    const externalReference = payment.body.external_reference;
     const paymentAmount = payment.body.transaction_amount;
 
-    // Retrieve the order from your database
-    const order = await db.order.findUnique({
-      where: { id: externalReference }, // Assuming external_reference matches your order ID
-    });
+    // Retrieve the order from your database using Supabase client
+    const { data: order, error: orderError } = await supabase
+      .from('orders') // Assumindo o nome da tabela como 'orders'
+      .select('*')
+      .eq('id', externalReference)
+      .maybeSingle();
 
+    if (orderError) {
+      console.error(`Supabase error fetching order:`, orderError);
+      return NextResponse.json({ error: 'Database error' }, { status: 500 });
+    }
     if (!order) {
       console.error(`Mercado Pago webhook: Order not found for external_reference: ${externalReference}`);
       return NextResponse.json({ error: 'Order not found' }, { status: 404 });
@@ -48,58 +53,63 @@ export async function POST(req: NextRequest) {
     // 2. Validate transaction_amount against order.total
     if (paymentAmount !== order.total) {
       console.warn(`Mercado Pago webhook: Amount mismatch for order ${order.id}. Paid: ${paymentAmount}, Expected: ${order.total}`);
-      // Consider logging this or flagging the order for manual review
       return NextResponse.json({ error: 'Payment amount mismatch' }, { status: 400 });
     }
 
     // 3. Process if payment is approved
     if (paymentStatus === 'approved') {
-      // Update order status in your database
-      await db.order.update({
-        where: { id: order.id },
-        data: { status: 'PAID' }, // Assuming 'PAID' is the status for approved payments
-      });
+      // Update order status in your database using Supabase client
+      const { error: updateError } = await supabase
+        .from('orders')
+        .update({ status: 'PAID' }) // Assumindo 'PAID' é o status para pagamentos aprovados
+        .eq('id', order.id);
+
+      if (updateError) {
+        console.error(`Supabase error updating order status:`, updateError);
+        return NextResponse.json({ error: 'Database update error' }, { status: 500 });
+      }
 
       // Get the contact associated with the order to send WhatsApp confirmation
-      const contact = await db.contact.findUnique({
-        where: { id: order.contactId }, // Assuming order has a contactId
-      });
+      const { data: contact, error: contactError } = await supabase
+        .from('contacts') // Assumindo o nome da tabela como 'contacts'
+        .select('phone, account_id') // Adicionado account_id
+        .eq('id', order.contactId)
+        .maybeSingle();
 
-      if (contact && contact.phone) {
-        // Send WhatsApp confirmation message
-        // You'll need to define 'payment_confirmed_template' in your Meta Business Manager
-        // and ensure sendTemplateMessage is correctly implemented in '@/lib/whatsapp/send-message'
-        await sendTemplateMessage({
-          phone: contact.phone,
-          template: 'payment_confirmed_template', // Name of your approved WhatsApp template
-          components: [
-            {
-              type: 'body',
-              parameters: [
-                { type: 'text', text: order.id }, // Example: pass order ID
-                { type: 'text', text: paymentAmount.toFixed(2) }, // Example: pass amount
-              ],
-            },
-            // Add other components if your template requires them (e.g., buttons, header)
-          ],
+      if (contactError) {
+        console.error(`Supabase error fetching contact:`, contactError);
+        // Continue processing even if contact fetch fails, as order status was updated
+      }
+
+      if (contact && contact.phone && contact.account_id) {
+        // Usa a nova função
+        await sendPaymentConfirmationWhatsApp({
+          supabase: supabase,
+          accountId: contact.account_id,
+          contactPhone: contact.phone,
+          orderId: order.id,
+          paymentAmount: paymentAmount,
         });
         console.log(`WhatsApp confirmation sent for order ${order.id} to ${contact.phone}`);
       } else {
-        console.warn(`Mercado Pago webhook: Could not send WhatsApp confirmation for order ${order.id}. Contact or phone missing.`);
+        console.warn(`Mercado Pago webhook: Could not send WhatsApp confirmation for order ${order.id}. Contact, phone, or account_id missing.`);
       }
     } else {
       console.log(`Mercado Pago webhook: Payment status for order ${order.id} is ${paymentStatus}. No confirmation sent.`);
       // Optionally update order status for other statuses like 'pending', 'rejected'
-      await db.order.update({
-        where: { id: order.id },
-        data: { status: paymentStatus.toUpperCase() }, // Update with MP status
-      });
+      const { error: updateError } = await supabase
+        .from('orders')
+        .update({ status: paymentStatus.toUpperCase() })
+        .eq('id', order.id);
+      
+      if (updateError) {
+        console.error(`Supabase error updating order status for non-approved payment:`, updateError);
+      }
     }
 
     return new Response('OK', { status: 200 });
   } catch (error) {
     console.error('Mercado Pago webhook processing error:', error);
-    // Respond with 500 but avoid leaking sensitive error details
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

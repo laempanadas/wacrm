@@ -1,26 +1,4 @@
-// ============================================================
-// Outbound message send — the core that both the dashboard's
-// `/api/whatsapp/send` route and the public `/api/v1/messages`
-// endpoint call.
-//
-// Given a conversation and message params, this:
-//   1. validates the params for the message type,
-//   2. loads the conversation + contact + WhatsApp config,
-//   3. sends to Meta (with phone-variant retry + contact auto-fix),
-//   4. persists the message + updates the conversation,
-//   5. pauses any active Flow run for the contact (agent stepped in).
-//
-// It is transport-agnostic: it takes a `SupabaseClient` and an
-// `accountId` and throws `SendMessageError` on failure. The callers
-// own auth, rate-limiting, body parsing, and mapping the error to
-// their respective response shapes (internal `{ error }` vs the v1
-// envelope). Behaviour is identical to the original inline route —
-// this is a straight extraction so the public endpoint can reuse it
-// without duplicating ~250 lines of Meta plumbing.
-// ============================================================
-
 import type { SupabaseClient } from '@supabase/supabase-js';
-
 import {
   sendTextMessage,
   sendTemplateMessage,
@@ -45,11 +23,6 @@ export const VALID_MESSAGE_TYPES = [
   ...MEDIA_KINDS,
 ] as const;
 
-/**
- * Typed failure with a machine `code` and a suggested HTTP `status`.
- * Callers map it to their own response shape (`toErrorResponse` for
- * the dashboard route, the v1 envelope for the public endpoint).
- */
 export class SendMessageError extends Error {
   readonly code: string;
   readonly status: number;
@@ -69,35 +42,16 @@ export interface SendMessageParams {
   filename?: string | null;
   templateName?: string | null;
   templateLanguage?: string | null;
-  /** Legacy positional body params (only used if messageParams.body unset). */
   templateParams?: string[];
-  /** Structured template params (header/body/buttons). */
   templateMessageParams?: unknown;
   replyToMessageId?: string | null;
 }
 
 export interface SendMessageResult {
-  /** Our `messages.id` (the persisted row). */
   messageId: string;
-  /** Meta's `wamid` for the delivered message. */
   whatsappMessageId: string;
 }
 
-/**
- * Send a message in an existing conversation and persist it.
- *
- * `db` may be an RLS-scoped user client (dashboard) or the service-
- * role client (public API) — every query is filtered by `accountId`
- * either way, so tenancy holds regardless of which client is passed.
- */
-/**
- * Validate the message-shape params (type, required content, caption
- * cap) independently of any DB state, throwing `SendMessageError` on a
- * bad payload. Exported so a caller can reject a malformed request
- * *before* it finds-or-creates a contact/conversation — otherwise an
- * invalid payload leaves an orphan empty conversation behind. The send
- * core calls this too, so validation can't be skipped.
- */
 export function validateSendMessageParams(params: {
   messageType: string;
   contentText?: string | null;
@@ -144,7 +98,6 @@ export function validateSendMessageParams(params: {
     );
   }
 
-  // Meta caps media captions at 1024 chars (audio carries none).
   if (
     isMediaKind &&
     messageType !== 'audio' &&
@@ -189,7 +142,6 @@ export async function sendMessageToConversation(
 
   const isMediaKind = (MEDIA_KINDS as readonly string[]).includes(messageType);
 
-  // Conversation + contact, account-scoped.
   const { data: conversation, error: convError } = await db
     .from('conversations')
     .select('*, contact:contacts(*)')
@@ -219,7 +171,6 @@ export async function sendMessageToConversation(
     );
   }
 
-  // WhatsApp config, account-scoped.
   const { data: config, error: configError } = await db
     .from('whatsapp_config')
     .select('*')
@@ -236,7 +187,6 @@ export async function sendMessageToConversation(
 
   const accessToken = decrypt(config.access_token);
 
-  // Self-heal legacy CBC ciphertexts. Fire-and-forget; idempotent.
   if (isLegacyFormat(config.access_token)) {
     void db
       .from('whatsapp_config')
@@ -252,9 +202,6 @@ export async function sendMessageToConversation(
       });
   }
 
-  // Resolve the reply target to its Meta message_id. The parent must
-  // belong to this same conversation — otherwise a caller could quote
-  // messages they can't see by guessing UUIDs.
   let contextMessageId: string | undefined;
   if (replyToMessageId) {
     const { data: parent, error: parentError } = await db
@@ -280,8 +227,6 @@ export async function sendMessageToConversation(
     }
   }
 
-  // Template row (for header + button components). isMessageTemplate
-  // guards against a malformed local row crashing the send-builder.
   let templateRow: MessageTemplate | null = null;
   if (messageType === 'template' && templateName) {
     const { data } = await db
@@ -339,9 +284,6 @@ export async function sendMessageToConversation(
     return result.messageId;
   };
 
-  // Send via Meta — retry across phone-number variants if Meta rejects
-  // with "recipient not in allowed list"; persist a working variant
-  // back to the contact so the next send goes straight through.
   let waMessageId = '';
   let workingPhone = sanitizedPhone;
   try {
@@ -384,8 +326,6 @@ export async function sendMessageToConversation(
       .eq('id', contact.id);
   }
 
-  // Persist the sent message. Field names MUST match the messages
-  // schema (see 001_initial_schema.sql).
   const { data: messageRecord, error: msgError } = await db
     .from('messages')
     .insert({
@@ -420,8 +360,6 @@ export async function sendMessageToConversation(
     })
     .eq('id', conversationId);
 
-  // Pause any active Flow run for this contact — the agent stepping in
-  // is the strongest "yield, human is here" signal. Best-effort.
   try {
     const { error: pauseErr } = await supabaseAdmin()
       .from('flow_runs')
@@ -444,4 +382,45 @@ export async function sendMessageToConversation(
   }
 
   return { messageId: messageRecord.id, whatsappMessageId: waMessageId };
+}
+
+// Nova função para confirmação de pagamento via WhatsApp
+export async function sendPaymentConfirmationWhatsApp(
+  supabase: SupabaseClient, // Passar a instância do Supabase
+  accountId: string,
+  contactPhone: string,
+  orderId: string,
+  paymentAmount: number
+): Promise<void> {
+  const { data: config, error: configError } = await supabase
+    .from('whatsapp_config')
+    .select('phone_number_id, access_token')
+    .eq('account_id', accountId)
+    .single();
+
+  if (configError || !config) {
+    console.error('Failed to retrieve WhatsApp config for account:', accountId, configError);
+    throw new SendMessageError('whatsapp_not_configured', 'WhatsApp not configured for this account.', 400);
+  }
+
+  const accessToken = decrypt(config.access_token);
+  const sanitizedPhone = sanitizePhoneForMeta(contactPhone);
+
+  await sendTemplateMessage({
+    phoneNumberId: config.phone_number_id,
+    accessToken,
+    to: sanitizedPhone,
+    templateName: 'payment_confirmed_template', // Nome do template aprovado no Meta
+    language: 'pt_BR', // Ou a linguagem dinâmica da sua aplicação
+    components: [
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: orderId },
+          { type: 'text', text: paymentAmount.toFixed(2) },
+        ],
+      },
+    ],
+  });
+  console.log(`[sendPaymentConfirmationWhatsApp] Confirmation template sent to ${contactPhone} for order ${orderId}`);
 }

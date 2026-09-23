@@ -1,24 +1,20 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { getSession } from '@/lib/auth'; // Assuming getSession is available
+import { createClient } from '@/lib/supabase/server'; // Correct import for server-side Supabase client
 
 export async function middleware(request: NextRequest) {
+  const supabase = await createClient();
+
   // Protect API v1 routes
   if (request.nextUrl.pathname.startsWith('/api/v1')) {
-    const session = await getSession();
+    const { data: { session } } = await supabase.auth.getSession();
     if (!session || !session.user) {
       return new NextResponse('Unauthorized', { status: 401 });
     }
   }
 
-  // Add protection for Server Actions if needed, though they usually have internal checks
-  // For example, by checking request headers for specific Server Action calls
-  // if (request.headers.get('x-nextjs-action')) {
-  //   const session = await getSession();
-  //   if (!session || !session.user) {
-  //     return new NextResponse('Unauthorized', { status: 401 });
-  //   }
-  // }
+  // Extend session if needed (standard practice for Supabase auth-helpers)
+  await supabase.auth.getSession();
 
   return NextResponse.next();
 }
