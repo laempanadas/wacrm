@@ -162,7 +162,7 @@ export async function POST(request: Request) {
       .select('*')
       .eq('account_id', accountId)
       .eq('name', template_name)
-      .eq('language', template_language || 'en_US')
+      .eq('language', template_language || 'pt_BR')
       .maybeSingle()
     if (rawTemplateRow && !isMessageTemplate(rawTemplateRow)) {
       return NextResponse.json(
