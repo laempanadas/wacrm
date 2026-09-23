@@ -44,8 +44,10 @@ export async function dispatchInboundToAiReply(
   try {
     const db = supabaseAdmin()
 
-    const config = await loadAiConfig(db, accountId)
-    if (!config || !config.autoReplyEnabled) return
+    const AGENT_INACTIVITY_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutos
+
+    const config = await loadAiConfig(db, accountId);
+    if (!config || !config.autoReplyEnabled) return;
 
     // Deterministic, user-configured responders win over the LLM — the
     // caller already excludes messages a Flow consumed. Message-level
@@ -61,20 +63,26 @@ export async function dispatchInboundToAiReply(
       .eq('account_id', accountId)
       .eq('is_active', true)
       .in('trigger_type', ['new_message_received', 'keyword_match'])
-      .limit(1)
-    if (autoResponders && autoResponders.length > 0) return
+      .limit(1);
+    if (autoResponders && autoResponders.length > 0) return;
 
     const { data: conv, error: convErr } = await db
       .from('conversations')
-      .select('assigned_agent_id, ai_autoreply_disabled, ai_reply_count')
+      .select('assigned_agent_id, ai_autoreply_disabled, ai_reply_count, last_agent_message_at')
       .eq('id', conversationId)
-      .maybeSingle()
-    if (convErr || !conv) return
-    if (conv.assigned_agent_id) return // a human owns this thread
-    if (conv.ai_autoreply_disabled) return // handed off / turned off here
+      .maybeSingle();
+    if (convErr || !conv) return;
+
+    const now = new Date();
+    const lastAgentMessageAt = conv.last_agent_message_at ? new Date(conv.last_agent_message_at) : null;
+    const agentInactive = !lastAgentMessageAt || (now.getTime() - lastAgentMessageAt.getTime() > AGENT_INACTIVITY_THRESHOLD_MS);
+
+    if (conv.assigned_agent_id && !agentInactive) return; // Se agente atribuído E ativo, IA se cala
+    if (conv.ai_autoreply_disabled && !agentInactive) return; // Se auto-resposta desativada E agente ativo, IA se cala
+
     // Cheap early-out; the authoritative cap check is the atomic claim
     // below (this read can race a concurrent inbound).
-    if (conv.ai_reply_count >= config.autoReplyMaxPerConversation) return
+    if (conv.ai_reply_count >= config.autoReplyMaxPerConversation) return;
 
     const messages = await buildConversationContext(db, conversationId)
     if (messages.length === 0) return

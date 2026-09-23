@@ -357,6 +357,7 @@ export async function sendMessageToConversation(
       last_message_text: contentText || `[${messageType}]`,
       last_message_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
+      last_agent_message_at: new Date().toISOString(),
     })
     .eq('id', conversationId);
 
