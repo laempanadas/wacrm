@@ -32,6 +32,8 @@ export interface AutomationContext {
   tag_id?: string
   /** Agent the conversation was assigned to, for conversation_assigned. */
   agent_id?: string
+  /** Name of the contact who triggered the event. */
+  contact_name?: string
 }
 
 export interface DispatchInput {
