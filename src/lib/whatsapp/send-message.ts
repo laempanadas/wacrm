@@ -411,17 +411,9 @@ export async function sendPaymentConfirmationWhatsApp(
     phoneNumberId: config.phone_number_id,
     accessToken,
     to: sanitizedPhone,
-    templateName: 'payment_confirmed_template', // Nome do template aprovado no Meta
-    language: 'pt_BR', // Ou a linguagem dinâmica da sua aplicação
-    components: [
-      {
-        type: 'body',
-        parameters: [
-          { type: 'text', text: orderId },
-          { type: 'text', text: paymentAmount.toFixed(2) },
-        ],
-      },
-    ],
+    templateName: 'payment_confirmed_template',
+    language: 'pt_BR',
+    params: [orderId, paymentAmount.toFixed(2)],
   });
   console.log(`[sendPaymentConfirmationWhatsApp] Confirmation template sent to ${contactPhone} for order ${orderId}`);
 }
