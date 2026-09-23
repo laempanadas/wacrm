@@ -60,7 +60,8 @@ export async function POST(req: NextRequest) {
     }
 
     // Fetch full payment details from Mercado Pago API using the new service instance
-    const payment = await paymentService.findById(data.data.id);
+    // A correção está aqui: paymentService.get({ id: ... })
+    const payment = await paymentService.get({ id: data.data.id });
     const paymentStatus = payment.body.status;
     const externalReference = payment.body.external_reference;
     const paymentAmount = payment.body.transaction_amount;
