@@ -929,6 +929,7 @@ async function processMessage(
       context: {
         message_text: inboundText,
         conversation_id: conversation.id,
+        contact_name: contactRecord.name,
       },
     }).catch((err) => console.error('[automations] dispatch failed:', err))
   }
