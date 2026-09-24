@@ -125,6 +125,24 @@ export async function POST(req: NextRequest) {
       } else {
         console.warn(`[mp-webhook] Contato/phone/account_id ausente para pedido ${order.id}`);
       }
+
+      // Pedido pago = atendimento concluído: fecha a conversa do cliente.
+      // A IA respeita conversas fechadas (ver src/lib/ai/auto-reply.ts) e para
+      // de responder; a conversa reabre automaticamente se o cliente mandar
+      // uma nova mensagem (ver src/app/api/whatsapp/webhook/route.ts).
+      if (order.account_id && order.contactId) {
+        const { error: closeError } = await supabase
+          .from('conversations')
+          .update({ status: 'closed', updated_at: new Date().toISOString() })
+          .eq('account_id', order.account_id)
+          .eq('contact_id', order.contactId);
+
+        if (closeError) {
+          console.error('[mp-webhook] Erro ao fechar conversa após pagamento:', closeError);
+        } else {
+          console.log(`[mp-webhook] Conversa do contato ${order.contactId} fechada após pagamento do pedido ${order.id}`);
+        }
+      }
     } else {
       const newStatus = (paymentStatus ?? 'unknown').toUpperCase();
       await supabase

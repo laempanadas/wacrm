@@ -68,10 +68,16 @@ export async function dispatchInboundToAiReply(
 
     const { data: conv, error: convErr } = await db
       .from('conversations')
-      .select('assigned_agent_id, ai_autoreply_disabled, ai_reply_count, last_agent_message_at')
+      .select('status, assigned_agent_id, ai_autoreply_disabled, ai_reply_count, last_agent_message_at')
       .eq('id', conversationId)
       .maybeSingle();
     if (convErr || !conv) return;
+
+    // Conversa fechada (ex.: pedido pago) → a IA não atende. A conversa é
+    // reaberta pelo webhook do WhatsApp quando o cliente manda nova mensagem
+    // (ver src/app/api/whatsapp/webhook/route.ts), então este portão só barra
+    // rodadas em que a conversa ainda está de fato encerrada.
+    if (conv.status === 'closed') return;
 
     const now = new Date();
     const lastAgentMessageAt = conv.last_agent_message_at ? new Date(conv.last_agent_message_at) : null;

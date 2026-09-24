@@ -697,14 +697,25 @@ async function processMessage(
     return
   }
 
+  const conversationUpdate: Record<string, unknown> = {
+    last_message_text: contentText || `[${message.type}]`,
+    last_message_at: new Date().toISOString(),
+    unread_count: (conversation.unread_count || 0) + 1,
+    updated_at: new Date().toISOString(),
+  }
+
+  // Reabertura automática (Opção A): se o cliente já havia sido atendido e a
+  // conversa foi fechada (ex.: após pagamento aprovado), uma nova mensagem
+  // reabre a conversa e zera o contador de respostas da IA, para que a IA
+  // volte a atender do zero dentro do limite por conversa.
+  if (conversation.status === 'closed') {
+    conversationUpdate.status = 'open'
+    conversationUpdate.ai_reply_count = 0
+  }
+
   await supabaseAdmin()
     .from('conversations')
-    .update({
-      last_message_text: contentText || `[${message.type}]`,
-      last_message_at: new Date().toISOString(),
-      unread_count: (conversation.unread_count || 0) + 1,
-      updated_at: new Date().toISOString(),
-    })
+    .update(conversationUpdate)
     .eq('id', conversation.id)
 
   await flagBroadcastReplyIfAny(accountId, contactRecord.id)
