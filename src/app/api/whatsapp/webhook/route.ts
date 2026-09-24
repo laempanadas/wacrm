@@ -29,6 +29,91 @@ function supabaseAdmin() {
   return _adminClient
 }
 
+/**
+ * Preenche automaticamente os campos personalizados (custom fields) do
+ * contato quando um pedido é detectado/pago. Faz o "de-para" pelo nome do
+ * campo (`custom_fields.field_name`) para o UUID e grava em
+ * `contact_custom_values` via upsert (conflito em contact_id+custom_field_id).
+ *
+ * É best-effort: qualquer falha é apenas logada e nunca interrompe o fluxo
+ * principal do pedido/pagamento. Campos com valor vazio/undefined são
+ * ignorados (não sobrescrevem valores já existentes).
+ *
+ * Os nomes usados aqui são EXATAMENTE os exibidos na UI de campos
+ * personalizados: 'Itens_pedido', 'Endereco_entrega', 'Forma_pagamento',
+ * 'Nome_cliente'.
+ */
+async function saveOrderCustomFields(
+  supabase: ReturnType<typeof supabaseAdmin>,
+  accountId: string,
+  contactId: string,
+  fields: {
+    itens?: string
+    endereco?: string
+    formaPagamento?: string
+    nomeCliente?: string
+  }
+): Promise<void> {
+  try {
+    // Mapa nome-do-campo → valor, descartando vazios.
+    const byName: Record<string, string> = {}
+    if (fields.itens && fields.itens.trim()) byName['Itens_pedido'] = fields.itens.trim()
+    if (fields.endereco && fields.endereco.trim()) byName['Endereco_entrega'] = fields.endereco.trim()
+    if (fields.formaPagamento && fields.formaPagamento.trim())
+      byName['Forma_pagamento'] = fields.formaPagamento.trim()
+    if (fields.nomeCliente && fields.nomeCliente.trim())
+      byName['Nome_cliente'] = fields.nomeCliente.trim()
+
+    const names = Object.keys(byName)
+    if (names.length === 0) return
+
+    // Busca os IDs dos campos personalizados pelo nome, dentro da conta.
+    const { data: defs, error: defsErr } = await supabase
+      .from('custom_fields')
+      .select('id, field_name')
+      .eq('account_id', accountId)
+      .in('field_name', names)
+
+    if (defsErr) {
+      console.error('[custom-fields] Erro ao buscar definições de campos:', defsErr)
+      return
+    }
+    if (!defs || defs.length === 0) {
+      console.warn(
+        '[custom-fields] Nenhum campo personalizado encontrado para:',
+        names.join(', ')
+      )
+      return
+    }
+
+    const rows = defs
+      .filter((d: { id: string; field_name: string }) => byName[d.field_name] !== undefined)
+      .map((d: { id: string; field_name: string }) => ({
+        contact_id: contactId,
+        custom_field_id: d.id,
+        value: byName[d.field_name],
+      }))
+
+    if (rows.length === 0) return
+
+    const { error: upsertErr } = await supabase
+      .from('contact_custom_values')
+      .upsert(rows, { onConflict: 'contact_id,custom_field_id' })
+
+    if (upsertErr) {
+      console.error('[custom-fields] Erro ao gravar valores dos campos:', upsertErr)
+      return
+    }
+
+    console.log(
+      `[custom-fields] Campos preenchidos para contato ${contactId}:`,
+      names.join(', ')
+    )
+  } catch (err) {
+    console.error('[custom-fields] Falha inesperada ao preencher campos do pedido:', err)
+  }
+}
+
 interface WhatsAppMessage {
   id: string
   from: string
@@ -697,14 +782,25 @@ async function processMessage(
     return
   }
 
+  const conversationUpdate: Record<string, unknown> = {
+    last_message_text: contentText || `[${message.type}]`,
+    last_message_at: new Date().toISOString(),
+    unread_count: (conversation.unread_count || 0) + 1,
+    updated_at: new Date().toISOString(),
+  }
+
+  // Reabertura automática (Opção A): se o cliente já havia sido atendido e a
+  // conversa foi fechada (ex.: após pagamento aprovado), uma nova mensagem
+  // reabre a conversa e zera o contador de respostas da IA, para que a IA
+  // volte a atender do zero dentro do limite por conversa.
+  if (conversation.status === 'closed') {
+    conversationUpdate.status = 'open'
+    conversationUpdate.ai_reply_count = 0
+  }
+
   await supabaseAdmin()
     .from('conversations')
-    .update({
-      last_message_text: contentText || `[${message.type}]`,
-      last_message_at: new Date().toISOString(),
-      unread_count: (conversation.unread_count || 0) + 1,
-      updated_at: new Date().toISOString(),
-    })
+    .update(conversationUpdate)
     .eq('id', conversation.id)
 
   await flagBroadcastReplyIfAny(accountId, contactRecord.id)
@@ -747,6 +843,16 @@ async function processMessage(
       } catch (insertErr) {
         console.error('[webhook] Erro ao gravar pedido na tabela orders:', insertErr)
       }
+
+      // Preenche os campos personalizados do contato com os dados do pedido.
+      await saveOrderCustomFields(supabaseAdmin(), accountId, contactRecord.id, {
+        itens: siteOrder.items
+          .map((it) => `${it.quantity}x ${it.title}`)
+          .join(', '),
+        endereco: siteOrder.endereco,
+        formaPagamento: 'Mercado Pago',
+        nomeCliente: siteOrder.cliente,
+      })
 
       const bodyText =
         `Olá, *${siteOrder.cliente}*! Recebemos seu pedido com sucesso! 🥟✨\n\n` +
@@ -833,6 +939,15 @@ async function processMessage(
         } catch (insertErr) {
           console.error('[agente] Erro ao gravar pedido:', insertErr)
         }
+
+        // Preenche os campos personalizados do contato com os dados do pedido.
+        // O agente não coleta itens detalhados nem endereço, então gravamos um
+        // resumo com o total e a forma/nome disponíveis.
+        await saveOrderCustomFields(supabaseAdmin(), accountId, contactRecord.id, {
+          itens: `Pedido WhatsApp - R$ ${totalDoAgente.toFixed(2).replace('.', ',')}`,
+          formaPagamento: 'Mercado Pago',
+          nomeCliente: contactRecord.name || contactName,
+        })
 
         // Formata o total para exibir: 140 → "R$ 140,00"
         const fmt = (v: number) => `R$ ${v.toFixed(2).replace('.', ',')}`
