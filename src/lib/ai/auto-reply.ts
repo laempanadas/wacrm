@@ -27,7 +27,8 @@ interface DispatchArgs {
  *
  * Eligibility gates (any → silent no-op):
  *   - AI off / auto-reply disabled for the account
- *   - a human agent is assigned (they own the thread)
+ *   - a human agent is assigned AND active (< 30 min since last agent message)
+ *     UNLESS customer has been inactive > 4h (configurable)
  *   - auto-reply was disabled for this conversation (prior handoff)
  *   - the per-conversation reply cap is reached
  *   - there's nothing to reply to
@@ -45,9 +46,10 @@ export async function dispatchInboundToAiReply(
     const db = supabaseAdmin()
 
     const AGENT_INACTIVITY_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutos
+      const CUSTOMER_INACTIVITY_THRESHOLD_MS = 4 * 60 * 60 * 1000; // 4 horas
 
-    const config = await loadAiConfig(db, accountId);
-    if (!config || !config.autoReplyEnabled) return;
+      const config = await loadAiConfig(db, accountId);
+      if (!config || !config.autoReplyEnabled) return;
 
     // Deterministic, user-configured responders win over the LLM — the
     // caller already excludes messages a Flow consumed. Message-level
@@ -85,6 +87,34 @@ export async function dispatchInboundToAiReply(
 
     if (conv.assigned_agent_id && !agentInactive) return; // Se agente atribuído E ativo, IA se cala
     if (conv.ai_autoreply_disabled && !agentInactive) return; // Se auto-resposta desativada E agente ativo, IA se cala
+
+    // Verifica inatividade do CLIENTE — se cliente inativo há > threshold, IA reengaja
+    // mesmo que agente esteja atribuído e "ativo"
+    let customerInactive = false;
+    if (conv.assigned_agent_id && !agentInactive) {
+      const { data: lastCustomerMsg } = await db
+        .from('messages')
+        .select('created_at')
+        .eq('conversation_id', conversationId)
+        .eq('sender_type', 'customer')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (lastCustomerMsg?.created_at) {
+        const lastCustomerAt = new Date(lastCustomerMsg.created_at);
+        const customerInactiveMs = now.getTime() - lastCustomerAt.getTime();
+        customerInactive = customerInactiveMs > CUSTOMER_INACTIVITY_THRESHOLD_MS;
+      } else {
+        // Sem mensagens do cliente ainda — trata como inativo
+        customerInactive = true;
+      }
+    }
+
+    // Se cliente inativo > threshold, permite IA reengajar mesmo com agente "ativo"
+    const shouldReengage = customerInactive;
+    if (conv.assigned_agent_id && !agentInactive && !shouldReengage) return;
+    if (conv.ai_autoreply_disabled && !agentInactive && !shouldReengage) return;
 
     // Cheap early-out; the authoritative cap check is the atomic claim
     // below (this read can race a concurrent inbound).
