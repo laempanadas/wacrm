@@ -5,14 +5,18 @@ import { decrypt } from '@/lib/whatsapp/encryption';
 
 export const dynamic = 'force-dynamic';
 
-// Supabase admin client (server-side)
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+// Lazy Supabase admin client - created on demand
+function getSupabaseAdmin() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  );
+}
 
 export async function GET() {
   try {
+    const supabaseAdmin = getSupabaseAdmin();
+    
     const { data: configs, error } = await supabaseAdmin
       .from('whatsapp_config')
       .select('*')
