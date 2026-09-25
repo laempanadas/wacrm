@@ -2,10 +2,11 @@ const fs = require('fs');
 const path = require('path');
 const fsPromises = fs.promises;
 
-const CARDAPIO_PATH = path.join(__dirname, 'assets/js/cardapio.json');
-const TEMPLATE_PATH = path.join(__dirname, 'produto-template.html');
-const OUTPUT_DIR = path.join(__dirname, 'produtos');
-const SITEMAP_PATH = path.join(__dirname, 'sitemap.xml');
+// Paths ajustados para rodar de scripts/
+const CARDAPIO_PATH = path.join(__dirname, '..', 'assets', 'js', 'cardapio.json');
+const TEMPLATE_PATH = path.join(__dirname, '..', 'produto-template.html');
+const OUTPUT_DIR = path.join(__dirname, '..', 'produtos');
+const SITEMAP_PATH = path.join(__dirname, '..', 'public', 'sitemap.xml');
 
 const CATEGORIAS = {
   salgada: { nome: 'Empanadas Salgadas', slug: 'empanadas-salgadas' },
@@ -29,13 +30,16 @@ async function main() {
   console.log('Iniciando geracao de paginas de produto...');
   
   const template = await fsPromises.readFile(
-    path.join(__dirname, 'produto-template.html'), 
+    path.join(__dirname, '..', 'produto-template.html'), 
     'utf-8'
   );
   
-  const cardapio = JSON.parse(await fsPromises.readFile(CARDAPIO_PATH, 'utf-8'));
+  const cardapio = JSON.parse(await fsPromises.readFile(
+    path.join(__dirname, '..', 'assets', 'js', 'cardapio.json'), 'utf-8'
+  ));
   
-  await fsPromises.mkdir(OUTPUT_DIR, { recursive: true });
+  await fsPromises.mkdir(path.join(__dirname, '..', 'produtos'), { recursive: true });
+  await fsPromises.mkdir(path.join(__dirname, '..', 'public'), { recursive: true });
   
   const urls = [];
   let processados = 0;
@@ -59,7 +63,7 @@ async function main() {
         .replace(/\{\{CATEGORIA_SLUG\}\}/g, categoria.slug)
         .replace(/\{\{PRECO_NUMERICO\}\}/g, item.preco.toFixed(2).replace('.', ','))
         .replace(/\{\{PRECO_FORMATADO\}\}/g, 'R$ ' + item.preco.toFixed(2).replace('.', ','))
-        .replace(/\{\{IMAGEM_URL\}\}/g, imagemUrl)
+        .replace(/\{\{IMAGEM_URL\}\}/g, item.imagem.startsWith('http') ? item.imagem : 'https://laempanadas.com.br/' + item.imagem)
         .replace(/\{\{CANONICAL_URL\}\}/g, 'https://laempanadas.com.br/produtos/' + slugify(item.nome) + '-' + item.id + '.html')
         .replace(/\{\{INGREDIENTES\}\}/g, item.descricao)
         .replace(/\{\{CALORIAS\}\}/g, Math.round(320))
@@ -75,9 +79,9 @@ async function main() {
         .replace(/\{\{CATEGORIA_SLUG_LOWER\}\}/g, categoria.slug.toLowerCase());
       
       const slug = slugify(item.nome) + '-' + item.id;
-      const outputPath = path.join(OUTPUT_DIR, slugify(item.nome) + '-' + item.id + '.html');
+      const outputPath = path.join(__dirname, '..', 'produtos', slugify(item.nome) + '-' + item.id + '.html');
       
-      await fsPromises.writeFile(outputPath, html, 'utf-8');
+      await fsPromises.writeFile(outputPath, template, 'utf-8');
       
       urls.push({
         url: 'https://laempanadas.com.br/produtos/' + slugify(item.nome) + '-' + item.id + '.html',
@@ -144,15 +148,15 @@ async function main() {
   
   sitemap += '</urlset>';
   
-  await fsPromises.writeFile(SITEMAP_PATH, sitemap, 'utf-8');
+  await fsPromises.writeFile(path.join(__dirname, '..', 'public', 'sitemap.xml'), sitemap, 'utf-8');
   
   console.log('\nConcluido!');
   console.log('   Produtos processados: ' + processados);
   console.log('   Erros: ' + erros);
   console.log('   URLs no sitemap: ' + (urls.length + 5));
   console.log('');
-  console.log('Paginas geradas em: ' + OUTPUT_DIR);
-  console.log('Sitemap salvo em: ' + SITEMAP_PATH);
+  console.log('Paginas geradas em: ' + path.join(__dirname, '..', 'produtos'));
+  console.log('Sitemap salvo em: ' + path.join(__dirname, '..', 'public', 'sitemap.xml'));
 }
 
 function slugify(text) {

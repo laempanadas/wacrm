@@ -8,15 +8,15 @@
   <!-- ========================================
        SEO META TAGS - OTIMIZADAS PARA PRODUTO
        ======================================== -->
-  <title>Empanada Romeu e Julieta | La Empanadas - Delivery Santo André</title>
-  <meta name="description" content="Massa recheada com goiabada cascão e muçarela. Peca online com entrega rapida em Santo Andre. Frete gratis acima de R$ 100. Peça online via WhatsApp com entrega rápida em Santo André. Frete grátis acima de R$ 100.">
+  <title>{{PRODUTO_NOME}} | La Empanadas - Delivery Santo André</title>
+  <meta name="description" content="{{PRODUTO_DESCRICAO_SEO}} Peça online via WhatsApp com entrega rápida em Santo André. Frete grátis acima de R$ 100.">
   <meta name="robots" content="index, follow, max-image-preview:large">
-  <link rel="canonical" href="https://laempanadas.com.br/produtos/empanada-romeu-e-julieta-emp_romeu.html">
+  <link rel="canonical" href="{{CANONICAL_URL}}">
   <meta name="language" content="pt-BR">
   <meta name="theme-color" content="#c2410c">
 
   <!-- Preload da imagem principal -->
-  <link rel="preload" as="image" href="https://laempanadas.com.br/assets/js/img/ROMEU.webp" fetchpriority="high">
+  <link rel="preload" as="image" href="{{IMAGEM_URL}}" fetchpriority="high">
 
   <!-- CSS compilado -->
   <link rel="stylesheet" href="/assets/css/styles.min.css">
@@ -31,18 +31,18 @@
   <!-- Open Graph -->
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="La Empanadas">
-  <meta property="og:title" content="Empanada Romeu e Julieta | La Empanadas">
-  <meta property="og:description" content="Massa recheada com goiabada cascão e muçarela. Peca online com entrega rapida em Santo Andre. Frete gratis acima de R$ 100. Peça online via WhatsApp com entrega rápida em Santo André.">
-  <meta property="og:url" content="https://laempanadas.com.br/produtos/empanada-romeu-e-julieta-emp_romeu.html"
-  <meta property="og:image" content="https://laempanadas.com.br/assets/js/img/ROMEU.webp">
+  <meta property="og:title" content="{{PRODUTO_NOME}} | La Empanadas">
+  <meta property="og:description" content="{{PRODUTO_DESCRICAO_SEO}} Peça online via WhatsApp com entrega rápida em Santo André.">
+  <meta property="og:url" content="{{CANONICAL_URL}}"
+  <meta property="og:image" content="{{IMAGEM_URL}}">
   <meta property="og:image:width" content="800">
   <meta property="og:image:height" content="800">
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Empanada Romeu e Julieta | La Empanadas">
-  <meta name="twitter:description" content="Massa recheada com goiabada cascão e muçarela. Peca online com entrega rapida em Santo Andre. Frete gratis acima de R$ 100. Peça online via WhatsApp.">
-  <meta name="twitter:image" content="https://laempanadas.com.br/assets/js/img/ROMEU.webp"
+  <meta name="twitter:title" content="{{PRODUTO_NOME}} | La Empanadas">
+  <meta name="twitter:description" content="{{PRODUTO_DESCRICAO_SEO}} Peça online via WhatsApp.">
+  <meta name="twitter:image" content="{{IMAGEM_URL}}"
 
   <link rel="icon" href="/favicon.ico">
   <link rel="stylesheet" href="/assets/css/styles.min.css">
@@ -64,18 +64,18 @@
         "itemListElement": [
           {"@type": "ListItem", "position": 1, "name": "Início", "item": "https://laempanadas.com.br/"},
           {"@type": "ListItem", "position": 2, "name": "Cardápio", "item": "https://laempanadas.com.br/#cardapio"},
-          {"@type": "ListItem", "position": 3, "name": "Empanadas Doces", "item": "https://laempanadas.com.br/#cardapio-empanadas-doces"},
-          {"@type": "ListItem", "position": 4, "name": "Empanada Romeu e Julieta", "item": "https://laempanadas.com.br/produtos/empanada-romeu-e-julieta-emp_romeu.html"}
+          {"@type": "ListItem", "position": 3, "name": "{{CATEGORIA_NOME}}", "item": "https://laempanadas.com.br/#cardapio-{{CATEGORIA_SLUG}}"},
+          {"@type": "ListItem", "position": 4, "name": "{{PRODUTO_NOME}}", "item": "{{CANONICAL_URL}}"}
         ]
       },
       {
         "@type": "MenuItem",
-        "name": "Empanada Romeu e Julieta",
-        "description": "Massa recheada com goiabada cascão e muçarela.",
-        "image": "https://laempanadas.com.br/assets/js/img/ROMEU.webp",
+        "name": "{{PRODUTO_NOME}}",
+        "description": "{{PRODUTO_DESCRICAO}}",
+        "image": "{{IMAGEM_URL}}",
         "offers": {
           "@type": "Offer",
-          "price": "14,50",
+          "price": "{{PRECO_NUMERICO}}",
           "priceCurrency": "BRL",
           "availability": "https://schema.org/InStock",
           "seller": {
@@ -83,17 +83,17 @@
             "name": "La Empanadas"
           }
         },
-        "category": "Empanadas Doces",
+        "category": "{{CATEGORIA_NOME}}",
         "nutrition": {
           "@type": "NutritionInformation",
           "servingSize": "1 empanada",
-          "calories": "320"
+          "calories": "{{CALORIAS}}"
         }
       },
       {
         "@type": "ImageObject",
-        "contentUrl": "https://laempanadas.com.br/assets/js/img/ROMEU.webp",
-        "caption": "Empanada Romeu e Julieta - La Empanadas",
+        "contentUrl": "{{IMAGEM_URL}}",
+        "caption": "{{PRODUTO_NOME}} - La Empanadas",
         "license": "https://laempanadas.com.br/licenca-imagens"
       },
       {
@@ -101,8 +101,8 @@
         "itemListElement": [
           {"@type": "ListItem", "position": 1, "name": "Início", "item": "https://laempanadas.com.br/"},
           {"@type": "ListItem", "position": 2, "name": "Cardápio", "item": "https://laempanadas.com.br/#cardapio"},
-          {"@type": "ListItem", "position": 3, "name": "Empanadas Doces", "item": "https://laempanadas.com.br/#cardapio-empanadas-doces"},
-          {"@type": "ListItem", "position": 4, "name": "Empanada Romeu e Julieta", "item": "https://laempanadas.com.br/produtos/empanada-romeu-e-julieta-emp_romeu.html"}
+          {"@type": "ListItem", "position": 3, "name": "{{CATEGORIA_NOME}}", "item": "https://laempanadas.com.br/#cardapio-{{CATEGORIA_SLUG}}"},
+          {"@type": "ListItem", "position": 4, "name": "{{PRODUTO_NOME}}", "item": "{{CANONICAL_URL}}"}
         ]
       }
     ]
@@ -150,42 +150,42 @@
 
   <main class="max-w-md mx-auto p-4 pb-28 flex-grow w-full" role="main">
     <section class="mb-4 text-center" aria-labelledby="produto-title">
-      <h1 id="produto-title" class="text-xl font-bold text-gray-900 mb-2">Empanada Romeu e Julieta</h1>
-      <p class="text-sm text-gray-600 mb-4">Empanadas Doces</p>
-      <p class="text-base text-terracotta-600 font-bold">R$ R$ 14,50</p>
+      <h1 id="produto-title" class="text-xl font-bold text-gray-900 mb-2">{{PRODUTO_NOME}}</h1>
+      <p class="text-sm text-gray-600 mb-4">{{CATEGORIA_NOME}}</p>
+      <p class="text-base text-terracotta-600 font-bold">R$ {{PRECO_FORMATADO}}</p>
     </section>
 
     <!-- Imagem Principal com Schema ImageObject -->
     <figure class="mb-6">
-      <img src="https://laempanadas.com.br/assets/js/img/ROMEU.webp" alt="Empanada Romeu e Julieta - La Empanadas" width="400" height="300" class="w-full h-auto rounded-2xl object-cover shadow-lg" loading="eager" fetchpriority="high" itemprop="image">
+      <img src="{{IMAGEM_URL}}" alt="{{PRODUTO_NOME}} - La Empanadas" width="400" height="300" class="w-full h-auto rounded-2xl object-cover shadow-lg" loading="eager" fetchpriority="high" itemprop="image">
     </figure>
 
     <section class="mb-6 p-4 bg-white border border-orange-100 rounded-2xl shadow-sm">
-      <h2 class="text-lg font-bold text-gray-900 mb-3">Empanada Romeu e Julieta</h2>
-      <p class="text-gray-600 mb-4">Massa recheada com goiabada cascão e muçarela.</p>
+      <h2 class="text-lg font-bold text-gray-900 mb-3">{{PRODUTO_NOME}}</h2>
+      <p class="text-gray-600 mb-4">{{PRODUTO_DESCRICAO}}</p>
       
       <div class="grid grid-cols-3 gap-4 mb-4">
         <div class="text-center p-3 bg-orange-50 rounded-xl">
           <p class="text-xs text-gray-500 uppercase tracking-wider">Preço</p>
-          <p class="text-xl font-bold text-terracotta-600">R$ R$ 14,50</p>
+          <p class="text-xl font-bold text-terracotta-600">R$ {{PRECO_FORMATADO}}</p>
         </div>
         <div class="text-center p-3 bg-emerald-50 rounded-xl">
           <p class="text-xs text-gray-500 uppercase tracking-wider">Categoria</p>
-          <p class="text-sm font-medium text-emerald-700">Empanadas Doces</p>
+          <p class="text-sm font-medium text-emerald-700">{{CATEGORIA_NOME}}</p>
         </div>
         <div class="text-center p-3 bg-amber-50 rounded-xl">
           <p class="text-xs text-gray-500 uppercase tracking-wider">Calorias</p>
-          <p class="text-sm font-bold text-amber-700">320 kcal</p>
+          <p class="text-sm font-bold text-amber-700">{{CALORIAS}} kcal</p>
         </div>
       </div>
 
       <!-- Botão Adicionar ao Carrinho - MANTÉM FLUXO WHATSAPP EXISTENTE -->
-      <div class="flex items-center gap-2" id="controls-emp_romeu" data-item-id="emp_romeu">
+      <div class="flex items-center gap-2" id="controls-{{PRODUTO_ID}}" data-item-id="{{PRODUTO_ID}}">
         <button 
           data-action="add" 
-          data-id="emp_romeu"
+          data-id="{{PRODUTO_ID}}"
           class="btn btn-lg rounded-full bg-terracotta-500 hover:bg-terracotta-600 text-white border-none px-6 flex-1 flex items-center justify-center gap-2"
-          aria-label="Adicionar Empanada Romeu e Julieta ao carrinho"
+          aria-label="Adicionar {{PRODUTO_NOME}} ao carrinho"
         >
           <i data-lucide="plus" class="w-5 h-5 inline-block"></i>
           Adicionar ao Pedido
@@ -199,7 +199,7 @@
     <!-- Ingredientes -->
     <section class="mb-6">
       <h3 class="text-sm font-bold text-gray-900 mb-3">Ingredientes</h3>
-      <p class="text-sm text-gray-600">Massa recheada com goiabada cascão e muçarela.</p>
+      <p class="text-sm text-gray-600">{{INGREDIENTES}}</p>
     </section>
 
     <!-- Informações Nutricionais -->
@@ -209,12 +209,12 @@
         Informações Nutricionais (por unidade)
       </h3>
       <div class="grid grid-cols-2 gap-2 text-xs">
-        <div class="bg-white p-2 rounded-lg"><span class="text-gray-500">Calorias</span><br><span class="font-bold">320 kcal</span></div>
-        <div class="bg-white p-2 rounded-lg"><span class="text-gray-500">Proteínas</span><br><span class="font-bold">12g</span></div>
-        <div class="bg-white p-2 rounded-lg"><span class="text-gray-500">Carboidratos</span><br><span class="font-bold">28g</span></div>
-        <div class="bg-white p-2 rounded-lg"><span class="text-gray-500">Gorduras</span><br><span class="font-bold">18g</span></div>
-        <div class="bg-white p-2 rounded-lg"><span class="text-gray-500">Fibras</span><br><span class="font-bold">2g</span></div>
-        <div class="bg-white p-2 rounded-lg"><span class="text-gray-500">Sódio</span><br><span class="font-bold">380mg</span></div>
+        <div class="bg-white p-2 rounded-lg"><span class="text-gray-500">Calorias</span><br><span class="font-bold">{{CALORIAS}} kcal</span></div>
+        <div class="bg-white p-2 rounded-lg"><span class="text-gray-500">Proteínas</span><br><span class="font-bold">{{PROTEINAS}}g</span></div>
+        <div class="bg-white p-2 rounded-lg"><span class="text-gray-500">Carboidratos</span><br><span class="font-bold">{{CARBOIDRATOS}}g</span></div>
+        <div class="bg-white p-2 rounded-lg"><span class="text-gray-500">Gorduras</span><br><span class="font-bold">{{GORDURAS}}g</span></div>
+        <div class="bg-white p-2 rounded-lg"><span class="text-gray-500">Fibras</span><br><span class="font-bold">{{FIBRAS}}g</span></div>
+        <div class="bg-white p-2 rounded-lg"><span class="text-gray-500">Sódio</span><br><span class="font-bold">{{SODIO}}mg</span></div>
       </div>
     </section>
 
@@ -225,19 +225,19 @@
         <li class="text-gray-300">/</li>
         <li><a href="#cardapio" class="hover:text-terracotta-600">Cardápio</a></li>
         <li class="text-gray-300">/</li>
-        <li><a href="#cardapio-empanadas-doces" class="hover:text-terracotta-600">Empanadas Doces</a></li>
+        <li><a href="#cardapio-{{CATEGORIA_SLUG}}" class="hover:text-terracotta-600">{{CATEGORIA_NOME}}</a></li>
         <li class="text-gray-300">/</li>
-        <li aria-current="page" class="text-terracotta-600 font-medium">Empanada Romeu e Julieta</li>
+        <li aria-current="page" class="text-terracotta-600 font-medium">{{PRODUTO_NOME}}</li>
       </ol>
     </div>
 
     <!-- Botão WhatsApp - MANTÉM FLUXO EXISTENTE -->
     <section class="mt-8">
-      <a href="https://api.whatsapp.com/send?phone=551126690644&text=Ol%C3%A1%2C%20quero%20pedir%20Empanada%20Romeu%20e%20Julieta%20na%20La%20Empanadas." 
+      <a href="https://api.whatsapp.com/send?phone=551126690644&text=Ol%C3%A1%2C%20quero%20pedir%20{{PRODUTO_NOME_ENCODED}}%20na%20La%20Empanadas." 
          target="_blank" 
          rel="noopener noreferrer"
          class="btn bg-green-600 hover:bg-green-700 text-white border-none w-full py-4 rounded-xl flex items-center justify-center gap-2 text-base font-semibold"
-         aria-label="Pedir Empanada Romeu e Julieta via WhatsApp"
+         aria-label="Pedir {{PRODUTO_NOME}} via WhatsApp"
       >
         <i data-lucide="message-circle" class="w-5 h-5 inline-block"></i>
         Pedir via WhatsApp
