@@ -170,6 +170,31 @@ interface WhatsAppWebhookEntry {
   }>
 }
 
+export function shouldAttemptAiReply(args: {
+  flowConsumed: boolean
+  outcome?: string
+  interactiveReplyId: string | null
+  inboundText: string
+}): boolean {
+  const trimmed = args.inboundText.trim()
+  const decision =
+    !!trimmed &&
+    !args.interactiveReplyId &&
+    (!args.flowConsumed || args.outcome === 'no_match' || args.outcome === 'duplicate_inbound_ignored')
+
+  if (process.env.NODE_ENV !== 'production') {
+    console.log('[webhook] ai gate', {
+      flowConsumed: args.flowConsumed,
+      outcome: args.outcome,
+      interactiveReplyId: args.interactiveReplyId,
+      inboundTextLength: trimmed.length,
+      decision,
+    })
+  }
+
+  return decision
+}
+
 // GET - Webhook verification
 export async function GET(request: Request) {
   try {
@@ -1049,7 +1074,14 @@ async function processMessage(
     }).catch((err) => console.error('[automations] dispatch failed:', err))
   }
 
-  if (!flowConsumed && !interactiveReplyId && inboundText.trim()) {
+  const shouldAttemptAi = shouldAttemptAiReply({
+    flowConsumed,
+    outcome: flowResult.outcome,
+    interactiveReplyId,
+    inboundText,
+  })
+
+  if (shouldAttemptAi) {
     await dispatchInboundToAiReply({
       accountId,
       conversationId: conversation.id,

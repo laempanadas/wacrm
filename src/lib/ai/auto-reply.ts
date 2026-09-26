@@ -45,11 +45,19 @@ export async function dispatchInboundToAiReply(
   try {
     const db = supabaseAdmin()
 
-    const AGENT_INACTIVITY_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutos
-      const CUSTOMER_INACTIVITY_THRESHOLD_MS = 4 * 60 * 60 * 1000; // 4 horas
+    const AGENT_INACTIVITY_THRESHOLD_MS = 30 * 60 * 1000 // 30 minutos
+    const CUSTOMER_INACTIVITY_THRESHOLD_MS = 4 * 60 * 60 * 1000 // 4 horas
 
-      const config = await loadAiConfig(db, accountId);
-      if (!config || !config.autoReplyEnabled) return;
+    const config = await loadAiConfig(db, accountId)
+    if (!config || !config.autoReplyEnabled) {
+      console.log('[ai auto-reply] blocked: config missing or auto-reply disabled', {
+        accountId,
+        conversationId,
+        hasConfig: !!config,
+        autoReplyEnabled: config?.autoReplyEnabled ?? false,
+      })
+      return
+    }
 
     // Deterministic, user-configured responders win over the LLM — the
     // caller already excludes messages a Flow consumed. Message-level
@@ -65,32 +73,64 @@ export async function dispatchInboundToAiReply(
       .eq('account_id', accountId)
       .eq('is_active', true)
       .in('trigger_type', ['new_message_received', 'keyword_match'])
-      .limit(1);
-    if (autoResponders && autoResponders.length > 0) return;
+      .limit(1)
+    if (autoResponders && autoResponders.length > 0) {
+      console.log('[ai auto-reply] blocked: active message automation', {
+        accountId,
+        conversationId,
+        autoResponderCount: autoResponders.length,
+      })
+      return
+    }
 
     const { data: conv, error: convErr } = await db
       .from('conversations')
       .select('status, assigned_agent_id, ai_autoreply_disabled, ai_reply_count, last_agent_message_at')
       .eq('id', conversationId)
-      .maybeSingle();
-    if (convErr || !conv) return;
+      .maybeSingle()
+    if (convErr || !conv) {
+      console.log('[ai auto-reply] blocked: conversation missing', {
+        accountId,
+        conversationId,
+        convErr: convErr?.message,
+      })
+      return
+    }
 
-    // Conversa fechada (ex.: pedido pago) → a IA não atende. A conversa é
-    // reaberta pelo webhook do WhatsApp quando o cliente manda nova mensagem
-    // (ver src/app/api/whatsapp/webhook/route.ts), então este portão só barra
-    // rodadas em que a conversa ainda está de fato encerrada.
-    if (conv.status === 'closed') return;
+    // Closed conversations are intentionally left for a human to reopen
+    // when a fresh inbound arrives from the customer.
+    if (conv.status === 'closed') {
+      console.log('[ai auto-reply] blocked: conversation closed', {
+        accountId,
+        conversationId,
+        status: conv.status,
+      })
+      return
+    }
 
-    const now = new Date();
-    const lastAgentMessageAt = conv.last_agent_message_at ? new Date(conv.last_agent_message_at) : null;
-    const agentInactive = !lastAgentMessageAt || (now.getTime() - lastAgentMessageAt.getTime() > AGENT_INACTIVITY_THRESHOLD_MS);
+    const now = new Date()
+    const lastAgentMessageAt = conv.last_agent_message_at ? new Date(conv.last_agent_message_at) : null
+    const agentInactive = !lastAgentMessageAt || now.getTime() - lastAgentMessageAt.getTime() > AGENT_INACTIVITY_THRESHOLD_MS
 
-    if (conv.assigned_agent_id && !agentInactive) return; // Se agente atribuído E ativo, IA se cala
-    if (conv.ai_autoreply_disabled && !agentInactive) return; // Se auto-resposta desativada E agente ativo, IA se cala
+    if (conv.assigned_agent_id && !agentInactive) {
+      console.log('[ai auto-reply] blocked: human assigned and active', {
+        accountId,
+        conversationId,
+        assigned_agent_id: conv.assigned_agent_id,
+      })
+      return
+    }
+    if (conv.ai_autoreply_disabled && !agentInactive) {
+      console.log('[ai auto-reply] blocked: auto-reply disabled for conversation while agent is active', {
+        accountId,
+        conversationId,
+      })
+      return
+    }
 
-    // Verifica inatividade do CLIENTE — se cliente inativo há > threshold, IA reengaja
-    // mesmo que agente esteja atribuído e "ativo"
-    let customerInactive = false;
+    // If the agent is active but the customer has been quiet for a long time,
+    // we can re-engage the thread even with a human assignment still present.
+    let customerInactive = false
     if (conv.assigned_agent_id && !agentInactive) {
       const { data: lastCustomerMsg } = await db
         .from('messages')
@@ -99,29 +139,51 @@ export async function dispatchInboundToAiReply(
         .eq('sender_type', 'customer')
         .order('created_at', { ascending: false })
         .limit(1)
-        .maybeSingle();
+        .maybeSingle()
 
       if (lastCustomerMsg?.created_at) {
-        const lastCustomerAt = new Date(lastCustomerMsg.created_at);
-        const customerInactiveMs = now.getTime() - lastCustomerAt.getTime();
-        customerInactive = customerInactiveMs > CUSTOMER_INACTIVITY_THRESHOLD_MS;
+        const lastCustomerAt = new Date(lastCustomerMsg.created_at)
+        const customerInactiveMs = now.getTime() - lastCustomerAt.getTime()
+        customerInactive = customerInactiveMs > CUSTOMER_INACTIVITY_THRESHOLD_MS
       } else {
-        // Sem mensagens do cliente ainda — trata como inativo
-        customerInactive = true;
+        customerInactive = true
       }
     }
 
-    // Se cliente inativo > threshold, permite IA reengajar mesmo com agente "ativo"
-    const shouldReengage = customerInactive;
-    if (conv.assigned_agent_id && !agentInactive && !shouldReengage) return;
-    if (conv.ai_autoreply_disabled && !agentInactive && !shouldReengage) return;
+    const shouldReengage = customerInactive
+    if (conv.assigned_agent_id && !agentInactive && !shouldReengage) {
+      console.log('[ai auto-reply] blocked: human assigned and customer is active', {
+        accountId,
+        conversationId,
+        assigned_agent_id: conv.assigned_agent_id,
+      })
+      return
+    }
+    if (conv.ai_autoreply_disabled && !agentInactive && !shouldReengage) {
+      console.log('[ai auto-reply] blocked: auto-reply disabled and customer is active', {
+        accountId,
+        conversationId,
+      })
+      return
+    }
 
     // Cheap early-out; the authoritative cap check is the atomic claim
     // below (this read can race a concurrent inbound).
-    if (conv.ai_reply_count >= config.autoReplyMaxPerConversation) return;
+    if (conv.ai_reply_count >= config.autoReplyMaxPerConversation) {
+      console.log('[ai auto-reply] blocked: cap reached', {
+        accountId,
+        conversationId,
+        ai_reply_count: conv.ai_reply_count,
+        max: config.autoReplyMaxPerConversation,
+      })
+      return
+    }
 
     const messages = await buildConversationContext(db, conversationId)
-    if (messages.length === 0) return
+    if (messages.length === 0) {
+      console.log('[ai auto-reply] blocked: empty conversation context', { accountId, conversationId })
+      return
+    }
 
     // Ground the reply in the account's knowledge base (best-effort).
     const knowledge = await retrieveKnowledge(

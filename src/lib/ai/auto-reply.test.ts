@@ -152,6 +152,7 @@ describe('dispatchInboundToAiReply — eligibility gates', () => {
       assigned_agent_id: 'agent-9',
       ai_autoreply_disabled: false,
       ai_reply_count: 0,
+      last_agent_message_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
     }
     await dispatchInboundToAiReply(ARGS)
     expect(h.engineSendText).not.toHaveBeenCalled()
@@ -162,6 +163,7 @@ describe('dispatchInboundToAiReply — eligibility gates', () => {
       assigned_agent_id: null,
       ai_autoreply_disabled: true,
       ai_reply_count: 0,
+      last_agent_message_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
     }
     await dispatchInboundToAiReply(ARGS)
     expect(h.engineSendText).not.toHaveBeenCalled()
