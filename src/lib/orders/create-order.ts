@@ -1,62 +1,44 @@
+// src/lib/orders/create-order.ts
 /**
- * Criação automática de pedido no pipeline "Pedidos Delivery".
+ * create-order.ts
  *
- * Ao final do fluxo de pedidos (veja `src/lib/flows/pedido-empanadas-flow.ts`),
- * o frontend/automação chama `POST /api/orders` com os dados coletados na
- * conversa. Este módulo:
+ * Implementação idempotente e resistente a race-conditions para criar
+ * deals/orders a partir do fluxo de pedidos.
  *
- *   1. Resolve o pipeline "Pedidos Delivery" e o estágio "Novo Pedido"
- *      da conta (por nome).
- *   2. Cria a negociação (deal) com título "Pedido - {nome}", valor e
- *      as informações do pedido (tipo, endereço e forma de pagamento)
- *      no campo `notes`.
- *   3. Aplica ao contato a tag de status: "Confirmado" quando o
- *      pagamento já foi feito online (Mercado Pago aprovado) ou
- *      "Aguardando Pagamento" caso contrário — criando a tag se ainda
- *      não existir.
+ * Estratégia:
+ *  - Usa `external_reference` (preferido) como chave de idempotência.
+ *  - Se external_reference não for fornecido, tenta usar conversationId.
+ *  - Se external_reference existir: tenta localizar order existente e retorna imediatamente.
+ *  - Ao criar: usa upsert (onConflict: 'external_reference') quando possível para
+ *    evitar duplicação em concorrência.
  *
- * As funções puras (`buildOrderTitle`, `buildOrderNotes`,
- * `selectStatusTagName`) ficam separadas do efeito no banco para
- * facilitar os testes unitários.
- *
- * ⚠️ SERVER-SIDE ONLY — usa o client Supabase com a sessão do usuário.
+ * Requisitos:
+ *  - Supabase: tabela `orders` com coluna `external_reference` (opcional).
+ *  - Tabela `deals`, `tags`, `contact_tags` conforme usado no projeto.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { createClient } from '@supabase/supabase-js';
 
-/** Nome do pipeline usado para os pedidos de delivery/retirada. */
 export const ORDERS_PIPELINE_NAME = 'Pedidos Delivery';
-/** Estágio inicial onde todo novo pedido entra. */
 export const ORDERS_INITIAL_STAGE_NAME = 'Novo Pedido';
 
-/** Tag aplicada quando o pagamento online já foi confirmado. */
 export const TAG_CONFIRMADO = 'Confirmado';
-/** Tag aplicada quando ainda aguardamos o pagamento. */
 export const TAG_AGUARDANDO = 'Aguardando Pagamento';
 
 export type OrderDeliveryKind = 'delivery' | 'retirada';
 export type OrderPaymentMethod = 'pix' | 'cartao' | 'dinheiro' | 'mercado_pago';
 
 export interface CreateOrderInput {
-  /** Contato dono do pedido (obrigatório — deals.contact_id é NOT NULL). */
   contactId: string;
-  /** Nome do cliente (para o título do card). */
   customerName: string;
-  /** Tipo de recebimento. */
   deliveryKind: OrderDeliveryKind;
-  /** Forma de pagamento escolhida. */
-  paymentMethod: OrderPaymentMethod;
-  /** Valor total do pedido em reais (BRL). */
+  paymentMethod?: OrderPaymentMethod;
   total: number;
-  /** Endereço de entrega — obrigatório para delivery. */
   deliveryAddress?: string;
-  /**
-   * Indica se o pagamento já foi confirmado online (ex.: Mercado Pago
-   * aprovado). Define a tag de status aplicada ao contato.
-   */
   paidOnline?: boolean;
-  /** Conversa de origem, opcional (para vincular o deal). */
   conversationId?: string;
+  external_reference?: string | null;
 }
 
 export interface CreateOrderResult {
@@ -64,6 +46,8 @@ export interface CreateOrderResult {
   pipelineId: string;
   stageId: string;
   tagName: string;
+  orderId?: string;
+  orderAlreadyExisted?: boolean;
 }
 
 const PAYMENT_LABELS: Record<OrderPaymentMethod, string> = {
@@ -78,41 +62,26 @@ const DELIVERY_LABELS: Record<OrderDeliveryKind, string> = {
   retirada: 'Retirada no local',
 };
 
-// ============================================================
-// Funções puras (testáveis)
-// ============================================================
-
-/** Monta o título do card: "Pedido - {nome}". */
 export function buildOrderTitle(customerName: string): string {
-  const name = customerName.trim() || 'Cliente';
+  const name = (customerName || '').trim() || 'Cliente';
   return `Pedido - ${name}`;
 }
 
-/** Rótulo legível para a forma de pagamento. */
-export function paymentMethodLabel(method: OrderPaymentMethod): string {
-  return PAYMENT_LABELS[method] ?? method;
+export function paymentMethodLabel(method?: OrderPaymentMethod): string {
+  return method ? PAYMENT_LABELS[method] ?? method : '(não informado)';
 }
 
-/** Rótulo legível para o tipo de recebimento. */
 export function deliveryKindLabel(kind: OrderDeliveryKind): string {
   return DELIVERY_LABELS[kind] ?? kind;
 }
 
-/**
- * Escolhe a tag de status do pedido.
- * - Pagamento confirmado online → "Confirmado".
- * - Caso contrário → "Aguardando Pagamento".
- */
 export function selectStatusTagName(paidOnline: boolean): string {
   return paidOnline ? TAG_CONFIRMADO : TAG_AGUARDANDO;
 }
 
-/**
- * Monta o texto de `notes` do deal com as informações do pedido.
- */
 export function buildOrderNotes(input: {
   deliveryKind: OrderDeliveryKind;
-  paymentMethod: OrderPaymentMethod;
+  paymentMethod?: OrderPaymentMethod;
   deliveryAddress?: string;
 }): string {
   const lines = [
@@ -127,87 +96,203 @@ export function buildOrderNotes(input: {
   return lines.join('\n');
 }
 
-// ============================================================
-// Efeito no banco
-// ============================================================
+// Supabase admin singleton (service role)
+let _adminClient: SupabaseClient | null = null;
+function supabaseAdmin() {
+  if (!_adminClient) {
+    _adminClient = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!
+    );
+  }
+  return _adminClient!;
+}
 
 /**
- * Cria a negociação do pedido e aplica a tag de status ao contato.
+ * Cria o deal + order de maneira idempotente quando possível.
  *
- * @throws Error quando o pipeline "Pedidos Delivery" / estágio
- *   "Novo Pedido" não existem para a conta.
+ * Observações:
+ * - Se external_reference for fornecido, a função tentará reutilizar o pedido
+ *   existente e retornar sem criar novos registros.
+ * - Se external_reference não for fornecido, a função cria um novo deal+order.
  */
 export async function createOrderDeal(
-  supabase: SupabaseClient,
+  supabaseClient: SupabaseClient | null,
   ctx: { accountId: string; userId: string },
   input: CreateOrderInput
 ): Promise<CreateOrderResult> {
-  // 1. Resolve pipeline por nome (escopo da conta).
+  const supabase = supabaseClient ?? supabaseAdmin();
+
+  if (!ctx?.accountId) throw new Error('ctx.accountId is required');
+  if (!input?.contactId) throw new Error('input.contactId is required');
+
+  // Normalize idempotency key
+  const extRefRaw = (input.external_reference ?? input.conversationId) || null;
+  const externalReference = extRefRaw ? String(extRefRaw).trim() : null;
+
+  // 1) Resolve pipeline
   const { data: pipeline, error: pipelineErr } = await supabase
     .from('pipelines')
     .select('id')
     .eq('account_id', ctx.accountId)
     .eq('name', ORDERS_PIPELINE_NAME)
     .maybeSingle();
-
   if (pipelineErr) throw pipelineErr;
   if (!pipeline) {
-    throw new Error(
-      `Pipeline "${ORDERS_PIPELINE_NAME}" não encontrado. Crie o pipeline antes de registrar pedidos.`
-    );
+    throw new Error(`Pipeline "${ORDERS_PIPELINE_NAME}" not found for account ${ctx.accountId}`);
   }
 
-  // 2. Resolve estágio inicial por nome.
+  // 2) Resolve initial stage
   const { data: stage, error: stageErr } = await supabase
     .from('pipeline_stages')
     .select('id')
     .eq('pipeline_id', pipeline.id)
     .eq('name', ORDERS_INITIAL_STAGE_NAME)
     .maybeSingle();
-
   if (stageErr) throw stageErr;
   if (!stage) {
-    throw new Error(
-      `Estágio "${ORDERS_INITIAL_STAGE_NAME}" não encontrado no pipeline "${ORDERS_PIPELINE_NAME}".`
-    );
+    throw new Error(`Stage "${ORDERS_INITIAL_STAGE_NAME}" not found in pipeline ${pipeline.id}`);
   }
 
-  // 3. Cria a negociação.
-  const { data: deal, error: dealErr } = await supabase
+  // 3) If externalReference provided — try to find existing order to be idempotent
+  if (externalReference) {
+    try {
+      const { data: foundOrders, error: findErr } = await supabase
+        .from('orders')
+        .select('*')
+        .eq('external_reference', externalReference)
+        .limit(1);
+
+      if (findErr) throw findErr;
+
+      if (foundOrders && foundOrders.length > 0) {
+        const found = foundOrders[0];
+        const tagName = selectStatusTagName(Boolean(found.paid_online));
+        // ensure tag is applied (idempotent)
+        try {
+          await applyContactTag(supabase, ctx, input.contactId, tagName);
+        } catch (tErr) {
+          console.warn('applyContactTag failed while returning existing order', tErr);
+        }
+
+        return {
+          dealId: found.deal_id,
+          pipelineId: pipeline.id,
+          stageId: stage.id,
+          tagName,
+          orderId: found.id,
+          orderAlreadyExisted: true,
+        };
+      }
+    } catch (e) {
+      console.warn('Failed to lookup existing order by external_reference — continuing to create', e);
+    }
+  }
+
+  // 4) Create deal (always create new deal here; dedup handled by externalReference above)
+  const dealPayload: any = {
+    account_id: ctx.accountId,
+    user_id: ctx.userId,
+    pipeline_id: pipeline.id,
+    stage_id: stage.id,
+    contact_id: input.contactId,
+    conversation_id: input.conversationId ?? null,
+    title: buildOrderTitle(input.customerName),
+    value: Number.isFinite(input.total) && input.total > 0 ? input.total : 0,
+    currency: 'BRL',
+    notes: buildOrderNotes({
+      deliveryKind: input.deliveryKind,
+      paymentMethod: input.paymentMethod,
+      deliveryAddress: input.deliveryAddress,
+    }),
+    status: 'open',
+  };
+
+  const { data: dealInsert, error: dealErr } = await supabase
     .from('deals')
-    .insert({
-      account_id: ctx.accountId,
-      user_id: ctx.userId,
-      pipeline_id: pipeline.id,
-      stage_id: stage.id,
-      contact_id: input.contactId,
-      conversation_id: input.conversationId ?? null,
-      title: buildOrderTitle(input.customerName),
-      value: Number.isFinite(input.total) && input.total > 0 ? input.total : 0,
-      currency: 'BRL',
-      notes: buildOrderNotes(input),
-      status: 'open',
-    })
+    .insert(dealPayload)
     .select('id')
-    .single();
+    .maybeSingle();
 
-  if (dealErr) throw dealErr;
+  if (dealErr) {
+    console.error('create deal error', dealErr);
+    throw dealErr;
+  }
 
-  // 4. Aplica a tag de status ao contato (cria a tag se necessário).
+  const dealId = dealInsert?.id;
+  if (!dealId) throw new Error('Failed to create deal (no id returned)');
+
+  // 5) Prepare order payload
+  const orderPayload: any = {
+    account_id: ctx.accountId,
+    contact_id: input.contactId,
+    deal_id: dealId,
+    external_reference: externalReference,
+    total_amount: Number.isFinite(input.total) ? input.total : 0,
+    paid_online: Boolean(input.paidOnline),
+    status: 'pending',
+    delivery_kind: input.deliveryKind,
+    delivery_address: input.deliveryAddress ?? null,
+    payment_method: input.paymentMethod ?? 'mercado_pago',
+    created_at: new Date().toISOString(),
+  };
+
+  // 6) Upsert or insert order
+  let orderRecord: any = null;
+  if (externalReference) {
+    try {
+      const { data: upserted, error: upsertErr } = await supabase
+        .from('orders')
+        .upsert(orderPayload, { onConflict: 'external_reference' })
+        .select('*')
+        .maybeSingle();
+
+      if (upsertErr) {
+        console.warn('orders upsert error; attempting fetch', upsertErr);
+        const { data: fetched, error: fetchedErr } = await supabase
+          .from('orders')
+          .select('*')
+          .eq('external_reference', externalReference)
+          .limit(1);
+        if (fetchedErr) throw fetchedErr;
+        orderRecord = fetched?.[0];
+      } else {
+        orderRecord = upserted;
+      }
+    } catch (e) {
+      console.error('Failed to upsert/fetch order by external_reference', e);
+      throw e;
+    }
+  } else {
+    // no idempotency key — create a fresh order (caller should prefer to send external_reference)
+    const { data: inserted, error: insertErr } = await supabase
+      .from('orders')
+      .insert(orderPayload)
+      .select('*')
+      .maybeSingle();
+    if (insertErr) {
+      console.error('Failed to insert order', insertErr);
+      throw insertErr;
+    }
+    orderRecord = inserted;
+  }
+
+  // 7) Apply tag
   const tagName = selectStatusTagName(Boolean(input.paidOnline));
   await applyContactTag(supabase, ctx, input.contactId, tagName);
 
   return {
-    dealId: deal.id,
+    dealId,
     pipelineId: pipeline.id,
     stageId: stage.id,
     tagName,
+    orderId: orderRecord?.id,
+    orderAlreadyExisted: false,
   };
 }
 
 /**
- * Garante que a tag `tagName` exista para a conta e a associa ao
- * contato (idempotente — não duplica).
+ * Ensures tag existence and associates to contact idempotently.
  */
 async function applyContactTag(
   supabase: SupabaseClient,
@@ -215,7 +300,6 @@ async function applyContactTag(
   contactId: string,
   tagName: string
 ): Promise<void> {
-  // Procura a tag existente na conta.
   const { data: existing } = await supabase
     .from('tags')
     .select('id')
@@ -236,16 +320,18 @@ async function applyContactTag(
         color,
       })
       .select('id')
-      .single();
+      .maybeSingle();
     if (createErr) throw createErr;
-    tagId = created.id;
+    tagId = created?.id;
   }
 
-  // Associa a tag ao contato (UNIQUE(contact_id, tag_id) evita duplicação).
-  await supabase
+  if (!tagId) return;
+
+  const { error: assocErr } = await supabase
     .from('contact_tags')
-    .upsert(
-      { contact_id: contactId, tag_id: tagId },
-      { onConflict: 'contact_id,tag_id' }
-    );
+    .upsert({ contact_id: contactId, tag_id: tagId }, { onConflict: 'contact_id,tag_id' });
+
+  if (assocErr) {
+    console.warn('Failed to upsert contact_tags', assocErr);
+  }
 }

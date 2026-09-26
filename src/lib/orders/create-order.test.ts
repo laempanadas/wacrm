@@ -75,3 +75,25 @@ describe('buildOrderNotes', () => {
     expect(notes).not.toContain('Endereço');
   });
 });
+
+// scripts/test-create-order.ts
+import { createOrderDeal } from '../src/lib/orders/create-order';
+
+(async () => {
+  try {
+    const res = await createOrderDeal(null, { accountId: 'acct_test', userId: 'user_test' }, {
+      contactId: 'contact_test_1',
+      customerName: 'Teste Terminal',
+      deliveryKind: 'delivery',
+      paymentMethod: 'mercado_pago',
+      total: 33.5,
+      deliveryAddress: 'Rua Teste 123',
+      paidOnline: false,
+      conversationId: 'conv-abc-1',
+      external_reference: 'flow-run-terminal-0001'
+    });
+    console.log('RESULT:', JSON.stringify(res, null, 2));
+  } catch (err) {
+    console.error('ERROR:', err);
+  }
+})();
