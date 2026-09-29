@@ -305,6 +305,36 @@ export async function createOrderDeal(
 }
 
 /**
+ * Card for an order that was already written to `orders` (site and
+ * AI-agent orders in the WhatsApp webhook). Creates the deal + tag and
+ * links it via orders.deal_id, so the Mercado Pago webhook and the
+ * "Marcar como Pago" button can move it to "Pago". Best-effort: returns
+ * null and logs instead of throwing, so the payment message still goes
+ * out when the pipeline isn't set up.
+ */
+export async function createDealForOrder(
+  supabase: SupabaseClient,
+  ctx: { accountId: string; userId: string },
+  orderId: string | null,
+  input: Omit<CreateOrderInput, 'skipOrderRecord'>
+): Promise<CreateOrderResult | null> {
+  try {
+    const result = await createOrderDeal(supabase, ctx, { ...input, skipOrderRecord: true });
+    if (orderId) {
+      const { error } = await supabase
+        .from('orders')
+        .update({ deal_id: result.dealId })
+        .eq('id', orderId);
+      if (error) console.error('[createDealForOrder] link deal_id failed:', error);
+    }
+    return result;
+  } catch (err) {
+    console.error('[createDealForOrder] could not create deal:', err);
+    return null;
+  }
+}
+
+/**
  * Payment approved: tag the contact "Confirmado" and drop "Aguardando
  * Pagamento" so the two never show together.
  */

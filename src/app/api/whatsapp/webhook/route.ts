@@ -11,6 +11,7 @@ import { dispatchInboundToFlows } from '@/lib/flows/engine'
 import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply'
 import { dispatchWebhookEvent } from '@/lib/webhooks/deliver'
 import { createPaymentLink } from '@/lib/payments/mercado-pago'
+import { createDealForOrder } from '@/lib/orders/create-order'
 import {
   handleTemplateWebhookChange,
   isTemplateWebhookField,
@@ -851,8 +852,9 @@ async function processMessage(
 
     if (paymentResult.paymentUrl) {
       // 🛡️ SALVA NA TABELA ORDERS PARA O CRON DE 15 MIN E O WEBHOOK DO MERCADO PAGO ENCONTRAREM
-      try {
-        await supabaseAdmin().from('orders').insert({
+      const { data: siteOrderRow, error: siteInsertErr } = await supabaseAdmin()
+        .from('orders')
+        .insert({
           account_id: accountId,
           contact_id: contactRecord.id,
           external_reference: externalRef,
@@ -865,10 +867,31 @@ async function processMessage(
           payer_name: siteOrder.cliente,
           status: 'pending',
         })
+        .select('id')
+        .maybeSingle()
+      if (siteInsertErr) {
+        console.error('[webhook] Erro ao gravar pedido na tabela orders:', siteInsertErr)
+      } else {
         console.log('[webhook] Pedido do site gravado na tabela orders:', externalRef)
-      } catch (insertErr) {
-        console.error('[webhook] Erro ao gravar pedido na tabela orders:', insertErr)
       }
+
+      // Card no pipeline "Pedidos Delivery", como os pedidos do catálogo.
+      await createDealForOrder(
+        supabaseAdmin(),
+        { accountId, userId: configOwnerUserId },
+        (siteOrderRow?.id as string | undefined) ?? null,
+        {
+          contactId: contactRecord.id,
+          customerName: siteOrder.cliente,
+          deliveryKind: 'delivery',
+          paymentMethod: 'mercado_pago',
+          total: siteOrder.total,
+          deliveryAddress: siteOrder.endereco,
+          paidOnline: false,
+          conversationId: conversation.id,
+          external_reference: externalRef,
+        }
+      )
 
       // Preenche os campos personalizados do contato com os dados do pedido.
       await saveOrderCustomFields(supabaseAdmin(), accountId, contactRecord.id, {
@@ -947,8 +970,9 @@ async function processMessage(
       if (paymentResult.paymentUrl) {
 
         // Salva o pedido na tabela orders (igual ao fluxo do site)
-        try {
-          await supabaseAdmin().from('orders').insert({
+        const { data: agentOrderRow, error: agentInsertErr } = await supabaseAdmin()
+          .from('orders')
+          .insert({
             account_id: accountId,
             contact_id: contactRecord.id,
             external_reference: externalRef,
@@ -961,10 +985,30 @@ async function processMessage(
             payer_name: contactRecord.name || contactName,
             status: 'pending',
           })
+          .select('id')
+          .maybeSingle()
+        if (agentInsertErr) {
+          console.error('[agente] Erro ao gravar pedido:', agentInsertErr)
+        } else {
           console.log('[agente] Pedido gravado na tabela orders:', externalRef)
-        } catch (insertErr) {
-          console.error('[agente] Erro ao gravar pedido:', insertErr)
         }
+
+        // Card no pipeline "Pedidos Delivery", como os pedidos do catálogo.
+        await createDealForOrder(
+          supabaseAdmin(),
+          { accountId, userId: configOwnerUserId },
+          (agentOrderRow?.id as string | undefined) ?? null,
+          {
+            contactId: contactRecord.id,
+            customerName: contactRecord.name || contactName,
+            deliveryKind: 'delivery',
+            paymentMethod: 'mercado_pago',
+            total: totalDoAgente,
+            paidOnline: false,
+            conversationId: conversation.id,
+            external_reference: externalRef,
+          }
+        )
 
         // Preenche os campos personalizados do contato com os dados do pedido.
         // O agente não coleta itens detalhados nem endereço, então gravamos um

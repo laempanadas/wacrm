@@ -5,6 +5,7 @@ import {
   TAG_AGUARDANDO,
   TAG_CONFIRMADO,
   buildOrderNotes,
+  createDealForOrder,
   createOrderDeal,
   buildOrderTitle,
   deliveryKindLabel,
@@ -89,7 +90,7 @@ function fakeDb(tables: Record<string, Row[]>) {
   let seq = 0;
   const from = (table: string) => {
     const filters: Array<[string, unknown]> = [];
-    let op: 'select' | 'insert' | 'upsert' = 'select';
+    let op: 'select' | 'insert' | 'upsert' | 'update' = 'select';
     let payload: Row = {};
     const rows = () => (tables[table] ??= []);
     const run = (): Row[] => {
@@ -106,12 +107,15 @@ function fakeDb(tables: Record<string, Row[]>) {
         rows().push(row);
         return [row];
       }
-      return rows().filter((r) => filters.every(([k, v]) => r[k] === v));
+      const matched = rows().filter((r) => filters.every(([k, v]) => r[k] === v));
+      if (op === 'update') matched.forEach((r) => Object.assign(r, payload));
+      return matched;
     };
     const q = {
       select: () => q,
       insert: (p: Row) => ((op = 'insert'), (payload = p), q),
       upsert: (p: Row) => ((op = 'upsert'), (payload = p), q),
+      update: (p: Row) => ((op = 'update'), (payload = p), q),
       eq: (k: string, v: unknown) => (filters.push([k, v]), q),
       limit: () => q,
       maybeSingle: async () => ({ data: run()[0] ?? null, error: null }),
@@ -191,5 +195,29 @@ describe('createOrderDeal', () => {
     await expect(createOrderDeal(fakeDb(tables), ctx, input)).rejects.toThrow(
       'Pipeline "Pedidos Delivery" not found'
     );
+  });
+});
+
+describe('createDealForOrder', () => {
+  it('cria o card sem gravar outro pedido e vincula o deal ao pedido existente', async () => {
+    const tables = seededTables();
+    tables.orders = [{ id: 'order-site', external_reference: 'SITE-1', status: 'pending' }];
+
+    const res = await createDealForOrder(fakeDb(tables), ctx, 'order-site', {
+      ...input,
+      external_reference: 'SITE-1',
+    });
+
+    expect(res?.dealId).toBeTruthy();
+    expect(tables.deals).toHaveLength(1);
+    expect(tables.orders).toHaveLength(1);
+    expect(tables.orders[0].deal_id).toBe(res!.dealId);
+  });
+
+  it('não lança erro quando o pipeline não existe', async () => {
+    const tables = seededTables();
+    tables.pipelines = [];
+    await expect(createDealForOrder(fakeDb(tables), ctx, null, input)).resolves.toBeNull();
+    expect(tables.deals).toHaveLength(0);
   });
 });
