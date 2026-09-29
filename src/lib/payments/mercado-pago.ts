@@ -174,7 +174,7 @@ export async function createPaymentLink(
         ],
         installments: 3,
       },
-      notification_url: `${appBaseUrl}/api/webhooks/mercadopago`,
+      notification_url: `${appBaseUrl}/api/payments/mercado-pago/webhook`,
       back_urls: {
         success: 'https://www.laempanadas.com.br/',
         failure: 'https://www.laempanadas.com.br/',
