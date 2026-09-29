@@ -1,19 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { MercadoPagoConfig, Payment } from 'mercadopago';
 import { createClient as createAdminClient, SupabaseClient } from '@supabase/supabase-js';
 import { sendPaymentConfirmationWhatsApp } from '@/lib/whatsapp/send-message';
-import { createClient } from '@/lib/supabase/server';
-import * as crypto from 'crypto';
-
-const client = new MercadoPagoConfig({
-  accessToken: process.env.MERCADO_PAGO_ACCESS_TOKEN!,
-});
-const paymentService = new Payment(client);
+import { engineSendText } from '@/lib/flows/meta-send';
+import { getPaymentById } from '@/lib/payments/mercado-pago';
+import {
+  ORDER_STATUS_PAID,
+  extractPaymentId,
+  isOrderPaid,
+  isValidMercadoPagoSignature,
+} from '@/lib/payments/mercado-pago-webhook';
 
 /**
- * Cliente com service-role para escrever em tabelas protegidas por RLS
- * (custom_fields / contact_custom_values) a partir do webhook, onde não há
- * sessão de usuário autenticado.
+ * Cliente com service-role: o Mercado Pago chama o webhook sem sessão de
+ * usuário, então o cliente com cookies (RLS) não enxerga orders/contacts.
  */
 let _mpAdminClient: SupabaseClient | null = null;
 function supabaseAdmin(): SupabaseClient {
@@ -94,177 +93,233 @@ async function saveOrderCustomFields(
   }
 }
 
+const formatBRL = (v: number) => `R$ ${v.toFixed(2).replace('.', ',')}`;
+
 /**
- * Valida a assinatura HMAC-SHA256 do webhook do Mercado Pago.
- * Formato do header x-signature: "id=<id>,v1=<hash>"
+ * Confirma o pagamento ao cliente. Texto livre primeiro (o cliente acabou
+ * de conversar com o bot, então a janela de 24h está aberta) e registrado
+ * na conversa do inbox; se falhar, tenta o template aprovado.
+ * Best-effort: nunca derruba o webhook.
  */
-function validateSignature(
-  rawBody: string,
-  signatureHeader: string | null,
-  secret: string
-): boolean {
-  if (!signatureHeader) return false;
+async function notifyCustomer(order: {
+  id: string;
+  account_id: string;
+  contact_id: string;
+  delivery_address: string | null;
+  amount: number;
+}): Promise<void> {
+  const db = supabaseAdmin();
+  const lines = [
+    '✅ *Pagamento aprovado!*',
+    '',
+    `Recebemos ${formatBRL(order.amount)}. Seu pedido já foi para a cozinha 🔥`,
+  ];
+  if (order.delivery_address?.trim()) {
+    lines.push('', `🛵 Entrega em: _${order.delivery_address.trim()}_`);
+  }
+  lines.push('', 'Obrigado pela preferência! 🥟');
 
-  const parts = Object.fromEntries(
-    signatureHeader.split(',').map(s => s.trim().split('=') as [string, string])
-  );
+  try {
+    const { data: conversation } = await db
+      .from('conversations')
+      .select('id, user_id')
+      .eq('account_id', order.account_id)
+      .eq('contact_id', order.contact_id)
+      .order('updated_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (!conversation) throw new Error('conversation not found');
 
-  if (!parts.id || !parts.v1) return false;
+    await engineSendText({
+      accountId: order.account_id,
+      userId: conversation.user_id ?? '',
+      conversationId: conversation.id,
+      contactId: order.contact_id,
+      text: lines.join('\n'),
+    });
+    return;
+  } catch (err) {
+    console.warn(
+      '[mp-webhook] Texto de confirmação falhou, tentando template:',
+      err instanceof Error ? err.message : err
+    );
+  }
 
-  const manifest = `id:${parts.id};ts:${parts.ts ?? ''};`;
-  const hmac = crypto.createHmac('sha256', secret);
-  hmac.update(manifest);
-  const expected = hmac.digest('hex');
-
-  return expected === parts.v1;
+  try {
+    const { data: contact } = await db
+      .from('contacts')
+      .select('phone')
+      .eq('id', order.contact_id)
+      .maybeSingle();
+    if (!contact?.phone) throw new Error('contact phone not found');
+    await sendPaymentConfirmationWhatsApp(
+      db,
+      order.account_id,
+      contact.phone,
+      order.id,
+      order.amount
+    );
+  } catch (err) {
+    console.error('[mp-webhook] Não foi possível confirmar o pagamento ao cliente:', err);
+  }
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const supabase = await createClient();
-
-    const signatureHeader = req.headers.get('x-signature');
     const rawBody = await req.text();
-
-    const secret = process.env.MERCADO_PAGO_WEBHOOK_SECRET;
-    if (!secret) {
-      console.error('[mp-webhook] MERCADO_PAGO_WEBHOOK_SECRET não configurado');
-      return NextResponse.json({ error: 'Webhook secret not configured' }, { status: 500 });
+    let body: unknown = null;
+    try {
+      body = rawBody ? JSON.parse(rawBody) : null;
+    } catch {
+      body = null;
     }
+    const query = req.nextUrl.searchParams;
 
-    if (!validateSignature(rawBody, signatureHeader, secret)) {
-      console.warn('[mp-webhook] Assinatura inválida rejeitada');
-      return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
-    }
-
-    const data = JSON.parse(rawBody);
-
-    if (data.action !== 'payment.updated') {
+    const paymentId = extractPaymentId(body, query);
+    if (!paymentId) {
+      // merchant_order, testes do painel etc. — nada a fazer.
       return new Response('Ignored', { status: 200 });
     }
 
-    // SDK v3: payment.get() retorna PaymentResponse diretamente (sem .body)
-    const payment = await paymentService.get({ id: String(data.data.id) });
+    // A assinatura é defesa extra: o pagamento é sempre reconsultado na API
+    // do Mercado Pago abaixo, então um id forjado não marca nada como pago.
+    const secret = process.env.MERCADO_PAGO_WEBHOOK_SECRET?.trim();
+    if (secret) {
+      const valid = isValidMercadoPagoSignature({
+        xSignature: req.headers.get('x-signature'),
+        xRequestId: req.headers.get('x-request-id'),
+        dataId: query.get('data.id') ?? paymentId,
+        secret,
+      });
+      if (!valid) {
+        console.warn('[mp-webhook] Assinatura inválida rejeitada', { paymentId });
+        return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
+      }
+    } else {
+      console.warn('[mp-webhook] MERCADO_PAGO_WEBHOOK_SECRET não configurado — assinatura não validada');
+    }
 
-    const paymentStatus = payment.status;
-    const externalReference = payment.external_reference;
-    const paymentAmount = payment.transaction_amount;
+    const payment = await getPaymentById(paymentId);
+    if (!payment.ok) {
+      // 500 faz o Mercado Pago reenviar a notificação mais tarde.
+      return NextResponse.json({ error: 'Could not fetch payment' }, { status: 500 });
+    }
 
+    const externalReference = payment.externalReference;
     if (!externalReference) {
-      console.warn('[mp-webhook] external_reference ausente no pagamento', payment.id);
+      console.warn('[mp-webhook] external_reference ausente no pagamento', paymentId);
       return new Response('OK', { status: 200 });
     }
 
-    const { data: order, error: orderError } = await supabase
+    const db = supabaseAdmin();
+    const { data: order, error: orderError } = await db
       .from('orders')
-      .select('id, total, contactId:contact_id, account_id, items, delivery_address, payer_name')
+      .select('id, total, status, contact_id, account_id, items, delivery_address, payer_name')
       .eq('external_reference', externalReference)
+      .order('created_at', { ascending: false })
+      .limit(1)
       .maybeSingle();
 
     if (orderError) {
       console.error('[mp-webhook] Erro ao buscar pedido:', orderError);
       return NextResponse.json({ error: 'Database error' }, { status: 500 });
     }
-
     if (!order) {
       console.warn('[mp-webhook] Pedido não encontrado para external_reference:', externalReference);
       return new Response('OK', { status: 200 });
     }
 
-    // Validação do valor pago
-    if (typeof paymentAmount === 'number' && Math.abs(paymentAmount - order.total) > 0.01) {
-      console.warn(`[mp-webhook] Valor divergente: pago=${paymentAmount} esperado=${order.total}`);
-      return NextResponse.json({ error: 'Payment amount mismatch' }, { status: 400 });
+    // O Mercado Pago manda várias notificações por pagamento.
+    if (isOrderPaid(order.status)) {
+      return new Response('OK', { status: 200 });
     }
 
-    if (paymentStatus === 'approved') {
-      const { error: updateError } = await supabase
-        .from('orders')
-        .update({ status: 'PAID' })
-        .eq('id', order.id);
-
-      if (updateError) {
-        console.error('[mp-webhook] Erro ao atualizar status do pedido:', updateError);
-        return NextResponse.json({ error: 'Database update error' }, { status: 500 });
+    if (payment.status !== 'approved') {
+      if (payment.status === 'rejected' || payment.status === 'in_process') {
+        await db
+          .from('orders')
+          .update({ status: payment.status })
+          .eq('id', order.id)
+          .neq('status', ORDER_STATUS_PAID);
       }
+      console.log(`[mp-webhook] Pedido ${order.id}: pagamento ${payment.rawStatus}`);
+      return new Response('OK', { status: 200 });
+    }
 
-      const { data: contact, error: contactError } = await supabase
-        .from('contacts')
-        .select('phone, account_id')
-        .eq('id', order.contactId)
-        .maybeSingle();
+    const paidAmount = payment.paidAmount ?? Number(order.total);
+    if (Math.abs(paidAmount - Number(order.total)) > 0.01) {
+      // Não marca como pago; 200 para o Mercado Pago não reenviar sem fim.
+      console.error(
+        `[mp-webhook] Valor divergente no pedido ${order.id}: pago=${paidAmount} esperado=${order.total}`
+      );
+      return new Response('OK', { status: 200 });
+    }
 
-      if (contactError) {
-        console.error('[mp-webhook] Erro ao buscar contato:', contactError);
-      }
+    // Só quem efetivamente muda o status confirma ao cliente — duas
+    // notificações simultâneas não geram duas mensagens.
+    const { data: transitioned, error: updateError } = await db
+      .from('orders')
+      .update({ status: ORDER_STATUS_PAID })
+      .eq('id', order.id)
+      .or(`status.is.null,status.neq.${ORDER_STATUS_PAID}`)
+      .select('id');
 
-      if (contact?.phone && contact?.account_id) {
-        await sendPaymentConfirmationWhatsApp(
-          supabase,
-          contact.account_id,
-          contact.phone,
-          order.id,
-          paymentAmount ?? order.total
-        );
-        console.log(`[mp-webhook] Confirmação WhatsApp enviada para pedido ${order.id}`);
-      } else {
-        console.warn(`[mp-webhook] Contato/phone/account_id ausente para pedido ${order.id}`);
-      }
+    if (updateError) {
+      console.error('[mp-webhook] Erro ao atualizar status do pedido:', updateError);
+      return NextResponse.json({ error: 'Database update error' }, { status: 500 });
+    }
+    if (!transitioned?.length) {
+      return new Response('OK', { status: 200 });
+    }
+    console.log(`[mp-webhook] Pedido ${order.id} pago (${externalReference})`);
 
-      // Preenche/atualiza os campos personalizados do contato após o pagamento
-      // aprovado. Best-effort: nunca interrompe o fluxo principal.
-      if (order.account_id && order.contactId) {
-        let itensPedido: string | undefined;
-        try {
-          const rawItems = order.items;
-          const parsedItems =
-            typeof rawItems === 'string' ? JSON.parse(rawItems) : rawItems;
-          if (Array.isArray(parsedItems) && parsedItems.length > 0) {
-            itensPedido = parsedItems
-              .map((it: { quantity?: number; qty?: number; title?: string; name?: string }) => {
-                const qty = it.quantity ?? it.qty ?? 1;
-                const title = it.title ?? it.name ?? 'Item';
-                return `${qty}x ${title}`;
-              })
-              .join(', ');
-          }
-        } catch {
-          itensPedido = undefined;
+    if (order.account_id && order.contact_id) {
+      await notifyCustomer({
+        id: order.id,
+        account_id: order.account_id,
+        contact_id: order.contact_id,
+        delivery_address: order.delivery_address,
+        amount: paidAmount,
+      });
+
+      // Preenche/atualiza os campos personalizados do contato após o
+      // pagamento aprovado. Best-effort: nunca interrompe o fluxo principal.
+      let itensPedido: string | undefined;
+      try {
+        const rawItems = order.items;
+        const parsedItems = typeof rawItems === 'string' ? JSON.parse(rawItems) : rawItems;
+        if (Array.isArray(parsedItems) && parsedItems.length > 0) {
+          itensPedido = parsedItems
+            .map((it: { quantity?: number; qty?: number; title?: string; name?: string }) => {
+              const qty = it.quantity ?? it.qty ?? 1;
+              const title = it.title ?? it.name ?? 'Item';
+              return `${qty}x ${title}`;
+            })
+            .join(', ');
         }
-
-        await saveOrderCustomFields(supabaseAdmin(), order.account_id, order.contactId, {
-          formaPagamento: 'Pago ✅ Mercado Pago',
-          endereco: order.delivery_address ?? undefined,
-          nomeCliente: order.payer_name ?? undefined,
-          itens: itensPedido,
-        });
+      } catch {
+        itensPedido = undefined;
       }
+
+      await saveOrderCustomFields(db, order.account_id, order.contact_id, {
+        formaPagamento: 'Pago ✅ Mercado Pago',
+        endereco: order.delivery_address ?? undefined,
+        nomeCliente: order.payer_name ?? undefined,
+        itens: itensPedido,
+      });
 
       // Pedido pago = atendimento concluído: fecha a conversa do cliente.
       // A IA respeita conversas fechadas (ver src/lib/ai/auto-reply.ts) e para
       // de responder; a conversa reabre automaticamente se o cliente mandar
       // uma nova mensagem (ver src/app/api/whatsapp/webhook/route.ts).
-      if (order.account_id && order.contactId) {
-        const { error: closeError } = await supabase
-          .from('conversations')
-          .update({ status: 'closed', updated_at: new Date().toISOString() })
-          .eq('account_id', order.account_id)
-          .eq('contact_id', order.contactId);
-
-        if (closeError) {
-          console.error('[mp-webhook] Erro ao fechar conversa após pagamento:', closeError);
-        } else {
-          console.log(`[mp-webhook] Conversa do contato ${order.contactId} fechada após pagamento do pedido ${order.id}`);
-        }
+      const { error: closeError } = await db
+        .from('conversations')
+        .update({ status: 'closed', updated_at: new Date().toISOString() })
+        .eq('account_id', order.account_id)
+        .eq('contact_id', order.contact_id);
+      if (closeError) {
+        console.error('[mp-webhook] Erro ao fechar conversa após pagamento:', closeError);
       }
-    } else {
-      const newStatus = (paymentStatus ?? 'unknown').toUpperCase();
-      await supabase
-        .from('orders')
-        .update({ status: newStatus })
-        .eq('id', order.id);
-
-      console.log(`[mp-webhook] Pedido ${order.id} atualizado para status: ${newStatus}`);
     }
 
     return new Response('OK', { status: 200 });

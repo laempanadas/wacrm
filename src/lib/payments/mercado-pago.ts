@@ -50,6 +50,7 @@ export interface PaymentStatusResult {
   rawStatus: string | null;
   paymentId: string | null;
   paidAmount?: number;
+  externalReference?: string | null;
 }
 
 export const MP_NOT_CONFIGURED_MESSAGE =
@@ -211,6 +212,7 @@ export async function getPaymentById(
       rawStatus: result.status ?? null,
       paymentId: String(result.id),
       paidAmount: result.transaction_amount,
+      externalReference: result.external_reference ?? null,
     };
   } catch (error) {
     console.error('[MercadoPago Error] Falha ao consultar payment ID:', paymentId, error);
