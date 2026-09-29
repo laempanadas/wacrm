@@ -1,35 +1,29 @@
 // src/app/api/whatsapp/sync-catalog/route.ts
 import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { requireRole, toErrorResponse } from '@/lib/auth/account';
 import { decrypt } from '@/lib/whatsapp/encryption';
 
 export const dynamic = 'force-dynamic';
 
-// Lazy Supabase admin client - created on demand
-function getSupabaseAdmin() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  );
-}
-
 export async function GET() {
   try {
-    const supabaseAdmin = getSupabaseAdmin();
-    
-    const { data: configs, error } = await supabaseAdmin
-      .from('whatsapp_config')
-      .select('*')
-      .limit(1);
+    // Changes the account's commerce settings on Meta, so only admins
+    // may call it — and only against their own account's config.
+    const ctx = await requireRole('admin');
 
-    if (error || !configs || configs.length === 0) {
+    const { data: config, error } = await ctx.supabase
+      .from('whatsapp_config')
+      .select('access_token, phone_number_id')
+      .eq('account_id', ctx.accountId)
+      .maybeSingle();
+
+    if (error || !config) {
       return NextResponse.json(
         { error: 'Configuração do WhatsApp não encontrada no banco.' },
         { status: 404 }
       );
     }
 
-    const config = configs[0];
     const accessToken = decrypt(config.access_token);
     const phoneNumberId = config.phone_number_id;
 
@@ -67,7 +61,7 @@ export async function GET() {
       metaPostResult: result,
       currentSettingsOnMeta: currentSettings,
     });
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+  } catch (err) {
+    return toErrorResponse(err);
   }
 }
