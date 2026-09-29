@@ -213,10 +213,18 @@ export function DealForm({
   async function handleStatusChange(status: DealStatus) {
     if (!deal) return;
     setStatusAction(status);
-    const { error } = await supabase
-      .from("deals")
-      .update({ status })
-      .eq("id", deal.id);
+    let error: unknown = null;
+    if (status === "won") {
+      // Server route: also moves order cards to "Pago" and tags the
+      // contact "Confirmado" (pickup orders are paid at the store).
+      const res = await fetch(`/api/deals/${deal.id}/mark-paid`, { method: "POST" });
+      if (!res.ok) error = new Error(`mark-paid failed: ${res.status}`);
+    } else {
+      ({ error } = await supabase
+        .from("deals")
+        .update({ status })
+        .eq("id", deal.id));
+    }
     setStatusAction(null);
     if (error) {
       toast.error("Failed to update deal status");
