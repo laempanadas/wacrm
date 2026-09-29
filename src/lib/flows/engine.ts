@@ -861,7 +861,9 @@ async function advanceFromNodeKey(
               paymentMethod: validPayment,
               total: orderTotal,
               deliveryAddress: orderAddress,
-              paidOnline: isDelivery,
+              // "Aguardando Pagamento" until paid: the Mercado Pago webhook
+              // switches delivery orders to "Confirmado" on approval.
+              paidOnline: false,
               conversationId: run.conversation_id ?? undefined,
               external_reference: externalReference,
               skipOrderRecord: true,

@@ -4,6 +4,7 @@ import { sendPaymentConfirmationWhatsApp } from '@/lib/whatsapp/send-message';
 import { engineSendText } from '@/lib/flows/meta-send';
 import { getPaymentById } from '@/lib/payments/mercado-pago';
 import { markDealPaid } from '@/lib/orders/mark-deal-paid';
+import { markContactPaymentConfirmed } from '@/lib/orders/create-order';
 import {
   ORDER_STATUS_PAID,
   extractPaymentId,
@@ -197,6 +198,29 @@ async function moveDealToPaidStage(
   }
 }
 
+/** Tag "Confirmado" on the contact. Best-effort. */
+async function tagContactConfirmed(
+  db: SupabaseClient,
+  accountId: string,
+  contactId: string
+): Promise<void> {
+  try {
+    // tags.user_id is required; the contact's owner is the natural author.
+    const { data: contact } = await db
+      .from('contacts')
+      .select('user_id')
+      .eq('id', contactId)
+      .maybeSingle();
+    await markContactPaymentConfirmed(
+      db,
+      { accountId, userId: (contact?.user_id as string | undefined) ?? '' },
+      contactId
+    );
+  } catch (err) {
+    console.error('[mp-webhook] Erro ao aplicar tag Confirmado:', err);
+  }
+}
+
 export async function POST(req: NextRequest) {
   try {
     const rawBody = await req.text();
@@ -311,6 +335,8 @@ export async function POST(req: NextRequest) {
     }
 
     if (order.account_id && order.contact_id) {
+      await tagContactConfirmed(db, order.account_id, order.contact_id);
+
       await notifyCustomer({
         id: order.id,
         account_id: order.account_id,

@@ -305,6 +305,35 @@ export async function createOrderDeal(
 }
 
 /**
+ * Payment approved: tag the contact "Confirmado" and drop "Aguardando
+ * Pagamento" so the two never show together.
+ */
+export async function markContactPaymentConfirmed(
+  supabase: SupabaseClient,
+  ctx: { accountId: string; userId: string },
+  contactId: string
+): Promise<void> {
+  await applyContactTag(supabase, ctx, contactId, TAG_CONFIRMADO);
+
+  const { data: waiting } = await supabase
+    .from('tags')
+    .select('id')
+    .eq('account_id', ctx.accountId)
+    .eq('name', TAG_AGUARDANDO)
+    .maybeSingle();
+  if (!waiting?.id) return;
+
+  const { error } = await supabase
+    .from('contact_tags')
+    .delete()
+    .eq('contact_id', contactId)
+    .eq('tag_id', waiting.id);
+  if (error) {
+    console.warn('Failed to remove waiting-payment tag', error);
+  }
+}
+
+/**
  * Ensures tag existence and associates to contact idempotently.
  */
 async function applyContactTag(
