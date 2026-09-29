@@ -39,6 +39,11 @@ export interface CreateOrderInput {
   paidOnline?: boolean;
   conversationId?: string;
   external_reference?: string | null;
+  /**
+   * Only create the deal + tag. For callers that write their own `orders`
+   * row (the catalog order flow), so the order isn't recorded twice.
+   */
+  skipOrderRecord?: boolean;
 }
 
 export interface CreateOrderResult {
@@ -155,7 +160,7 @@ export async function createOrderDeal(
   }
 
   // 3) If externalReference provided — try to find existing order to be idempotent
-  if (externalReference) {
+  if (externalReference && !input.skipOrderRecord) {
     try {
       const { data: foundOrders, error: findErr } = await supabase
         .from('orders')
@@ -221,6 +226,12 @@ export async function createOrderDeal(
 
   const dealId = dealInsert?.id;
   if (!dealId) throw new Error('Failed to create deal (no id returned)');
+
+  if (input.skipOrderRecord) {
+    const tagName = selectStatusTagName(Boolean(input.paidOnline));
+    await applyContactTag(supabase, ctx, input.contactId, tagName);
+    return { dealId, pipelineId: pipeline.id, stageId: stage.id, tagName };
+  }
 
   // 5) Prepare order payload
   const orderPayload: any = {

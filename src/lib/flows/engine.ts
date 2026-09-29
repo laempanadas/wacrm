@@ -247,6 +247,31 @@ async function isDuplicateInbound(
   return (count ?? 0) > 0;
 }
 
+// Meta retries webhooks, so the same cart can arrive twice. The run it
+// started records the order's wamid on its "started" event.
+async function isOrderAlreadyStarted(
+  db: AdminClient,
+  accountId: string,
+  contactId: string,
+  metaMessageId: string,
+): Promise<boolean> {
+  const { data: runs } = await db
+    .from("flow_runs")
+    .select("id")
+    .eq("account_id", accountId)
+    .eq("contact_id", contactId);
+  if (!runs?.length) return false;
+  const runIds = runs.map((r) => (r as { id: string }).id);
+
+  const { count } = await db
+    .from("flow_run_events")
+    .select("id", { count: "exact", head: true })
+    .in("flow_run_id", runIds)
+    .eq("event_type", "started")
+    .filter("payload->>meta_message_id", "eq", metaMessageId);
+  return (count ?? 0) > 0;
+}
+
 async function findEntryFlow(
   db: AdminClient,
   accountId: string,
@@ -708,8 +733,15 @@ async function advanceFromNodeKey(
           } = run.vars as Record<string, unknown>;
 
           const customerName = String(nome || name || "Cliente");
+          // Button replies aren't stored in vars, so the delivery/pickup
+          // choice only shows up as the address the delivery branch
+          // collects. Treat a captured address as delivery.
           const validDelivery: OrderDeliveryKind =
-            tipo_entrega === "delivery" || delivery_type === "delivery" ? "delivery" : "retirada";
+            tipo_entrega === "delivery" ||
+            delivery_type === "delivery" ||
+            String(endereco || address || "").trim().length > 0
+              ? "delivery"
+              : "retirada";
 
           const validPayment: OrderPaymentMethod =
             forma_pagamento === "cartao" || payment_method === "cartao"
@@ -721,12 +753,25 @@ async function advanceFromNodeKey(
           const orderTotal = Number(total || 0);
           const orderAddress = validDelivery === "delivery" ? String(endereco || address || "") : undefined;
 
+          // One reference ties the Mercado Pago preference to the orders
+          // row, which is how the MP webhook and the reminder cron find
+          // the order once the customer pays.
+          const externalReference = `PED-${Date.now()}-${run.id.substring(0, 5)}`;
+          const { data: contactRow } = await db
+            .from("contacts")
+            .select("phone")
+            .eq("id", run.contact_id!)
+            .maybeSingle();
+          const payerPhone = (contactRow?.phone as string | undefined) ?? undefined;
+
           // ⚠️ [CORREÇÃO]: Gera o Link do Mercado Pago automaticamente se houver total
           let mpUrl = "";
+          let mpItems: { title: string; quantity: number; unitPrice: number }[] = [];
+          let preferenceId = "";
           if (orderTotal > 0) {
             try {
               const rawItems = Array.isArray(itens) ? itens : [];
-              const mpItems =
+              mpItems =
                 rawItems.length > 0
                   ? rawItems.map((it: Record<string, unknown>) => ({
                       title: String(it.retailer_id || it.title || "Empanada"),
@@ -737,14 +782,16 @@ async function advanceFromNodeKey(
 
               const mpRes = await createPaymentLink({
                 items: mpItems,
-                externalReference: `PED-${Date.now()}-${run.id.substring(0, 5)}`,
+                externalReference,
                 payerName: customerName,
+                payerPhone,
                 deliveryKind: validDelivery,
                 deliveryAddress: orderAddress,
               });
 
               if (mpRes.paymentUrl) {
                 mpUrl = mpRes.paymentUrl;
+                preferenceId = mpRes.preferenceId;
               }
             } catch (mpErr) {
               console.error("[flows] Erro ao criar link do Mercado Pago:", mpErr);
@@ -759,6 +806,39 @@ async function advanceFromNodeKey(
           await db.from("flow_runs").update({ vars: newVars }).eq("id", run.id);
           run.vars = newVars;
 
+          // Same columns the site and AI-agent paths write in the WhatsApp
+          // webhook — the shape the MP webhook and reminder cron read.
+          let orderId: string | null = null;
+          if (mpUrl) {
+            const { data: orderRow, error: orderErr } = await db
+              .from("orders")
+              .insert({
+                account_id: run.account_id,
+                contact_id: run.contact_id,
+                external_reference: externalReference,
+                preference_id: preferenceId,
+                payment_url: mpUrl,
+                total: orderTotal,
+                items: mpItems,
+                delivery_address: orderAddress ?? "",
+                payer_phone: payerPhone ?? null,
+                payer_name: customerName,
+                status: "pending",
+              })
+              .select("id")
+              .maybeSingle();
+            if (orderErr) {
+              console.error("[flows] Erro ao gravar pedido na tabela orders:", orderErr);
+              await logEvent(db, run.id, "error", node.node_key, {
+                reason: "order_insert_failed",
+                detail: orderErr.message,
+                external_reference: externalReference,
+              });
+            } else {
+              orderId = (orderRow?.id as string | undefined) ?? null;
+            }
+          }
+
           // Criação do card no Pipeline CRM
           const result = await createOrderDeal(
             supabaseAdmin(),
@@ -772,14 +852,28 @@ async function advanceFromNodeKey(
               deliveryAddress: orderAddress,
               paidOnline: true,
               conversationId: run.conversation_id ?? undefined,
+              external_reference: externalReference,
+              skipOrderRecord: true,
             }
           );
+
+          if (orderId) {
+            const { error: dealLinkErr } = await db
+              .from("orders")
+              .update({ deal_id: result.dealId })
+              .eq("id", orderId);
+            if (dealLinkErr) {
+              console.error("[flows] Erro ao vincular deal ao pedido:", dealLinkErr);
+            }
+          }
 
           await logEvent(db, run.id, "node_entered", node.node_key, {
             action_type: "create_order_deal",
             deal_id: result.dealId,
             tag: result.tagName,
             payment_url: mpUrl,
+            external_reference: externalReference,
+            order_id: orderId,
           });
         } catch (err) {
           console.error("[flows] create_order_deal error:", err);
@@ -888,7 +982,35 @@ export async function dispatchInboundToFlows(
       input.contactId,
     );
 
-    if (activeRun) {
+    if (
+      input.message.kind === "catalog_order" &&
+      (await isOrderAlreadyStarted(
+        db,
+        input.accountId,
+        input.contactId,
+        input.message.meta_message_id,
+      ))
+    ) {
+      return {
+        consumed: true,
+        flow_run_id: activeRun?.id,
+        outcome: "duplicate_inbound_ignored",
+      };
+    }
+
+    // A catalog order is a fresh purchase intent, never a reply to the
+    // node the contact is parked on. Without this, a contact who
+    // abandoned an earlier run (e.g. never answered "Qual é o seu
+    // nome?") has every new cart swallowed as a failed reply to that
+    // stale node, so the order flow never starts and no payment link
+    // is generated. End the stale run and let the order flow match.
+    if (activeRun && input.message.kind === "catalog_order") {
+      await logEvent(db, activeRun.id, "error", activeRun.current_node_key, {
+        reason: "superseded_by_catalog_order",
+        meta_message_id: input.message.meta_message_id,
+      });
+      await endRun(db, activeRun.id, "failed", "superseded_by_catalog_order");
+    } else if (activeRun) {
       const dupe = await isDuplicateInbound(
         db,
         input.accountId,

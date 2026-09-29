@@ -70,7 +70,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
           },
           {
             reply_id: 'retirada',
-            title: '🛍️ Retirada no Local',
+            title: '🛍️ Retirar na loja',
             next_node_key: 'confirm_retirada',
           },
         ],

@@ -14,7 +14,7 @@ describe("PEDIDO_EMPANADAS_FLOW template", () => {
 
   it("renders the seeded cart variables so the customer sees their order", () => {
     const cartNode = PEDIDO_EMPANADAS_FLOW.nodes.find(
-      (n) => n.node_key === "mostrar_carrinho",
+      (n) => n.node_key === "resumo_pedido",
     );
     expect(cartNode).toBeDefined();
     expect(JSON.stringify(cartNode!.config)).toContain("{{vars.itens_texto}}");
