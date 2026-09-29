@@ -717,6 +717,7 @@ async function advanceFromNodeKey(
     if (node.node_type === "custom_action") {
       const cfg = node.config as unknown as CustomActionNodeConfig;
       
+      let paymentLinkMissing = false;
       if (cfg.action === "create_order_deal") {
         try {
           const {
@@ -798,13 +799,13 @@ async function advanceFromNodeKey(
             }
           }
 
-          // ⚠️ [CORREÇÃO]: Salva o link retornado em vars.link_mercado_pago
-          const newVars = {
-            ...run.vars,
-            link_mercado_pago: mpUrl || "https://www.laempanadas.com.br",
-          };
-          await db.from("flow_runs").update({ vars: newVars }).eq("id", run.id);
-          run.vars = newVars;
+          if (mpUrl) {
+            const newVars = { ...run.vars, link_mercado_pago: mpUrl };
+            await db.from("flow_runs").update({ vars: newVars }).eq("id", run.id);
+            run.vars = newVars;
+          } else {
+            paymentLinkMissing = true;
+          }
 
           // Same columns the site and AI-agent paths write in the WhatsApp
           // webhook — the shape the MP webhook and reminder cron read.
@@ -881,7 +882,38 @@ async function advanceFromNodeKey(
             reason: "create_order_deal_failed",
             detail: err instanceof Error ? err.message : String(err),
           });
+          if (!run.vars.link_mercado_pago) paymentLinkMissing = true;
         }
+      }
+
+      // Without a real checkout link the next node would send the
+      // customer a payment message with nothing to pay. Tell them a
+      // person will follow up and hand the conversation to the team.
+      if (paymentLinkMissing) {
+        await logEvent(db, run.id, "error", node.node_key, {
+          reason: "payment_link_unavailable",
+        });
+        try {
+          await engineSendText({
+            accountId: run.account_id,
+            userId: run.user_id,
+            conversationId: run.conversation_id!,
+            contactId: run.contact_id!,
+            text: "Recebemos seu pedido, mas tivemos um problema ao gerar o link de pagamento. 😕\n\nUm atendente vai te enviar o link em instantes. Não é preciso refazer o pedido!",
+          });
+        } catch (sendErr) {
+          await logEvent(db, run.id, "error", node.node_key, {
+            reason: "payment_link_notice_send_failed",
+            detail: sendErr instanceof Error ? sendErr.message : String(sendErr),
+          });
+        }
+        await executeHandoff(db, run, {
+          ...node,
+          config: {
+            note: "⚠️ Link do Mercado Pago não foi gerado — envie o pagamento manualmente. Cliente: {{vars.nome}} | Total: {{vars.total_formatado}} | Endereço: {{vars.endereco}}",
+          },
+        });
+        return { outcome: "handed_off" };
       }
       
       currentKey = cfg.next_node_key;
