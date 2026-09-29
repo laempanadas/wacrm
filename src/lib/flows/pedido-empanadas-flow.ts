@@ -1,13 +1,16 @@
 /**
  * src/lib/flows/pedido-empanadas-flow.ts
  *
- * Flow de Pedidos Otimizado — La Empanadas
+ * Flow de Pedidos — La Empanadas (Catálogo Meta)
  *
- * Jornada do Pedido:
- *   1. Recebe o carrinho do catálogo da Meta com itens e total.
- *   2. Coleta o nome e endereço de entrega (ou confirma retirada).
- *   3. Gera link seguro do Mercado Pago (automático — não pergunta forma de pagamento).
- *   4. Registra no CRM e aguarda confirmação de pagamento.
+ * Jornada enxuta, sem perguntas repetidas:
+ *   1. Recebe o carrinho e, na MESMA mensagem, mostra itens + total e
+ *      pergunta Delivery ou Retirada. O nome vem do perfil do WhatsApp.
+ *   2a. Delivery: pede o endereço → gera o link do Mercado Pago
+ *       (pagamento somente online) → envia o link.
+ *   2b. Retirada: registra o pedido e confirma, com pagamento na loja
+ *       (sem link, sem lembrete de pagamento).
+ *   3. Notifica a equipe (handoff) com o resumo do pedido.
  */
 
 import type { FlowTemplate } from './templates';
@@ -17,13 +20,14 @@ import type {
   HandoffNodeConfig,
   SendButtonsNodeConfig,
   SendMessageNodeConfig,
+  SetVarNodeConfig,
 } from './types';
 
 export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
   slug: 'pedido_empanadas',
   name: 'Pedido de Empanadas — Catálogo Meta',
   description:
-    'Dispara quando o cliente envia a sacola do catálogo. Confirma endereço, gera link do Mercado Pago e registra o pedido.',
+    'Dispara quando o cliente envia a sacola do catálogo. Delivery: pede o endereço e envia o link do Mercado Pago. Retirada: confirma com pagamento na loja.',
   icon: 'MessageSquare',
   trigger_type: 'catalog_order',
   trigger_config: {},
@@ -32,116 +36,99 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
     {
       node_key: 'start',
       node_type: 'start' as const,
-      config: { next_node_key: 'resumo_pedido' },
+      config: { next_node_key: 'pedido_recebido' },
     },
 
-    // 1. Resumo claro dos itens recebidos
+    // 1. Resumo + escolha de entrega numa única mensagem
     {
-      node_key: 'resumo_pedido',
-      node_type: 'send_message' as const,
-      config: {
-        text: '🫔 *Pedido recebido com sucesso!*\n\n{{vars.itens_texto}}\n\n💵 *Total:* {{vars.total_formatado}}\n\nPara concluirmos a entrega, vamos confirmar dois dados rápidos! 👇',
-        next_node_key: 'ask_nome',
-      } as SendMessageNodeConfig,
-    },
-
-    // 2. Coleta do Nome
-    {
-      node_key: 'ask_nome',
-      node_type: 'collect_input' as const,
-      config: {
-        prompt_text: 'Qual é o seu *nome completo*?',
-        var_key: 'nome',
-        next_node_key: 'ask_tipo_entrega',
-      } as CollectInputNodeConfig,
-    },
-
-    // 3. Escolha: Delivery ou Retirada (mantemos essa escolha)
-    {
-      node_key: 'ask_tipo_entrega',
+      node_key: 'pedido_recebido',
       node_type: 'send_buttons' as const,
       config: {
-        text: 'Prazer, *{{vars.nome}}*! 😊\nComo deseja receber suas empanadas?',
+        text: '🫔 *Pedido recebido!*\n\n{{vars.itens_lista}}\n\n💵 *Total: {{vars.total_formatado}}*\n\nComo prefere receber?',
         buttons: [
-          {
-            reply_id: 'delivery',
-            title: '🛵 Delivery',
-            next_node_key: 'ask_endereco',
-          },
-          {
-            reply_id: 'retirada',
-            title: '🛍️ Retirar na loja',
-            next_node_key: 'confirm_retirada',
-          },
+          { reply_id: 'delivery', title: '🛵 Delivery', next_node_key: 'set_delivery' },
+          { reply_id: 'retirada', title: '🛍️ Retirar na loja', next_node_key: 'set_retirada' },
         ],
       } as SendButtonsNodeConfig,
     },
 
-    // 4a. Se Delivery: Pede endereço completo -> direto para criar pagamento
+    // 2a. Delivery — pagamento somente online
+    {
+      node_key: 'set_delivery',
+      node_type: 'set_var' as const,
+      config: {
+        var_key: 'tipo_entrega',
+        value: 'delivery',
+        next_node_key: 'ask_endereco',
+      } as SetVarNodeConfig,
+    },
     {
       node_key: 'ask_endereco',
       node_type: 'collect_input' as const,
       config: {
-        prompt_text:
-          '📍 Por favor, digite o *endereço completo de entrega*:\n(Rua, número, complemento e bairro)',
+        prompt_text: '📍 Qual o *endereço de entrega*?\n(Rua, número, complemento e bairro)',
         var_key: 'endereco',
-        // Direto para criação do pedido e geração do link de pagamento
-        next_node_key: 'gerar_pagamento_delivery',
+        next_node_key: 'gerar_pagamento',
       } as CollectInputNodeConfig,
     },
+    {
+      // Cria o card no pipeline, o pedido em `orders` e o link do
+      // Mercado Pago (vars.link_mercado_pago). Sem link, o engine avisa
+      // o cliente e transfere para um atendente.
+      node_key: 'gerar_pagamento',
+      node_type: 'custom_action' as const,
+      config: {
+        action: 'create_order_deal',
+        next_node_key: 'link_pagamento',
+      } as CustomActionNodeConfig,
+    },
+    {
+      node_key: 'link_pagamento',
+      node_type: 'send_message' as const,
+      config: {
+        text: '✅ Anotado! Entrega em: _{{vars.endereco}}_\n\nPague pelo link seguro (*Pix ou Cartão*). Assim que aprovar, seu pedido vai direto para a cozinha 🔥\n\n👉 {{vars.link_mercado_pago}}',
+        next_node_key: 'handoff_delivery',
+      } as SendMessageNodeConfig,
+    },
+    {
+      node_key: 'handoff_delivery',
+      node_type: 'handoff' as const,
+      config: {
+        note: '🛵 Pedido DELIVERY (aguardando pagamento online) — Cliente: {{vars.nome}} | Total: {{vars.total_formatado}} | Endereço: {{vars.endereco}}',
+      } as HandoffNodeConfig,
+    },
 
-    // 4b. Se Retirada: Informa endereço da loja -> direto para criar pagamento (retirada)
+    // 2b. Retirada — pagamento na loja, sem link
+    {
+      node_key: 'set_retirada',
+      node_type: 'set_var' as const,
+      config: {
+        var_key: 'tipo_entrega',
+        value: 'retirada',
+        next_node_key: 'registrar_retirada',
+      } as SetVarNodeConfig,
+    },
+    {
+      node_key: 'registrar_retirada',
+      node_type: 'custom_action' as const,
+      config: {
+        action: 'create_order_deal',
+        next_node_key: 'confirm_retirada',
+      } as CustomActionNodeConfig,
+    },
     {
       node_key: 'confirm_retirada',
       node_type: 'send_message' as const,
       config: {
-        text: 'Perfeito! Nosso endereço para retirada:\n📍 *Av. Industrial, 750*\nTempo estimado de preparo: 20-30 minutos.',
-        // Em retirada também geramos o link (cliente pode pagar online)
-        next_node_key: 'gerar_pagamento_retirada',
+        text: '✅ *Pedido confirmado!*\n\n📍 Retire na *Av. Industrial, 750*\n⏱️ Fica pronto em 20-30 minutos\n💵 Pagamento na retirada: *{{vars.total_formatado}}*',
+        next_node_key: 'handoff_retirada',
       } as SendMessageNodeConfig,
     },
-
-    // 5. Ação Backend: Cria card no Pipeline e gera Checkout Mercado Pago (único ponto)
     {
-      node_key: 'gerar_pagamento_delivery',
-      node_type: 'custom_action' as const,
-      config: {
-        // Nome da ação que o seu engine deve executar. O handler deve:
-        //  - criar deal/order (idempotente),
-        //  - criar preferência MP (reusar se <30min),
-        //  - persistir preference_id/payment_url em orders,
-        //  - retornar varsToSet com link_mercado_pago e preference_id.
-        action: 'create_order_deal',
-        next_node_key: 'mensagem_link_pagamento',
-      } as CustomActionNodeConfig,
-    },
-    {
-      node_key: 'gerar_pagamento_retirada',
-      node_type: 'custom_action' as const,
-      config: {
-        action: 'create_order_deal',
-        next_node_key: 'mensagem_link_pagamento',
-      } as CustomActionNodeConfig,
-    },
-
-    // 6. Mensagem com o Link do Mercado Pago — idealmente um botão (se o canal suportar)
-    {
-      node_key: 'mensagem_link_pagamento',
-      node_type: 'send_message' as const,
-      config: {
-        // O motor do flow deve garantir que vars.link_mercado_pago foi populado pela action
-        text:
-          '✅ *Tudo pronto para o preparo!*\n\nTotal do pedido: *{{vars.total_formatado}}*\n\nPara iniciarmos a produção na cozinha, realize o pagamento no link seguro abaixo (*Pix ou Cartão*):\n\n👉 {{vars.link_mercado_pago}}\n\nAssim que o pagamento for aprovado, seu pedido entra automaticamente em produção! 🥟🔥',
-        next_node_key: 'handoff_pedido',
-      } as SendMessageNodeConfig,
-    },
-
-    // 7. Notifica o atendente humano no CRM (handoff)
-    {
-      node_key: 'handoff_pedido',
+      node_key: 'handoff_retirada',
       node_type: 'handoff' as const,
       config: {
-        note: '🫔 Novo pedido via Catálogo Meta — Cliente: {{vars.nome}} | Total: {{vars.total_formatado}} | Endereço: {{vars.endereco}} | Pedido: {{vars.order_id}}',
+        note: '🛍️ Pedido RETIRADA (pagar na loja) — Cliente: {{vars.nome}} | Total: {{vars.total_formatado}}',
       } as HandoffNodeConfig,
     },
   ],

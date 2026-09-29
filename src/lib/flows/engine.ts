@@ -734,22 +734,25 @@ async function advanceFromNodeKey(
           } = run.vars as Record<string, unknown>;
 
           const customerName = String(nome || name || "Cliente");
-          // Button replies aren't stored in vars, so the delivery/pickup
-          // choice only shows up as the address the delivery branch
-          // collects. Treat a captured address as delivery.
+          // The order flow records the choice with a set_var node. Older
+          // flows don't, so a captured address also counts as delivery.
+          const kind = tipo_entrega || delivery_type;
           const validDelivery: OrderDeliveryKind =
-            tipo_entrega === "delivery" ||
-            delivery_type === "delivery" ||
-            String(endereco || address || "").trim().length > 0
+            kind === "retirada"
+              ? "retirada"
+              : kind === "delivery" || String(endereco || address || "").trim().length > 0
               ? "delivery"
               : "retirada";
+          const isDelivery = validDelivery === "delivery";
 
-          const validPayment: OrderPaymentMethod =
-            forma_pagamento === "cartao" || payment_method === "cartao"
-              ? "cartao"
-              : forma_pagamento === "dinheiro" || payment_method === "dinheiro"
-              ? "dinheiro"
-              : "pix";
+          // Delivery is paid online only; pickup is paid at the counter.
+          const validPayment: OrderPaymentMethod = !isDelivery
+            ? "na_retirada"
+            : forma_pagamento === "cartao" || payment_method === "cartao"
+            ? "cartao"
+            : forma_pagamento === "pix" || payment_method === "pix"
+            ? "pix"
+            : "mercado_pago";
 
           const orderTotal = Number(total || 0);
           const orderAddress = validDelivery === "delivery" ? String(endereco || address || "") : undefined;
@@ -769,13 +772,13 @@ async function advanceFromNodeKey(
           let mpUrl = "";
           let mpItems: { title: string; quantity: number; unitPrice: number }[] = [];
           let preferenceId = "";
-          if (orderTotal > 0) {
+          if (isDelivery && orderTotal > 0) {
             try {
               const rawItems = Array.isArray(itens) ? itens : [];
               mpItems =
                 rawItems.length > 0
                   ? rawItems.map((it: Record<string, unknown>) => ({
-                      title: String(it.retailer_id || it.title || "Empanada"),
+                      title: String(it.name || it.retailer_id || it.title || "Empanada"),
                       quantity: Number(it.quantity || 1),
                       unitPrice: Number(it.unit_price || it.unitPrice || orderTotal / (rawItems.length || 1)),
                     }))
@@ -803,7 +806,7 @@ async function advanceFromNodeKey(
             const newVars = { ...run.vars, link_mercado_pago: mpUrl };
             await db.from("flow_runs").update({ vars: newVars }).eq("id", run.id);
             run.vars = newVars;
-          } else {
+          } else if (isDelivery) {
             paymentLinkMissing = true;
           }
 
@@ -851,7 +854,7 @@ async function advanceFromNodeKey(
               paymentMethod: validPayment,
               total: orderTotal,
               deliveryAddress: orderAddress,
-              paidOnline: true,
+              paidOnline: isDelivery,
               conversationId: run.conversation_id ?? undefined,
               external_reference: externalReference,
               skipOrderRecord: true,
@@ -882,7 +885,9 @@ async function advanceFromNodeKey(
             reason: "create_order_deal_failed",
             detail: err instanceof Error ? err.message : String(err),
           });
-          if (!run.vars.link_mercado_pago) paymentLinkMissing = true;
+          if (run.vars.tipo_entrega !== "retirada" && !run.vars.link_mercado_pago) {
+            paymentLinkMissing = true;
+          }
         }
       }
 
@@ -1222,15 +1227,30 @@ async function startNewRun(
   input: DispatchInboundInput,
   nodes: Map<string, FlowNodeRow>,
 ): Promise<DispatchInboundResult> {
-  const seedVars: Record<string, unknown> =
-    input.message.kind === "catalog_order"
-      ? {
-          itens_texto: input.message.text,
-          total: input.message.total,
-          total_formatado: formatBRLNumber(input.message.total),
-          itens: input.message.items,
-        }
-      : {};
+  let seedVars: Record<string, unknown> = {};
+  if (input.message.kind === "catalog_order") {
+    // The WhatsApp profile name, so the flow doesn't have to ask for it.
+    const { data: contact } = await db
+      .from("contacts")
+      .select("name")
+      .eq("id", input.contactId)
+      .maybeSingle();
+    const contactName = String(contact?.name ?? "").trim();
+    seedVars = {
+      itens_texto: input.message.text,
+      // Items only — the message templates show the total themselves.
+      itens_lista: input.message.items
+        .map(
+          (it) =>
+            `• ${it.quantity}x ${it.name ?? it.retailer_id} — ${formatBRLNumber(it.quantity * it.unit_price)}`,
+        )
+        .join("\n"),
+      total: input.message.total,
+      total_formatado: formatBRLNumber(input.message.total),
+      itens: input.message.items,
+      ...(contactName ? { nome: contactName } : {}),
+    };
+  }
 
   const { data: inserted, error: insErr } = await db
     .from("flow_runs")

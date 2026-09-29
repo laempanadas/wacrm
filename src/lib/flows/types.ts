@@ -314,6 +314,8 @@ export type ParsedInbound =
       total: number;
       items: Array<{
         retailer_id: string;
+        /** Product name from the Meta catalog, when it could be looked up. */
+        name?: string;
         quantity: number;
         unit_price: number;
       }>;

@@ -1,7 +1,7 @@
 import { NextResponse, after } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
-import { getMediaUrl } from '@/lib/whatsapp/meta-api'
+import { getCatalogProductNames, getMediaUrl } from '@/lib/whatsapp/meta-api'
 import { normalizePhone } from '@/lib/whatsapp/phone-utils'
 import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe'
 import { verifyMetaWebhookSignature } from '@/lib/whatsapp/webhook-signature'
@@ -1074,7 +1074,9 @@ async function processMessage(
     }).catch((err) => console.error('[automations] dispatch failed:', err))
   }
 
-  const shouldAttemptAi = shouldAttemptAiReply({
+  // A cart the order flow already picked up (or a Meta retry of it) must
+  // not also get an AI reply — the customer would get two answers.
+  const shouldAttemptAi = !(order && flowConsumed) && shouldAttemptAiReply({
     flowConsumed,
     outcome: flowResult.outcome,
     interactiveReplyId,
@@ -1109,7 +1111,7 @@ async function parseMessageContent(
   interactiveReplyId: string | null
   order: {
     total: number
-    items: Array<{ retailer_id: string; quantity: number; unit_price: number }>
+    items: Array<{ retailer_id: string; name?: string; quantity: number; unit_price: number }>
   } | null
 }> {
   const verifyAndBuildUrl = async (mediaId: string): Promise<string | null> => {
@@ -1219,8 +1221,25 @@ async function parseMessageContent(
 
     case 'order': {
       const productItems = message.order?.product_items ?? []
+      let names: Record<string, string> = {}
+      if (message.order?.catalog_id) {
+        try {
+          names = await getCatalogProductNames({
+            catalogId: message.order.catalog_id,
+            retailerIds: productItems.map((it) => it.product_retailer_id),
+            accessToken,
+          })
+        } catch (err) {
+          // Falls back to the retailer_id; the order still goes through.
+          console.error(
+            '[webhook] catalog product name lookup failed:',
+            err instanceof Error ? err.message : err
+          )
+        }
+      }
       const items = productItems.map((it) => ({
         retailer_id: it.product_retailer_id,
+        name: names[it.product_retailer_id],
         quantity: it.quantity,
         unit_price: it.item_price,
       }))
@@ -1231,7 +1250,7 @@ async function parseMessageContent(
       const fmt = (v: number) => `R$ ${v.toFixed(2).replace('.', ',')}`
       const lines = items.map(
         (it) =>
-          `• ${it.quantity}x ${it.retailer_id} — ${fmt(it.quantity * it.unit_price)}`
+          `• ${it.quantity}x ${it.name ?? it.retailer_id} — ${fmt(it.quantity * it.unit_price)}`
       )
       const summary = [
         '🛒 Novo pedido pelo catálogo:',

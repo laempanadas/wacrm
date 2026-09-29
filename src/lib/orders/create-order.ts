@@ -27,7 +27,7 @@ export const TAG_CONFIRMADO = 'Confirmado';
 export const TAG_AGUARDANDO = 'Aguardando Pagamento';
 
 export type OrderDeliveryKind = 'delivery' | 'retirada';
-export type OrderPaymentMethod = 'pix' | 'cartao' | 'dinheiro' | 'mercado_pago';
+export type OrderPaymentMethod = 'pix' | 'cartao' | 'dinheiro' | 'mercado_pago' | 'na_retirada';
 
 export interface CreateOrderInput {
   contactId: string;
@@ -60,6 +60,7 @@ const PAYMENT_LABELS: Record<OrderPaymentMethod, string> = {
   cartao: 'Cartão (débito/crédito)',
   dinheiro: 'Dinheiro',
   mercado_pago: 'Mercado Pago (link online)',
+  na_retirada: 'Na retirada (pagar na loja)',
 };
 
 const DELIVERY_LABELS: Record<OrderDeliveryKind, string> = {

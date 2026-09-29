@@ -211,6 +211,43 @@ export async function getSubscribedApps(
   return data.data ?? []
 }
 
+export interface GetCatalogProductNamesArgs {
+  catalogId: string
+  retailerIds: string[]
+  accessToken: string
+}
+
+/**
+ * Order webhooks only carry `product_retailer_id`. Look up the display
+ * names so the customer (and the Mercado Pago checkout) see "Coca-Cola
+ * 2L" instead of "beb_coca_2l". Returns retailer_id → name.
+ */
+export async function getCatalogProductNames(
+  args: GetCatalogProductNamesArgs
+): Promise<Record<string, string>> {
+  const { catalogId, retailerIds, accessToken } = args
+  if (!retailerIds.length) return {}
+  const filter = JSON.stringify({ retailer_id: { is_any: retailerIds } })
+  const url =
+    `${META_API_BASE}/${catalogId}/products` +
+    `?fields=retailer_id,name&limit=${retailerIds.length}` +
+    `&filter=${encodeURIComponent(filter)}`
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  })
+  if (!response.ok) {
+    await throwMetaError(response, `Meta API error: ${response.status}`)
+  }
+  const data = (await response.json()) as {
+    data?: Array<{ retailer_id?: string; name?: string }>
+  }
+  const names: Record<string, string> = {}
+  for (const p of data.data ?? []) {
+    if (p.retailer_id && p.name) names[p.retailer_id] = p.name
+  }
+  return names
+}
+
 // ============================================================
 // Sending
 // ============================================================
