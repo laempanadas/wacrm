@@ -3,6 +3,7 @@ import { createClient as createAdminClient, SupabaseClient } from '@supabase/sup
 import { sendPaymentConfirmationWhatsApp } from '@/lib/whatsapp/send-message';
 import { engineSendText } from '@/lib/flows/meta-send';
 import { getPaymentById } from '@/lib/payments/mercado-pago';
+import { markDealPaid } from '@/lib/orders/mark-deal-paid';
 import {
   ORDER_STATUS_PAID,
   extractPaymentId,
@@ -164,6 +165,38 @@ async function notifyCustomer(order: {
   }
 }
 
+/**
+ * Moves the order's pipeline card to "Pago". Separate query for deal_id
+ * so an orders table without that column can't break the payment
+ * confirmation. Best-effort.
+ */
+async function moveDealToPaidStage(
+  db: SupabaseClient,
+  accountId: string,
+  orderId: string
+): Promise<void> {
+  try {
+    const { data, error } = await db
+      .from('orders')
+      .select('deal_id')
+      .eq('id', orderId)
+      .maybeSingle();
+    const dealId = (data as { deal_id?: string | null } | null)?.deal_id;
+    if (error || !dealId) {
+      console.warn(`[mp-webhook] Pedido ${orderId} sem deal vinculado — card não movido`, error?.message ?? '');
+      return;
+    }
+    const result = await markDealPaid(db, { accountId, dealId });
+    if (result.moved) {
+      console.log(`[mp-webhook] Card ${result.dealId} movido para "Pago"`);
+    } else {
+      console.warn(`[mp-webhook] Card do pedido ${orderId} não movido: ${result.reason}`);
+    }
+  } catch (err) {
+    console.error('[mp-webhook] Erro ao mover card para "Pago":', err);
+  }
+}
+
 export async function POST(req: NextRequest) {
   try {
     const rawBody = await req.text();
@@ -272,6 +305,10 @@ export async function POST(req: NextRequest) {
       return new Response('OK', { status: 200 });
     }
     console.log(`[mp-webhook] Pedido ${order.id} pago (${externalReference})`);
+
+    if (order.account_id) {
+      await moveDealToPaidStage(db, order.account_id, order.id);
+    }
 
     if (order.account_id && order.contact_id) {
       await notifyCustomer({

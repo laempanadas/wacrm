@@ -22,6 +22,7 @@ import { createClient } from '@supabase/supabase-js';
 
 export const ORDERS_PIPELINE_NAME = 'Pedidos Delivery';
 export const ORDERS_INITIAL_STAGE_NAME = 'Novo Pedido';
+export const ORDERS_PAID_STAGE_NAME = 'Pago';
 
 export const TAG_CONFIRMADO = 'Confirmado';
 export const TAG_AGUARDANDO = 'Aguardando Pagamento';
