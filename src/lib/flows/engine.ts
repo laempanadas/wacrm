@@ -9,6 +9,7 @@
 import { supabaseAdmin } from "./admin-client";
 import { createOrderDeal, type OrderDeliveryKind, type OrderPaymentMethod } from "@/lib/orders/create-order";
 import { createPaymentLink } from "@/lib/payments/mercado-pago";
+import { productNameFromCardapio } from "@/lib/cardapio/product-names";
 import {
   engineSendInteractiveButtons,
   engineSendInteractiveList,
@@ -778,7 +779,13 @@ async function advanceFromNodeKey(
               mpItems =
                 rawItems.length > 0
                   ? rawItems.map((it: Record<string, unknown>) => ({
-                      title: String(it.name || it.retailer_id || it.title || "Empanada"),
+                      title: String(
+                        it.name ||
+                          (it.retailer_id && productNameFromCardapio(String(it.retailer_id))) ||
+                          it.retailer_id ||
+                          it.title ||
+                          "Empanada",
+                      ),
                       quantity: Number(it.quantity || 1),
                       unitPrice: Number(it.unit_price || it.unitPrice || orderTotal / (rawItems.length || 1)),
                     }))

@@ -2,6 +2,7 @@ import { NextResponse, after } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
 import { getCatalogProductNames, getMediaUrl } from '@/lib/whatsapp/meta-api'
+import { productNameFromCardapio } from '@/lib/cardapio/product-names'
 import { normalizePhone } from '@/lib/whatsapp/phone-utils'
 import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe'
 import { verifyMetaWebhookSignature } from '@/lib/whatsapp/webhook-signature'
@@ -1221,14 +1222,25 @@ async function parseMessageContent(
 
     case 'order': {
       const productItems = message.order?.product_items ?? []
-      let names: Record<string, string> = {}
-      if (message.order?.catalog_id) {
+      // Local cardápio first; ask Meta only for ids it doesn't know.
+      const names: Record<string, string> = {}
+      for (const it of productItems) {
+        const local = productNameFromCardapio(it.product_retailer_id)
+        if (local) names[it.product_retailer_id] = local
+      }
+      const unknownIds = productItems
+        .map((it) => it.product_retailer_id)
+        .filter((id) => !names[id])
+      if (message.order?.catalog_id && unknownIds.length) {
         try {
-          names = await getCatalogProductNames({
-            catalogId: message.order.catalog_id,
-            retailerIds: productItems.map((it) => it.product_retailer_id),
-            accessToken,
-          })
+          Object.assign(
+            names,
+            await getCatalogProductNames({
+              catalogId: message.order.catalog_id,
+              retailerIds: unknownIds,
+              accessToken,
+            })
+          )
         } catch (err) {
           // Falls back to the retailer_id; the order still goes through.
           console.error(
