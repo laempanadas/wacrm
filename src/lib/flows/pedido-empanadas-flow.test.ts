@@ -45,10 +45,28 @@ describe("PEDIDO_EMPANADAS_FLOW template", () => {
   });
 
   it("delivery collects the address and sends the Mercado Pago link", () => {
-    const keys = path("set_delivery");
-    expect(keys).toContain("ask_endereco");
+    const keys = path("ask_endereco");
+    expect(keys).toContain("gerar_pagamento");
     expect(text(keys)).toContain("{{vars.link_mercado_pago}}");
     expect(JSON.stringify(node("set_delivery")!.config)).toContain('"value":"delivery"');
+  });
+
+  it("offers the last address to returning customers, otherwise asks for it", () => {
+    const cond = node("tem_endereco_salvo")!.config as Record<string, string>;
+    expect(cond.subject_key).toBe("ultimo_endereco");
+    expect(cond.operator).toBe("present");
+    expect(cond.false_next).toBe("ask_endereco");
+
+    const ask = node(cond.true_next)!.config as {
+      buttons: Array<{ reply_id: string; next_node_key: string }>;
+    };
+    const next = Object.fromEntries(ask.buttons.map((b) => [b.reply_id, b.next_node_key]));
+    expect(next.outro_endereco).toBe("ask_endereco");
+
+    const reuse = node(next.mesmo_endereco)!.config as Record<string, string>;
+    expect(reuse.var_key).toBe("endereco");
+    expect(reuse.value).toBe("{{vars.ultimo_endereco}}");
+    expect(reuse.next_node_key).toBe("gerar_pagamento");
   });
 
   it("pickup is paid at the store — no payment link", () => {

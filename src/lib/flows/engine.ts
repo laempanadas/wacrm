@@ -1236,6 +1236,20 @@ async function startNewRun(
       .eq("id", input.contactId)
       .maybeSingle();
     const contactName = String(contact?.name ?? "").trim();
+
+    // Last delivery address, so a returning customer can reuse it with
+    // one tap instead of typing it again.
+    const { data: lastOrder } = await db
+      .from("orders")
+      .select("delivery_address")
+      .eq("account_id", input.accountId)
+      .eq("contact_id", input.contactId)
+      .not("delivery_address", "is", null)
+      .neq("delivery_address", "")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const lastAddress = String(lastOrder?.delivery_address ?? "").trim();
     seedVars = {
       itens_texto: input.message.text,
       // Items only — the message templates show the total themselves.
@@ -1249,6 +1263,7 @@ async function startNewRun(
       total_formatado: formatBRLNumber(input.message.total),
       itens: input.message.items,
       ...(contactName ? { nome: contactName } : {}),
+      ...(lastAddress ? { ultimo_endereco: lastAddress } : {}),
     };
   }
 

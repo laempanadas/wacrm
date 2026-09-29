@@ -6,8 +6,9 @@
  * Jornada enxuta, sem perguntas repetidas:
  *   1. Recebe o carrinho e, na MESMA mensagem, mostra itens + total e
  *      pergunta Delivery ou Retirada. O nome vem do perfil do WhatsApp.
- *   2a. Delivery: pede o endereço → gera o link do Mercado Pago
- *       (pagamento somente online) → envia o link.
+ *   2a. Delivery: oferece o último endereço (botão "Mesmo endereço")
+ *       ou pede um novo → gera o link do Mercado Pago (pagamento
+ *       somente online) → envia o link.
  *   2b. Retirada: registra o pedido e confirma, com pagamento na loja
  *       (sem link, sem lembrete de pagamento).
  *   3. Notifica a equipe (handoff) com o resumo do pedido.
@@ -16,6 +17,7 @@
 import type { FlowTemplate } from './templates';
 import type {
   CollectInputNodeConfig,
+  ConditionNodeConfig,
   CustomActionNodeConfig,
   HandoffNodeConfig,
   SendButtonsNodeConfig,
@@ -59,7 +61,39 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
       config: {
         var_key: 'tipo_entrega',
         value: 'delivery',
-        next_node_key: 'ask_endereco',
+        next_node_key: 'tem_endereco_salvo',
+      } as SetVarNodeConfig,
+    },
+    {
+      // Cliente que já pediu antes: oferece o último endereço de entrega.
+      node_key: 'tem_endereco_salvo',
+      node_type: 'condition' as const,
+      config: {
+        subject: 'var',
+        subject_key: 'ultimo_endereco',
+        operator: 'present',
+        true_next: 'ask_mesmo_endereco',
+        false_next: 'ask_endereco',
+      } as ConditionNodeConfig,
+    },
+    {
+      node_key: 'ask_mesmo_endereco',
+      node_type: 'send_buttons' as const,
+      config: {
+        text: '📍 Entregar no mesmo endereço do último pedido?\n\n_{{vars.ultimo_endereco}}_',
+        buttons: [
+          { reply_id: 'mesmo_endereco', title: '✅ Mesmo endereço', next_node_key: 'usar_ultimo_endereco' },
+          { reply_id: 'outro_endereco', title: '✏️ Outro endereço', next_node_key: 'ask_endereco' },
+        ],
+      } as SendButtonsNodeConfig,
+    },
+    {
+      node_key: 'usar_ultimo_endereco',
+      node_type: 'set_var' as const,
+      config: {
+        var_key: 'endereco',
+        value: '{{vars.ultimo_endereco}}',
+        next_node_key: 'gerar_pagamento',
       } as SetVarNodeConfig,
     },
     {
