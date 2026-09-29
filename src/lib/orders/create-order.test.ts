@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 import {
   TAG_AGUARDANDO,
   TAG_CONFIRMADO,
   buildOrderNotes,
+  createOrderDeal,
   buildOrderTitle,
   deliveryKindLabel,
   paymentMethodLabel,
@@ -38,6 +40,7 @@ describe('paymentMethodLabel / deliveryKindLabel', () => {
     expect(paymentMethodLabel('mercado_pago')).toBe(
       'Mercado Pago (link online)'
     );
+    expect(paymentMethodLabel('na_retirada')).toBe('Na retirada (pagar na loja)');
   });
 
   it('traduz o tipo de recebimento', () => {
@@ -76,24 +79,117 @@ describe('buildOrderNotes', () => {
   });
 });
 
-// scripts/test-create-order.ts
-import { createOrderDeal } from '../src/lib/orders/create-order';
+// ------------------------------------------------------------
+// createOrderDeal — against an in-memory stand-in for Supabase
+// ------------------------------------------------------------
 
-(async () => {
-  try {
-    const res = await createOrderDeal(null, { accountId: 'acct_test', userId: 'user_test' }, {
-      contactId: 'contact_test_1',
-      customerName: 'Teste Terminal',
-      deliveryKind: 'delivery',
-      paymentMethod: 'mercado_pago',
-      total: 33.5,
-      deliveryAddress: 'Rua Teste 123',
-      paidOnline: false,
-      conversationId: 'conv-abc-1',
-      external_reference: 'flow-run-terminal-0001'
+type Row = Record<string, unknown>;
+
+function fakeDb(tables: Record<string, Row[]>) {
+  let seq = 0;
+  const from = (table: string) => {
+    const filters: Array<[string, unknown]> = [];
+    let op: 'select' | 'insert' | 'upsert' = 'select';
+    let payload: Row = {};
+    const rows = () => (tables[table] ??= []);
+    const run = (): Row[] => {
+      if (op === 'insert') {
+        const row = { id: `${table}-${++seq}`, ...payload };
+        rows().push(row);
+        return [row];
+      }
+      if (op === 'upsert') {
+        const key = table === 'orders' ? ['external_reference'] : ['contact_id', 'tag_id'];
+        const existing = rows().find((r) => key.every((k) => r[k] === payload[k]));
+        if (existing) return [Object.assign(existing, payload)];
+        const row = { id: `${table}-${++seq}`, ...payload };
+        rows().push(row);
+        return [row];
+      }
+      return rows().filter((r) => filters.every(([k, v]) => r[k] === v));
+    };
+    const q = {
+      select: () => q,
+      insert: (p: Row) => ((op = 'insert'), (payload = p), q),
+      upsert: (p: Row) => ((op = 'upsert'), (payload = p), q),
+      eq: (k: string, v: unknown) => (filters.push([k, v]), q),
+      limit: () => q,
+      maybeSingle: async () => ({ data: run()[0] ?? null, error: null }),
+      then: (resolve: (r: { data: Row[]; error: null }) => void) =>
+        resolve({ data: run(), error: null }),
+    };
+    return q;
+  };
+  return { from } as unknown as SupabaseClient;
+}
+
+const ctx = { accountId: 'acc', userId: 'user' };
+
+const seededTables = (): Record<string, Row[]> => ({
+  pipelines: [{ id: 'pipe', account_id: 'acc', name: 'Pedidos Delivery' }],
+  pipeline_stages: [{ id: 'novo', pipeline_id: 'pipe', name: 'Novo Pedido' }],
+  deals: [],
+  orders: [],
+  tags: [],
+  contact_tags: [],
+});
+
+const input = {
+  contactId: 'contact-1',
+  customerName: 'Maria',
+  deliveryKind: 'delivery' as const,
+  paymentMethod: 'mercado_pago' as const,
+  total: 33.5,
+  deliveryAddress: 'Rua Teste 123',
+  paidOnline: false,
+  conversationId: 'conv-1',
+  external_reference: 'PED-1',
+};
+
+describe('createOrderDeal', () => {
+  it('cria o card no Novo Pedido, o pedido e a tag Aguardando Pagamento', async () => {
+    const tables = seededTables();
+    const res = await createOrderDeal(fakeDb(tables), ctx, input);
+
+    expect(res).toMatchObject({ pipelineId: 'pipe', stageId: 'novo', tagName: TAG_AGUARDANDO });
+    expect(tables.deals).toHaveLength(1);
+    expect(tables.deals[0]).toMatchObject({
+      account_id: 'acc',
+      stage_id: 'novo',
+      contact_id: 'contact-1',
+      title: 'Pedido - Maria',
+      value: 33.5,
     });
-    console.log('RESULT:', JSON.stringify(res, null, 2));
-  } catch (err) {
-    console.error('ERROR:', err);
-  }
-})();
+    expect(tables.orders).toHaveLength(1);
+    expect(tables.orders[0]).toMatchObject({ external_reference: 'PED-1', deal_id: res.dealId });
+    expect(tables.tags.map((t) => t.name)).toEqual([TAG_AGUARDANDO]);
+  });
+
+  it('é idempotente pelo external_reference', async () => {
+    const tables = seededTables();
+    const first = await createOrderDeal(fakeDb(tables), ctx, input);
+    const second = await createOrderDeal(fakeDb(tables), ctx, input);
+
+    expect(second).toMatchObject({ dealId: first.dealId, orderAlreadyExisted: true });
+    expect(tables.deals).toHaveLength(1);
+    expect(tables.orders).toHaveLength(1);
+  });
+
+  it('com skipOrderRecord cria só o card e a tag', async () => {
+    const tables = seededTables();
+    const res = await createOrderDeal(fakeDb(tables), ctx, { ...input, skipOrderRecord: true });
+
+    expect(res.dealId).toBeTruthy();
+    expect(tables.deals).toHaveLength(1);
+    expect(tables.orders).toHaveLength(0);
+    expect(tables.contact_tags).toHaveLength(1);
+  });
+
+  it('falha com mensagem clara quando o pipeline não existe', async () => {
+    const tables = seededTables();
+    tables.pipelines = [];
+    await expect(createOrderDeal(fakeDb(tables), ctx, input)).rejects.toThrow(
+      'Pipeline "Pedidos Delivery" not found'
+    );
+  });
+});
