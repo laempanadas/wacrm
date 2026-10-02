@@ -7,11 +7,11 @@ import {
 } from "./currency";
 
 describe("formatCurrency", () => {
-  it("formats whole amounts with no minor units", () => {
-    // Use a non-breaking-space-tolerant check: Intl may insert NBSP.
+  it("formats whole amounts with two decimal places", () => {
+    // Always show 2 decimal places for consistency (especially for BRL).
     const out = formatCurrency(1234, "USD");
     expect(out).toContain("1,234");
-    expect(out).not.toContain(".00");
+    expect(out).toContain(".00");
   });
 
   it("defaults to USD when no currency is given", () => {
