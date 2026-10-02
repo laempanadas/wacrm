@@ -226,7 +226,7 @@ export function ConversationList({
           <Input
             value={search}
             onChange={handleSearchChange}
-            placeholder="Search conversations..."
+            placeholder="Buscar conversas..."
             className="border-border bg-muted pl-9 text-sm text-foreground placeholder-muted-foreground focus:border-primary/50"
           />
         </div>

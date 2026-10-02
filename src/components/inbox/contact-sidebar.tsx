@@ -310,7 +310,7 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
                 <textarea
                   value={newNote}
                   onChange={(e) => setNewNote(e.target.value)}
-                  placeholder="Add a note..."
+                  placeholder="Adicionar observação..."
                   rows={2}
                   className="flex-1 resize-none rounded-lg border border-border bg-muted px-3 py-2 text-xs text-foreground placeholder-muted-foreground outline-none focus:border-primary/50"
                 />

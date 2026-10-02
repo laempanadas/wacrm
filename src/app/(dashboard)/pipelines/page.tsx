@@ -373,7 +373,7 @@ export default function PipelinesPage() {
             className="border-border bg-card text-foreground hover:bg-muted"
           >
             <Plus className="mr-1 h-4 w-4" />
-            Add Pipeline
+            + Novo Funil
           </GatedButton>
           <GatedButton
             canAct={canCreateDeals}
@@ -383,7 +383,7 @@ export default function PipelinesPage() {
             className="bg-primary text-primary-foreground hover:bg-primary/90"
           >
             <Plus className="mr-1 h-4 w-4" />
-            Add Deal
+            + Novo Pedido
           </GatedButton>
         </div>
       </div>
@@ -393,10 +393,10 @@ export default function PipelinesPage() {
         <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border py-20">
           <GitBranch className="h-12 w-12 text-muted-foreground" />
           <h3 className="mt-4 text-lg font-medium text-foreground">
-            No pipelines yet
+            Nenhum funil ainda
           </h3>
           <p className="mt-2 text-sm text-muted-foreground">
-            Create a pipeline to start tracking deals
+            Crie um funil para começar a rastrear pedidos
           </p>
           <GatedButton
             canAct={canEditSettings}
@@ -405,7 +405,7 @@ export default function PipelinesPage() {
             className="mt-4 bg-primary text-primary-foreground hover:bg-primary/90"
           >
             <Plus className="mr-1 h-4 w-4" />
-            Create Pipeline
+            Criar Funil
           </GatedButton>
         </div>
       ) : (
@@ -425,10 +425,10 @@ export default function PipelinesPage() {
       <Dialog open={newPipelineOpen} onOpenChange={setNewPipelineOpen}>
         <DialogContent className="sm:max-w-sm bg-popover border-border">
           <DialogHeader>
-            <DialogTitle className="text-popover-foreground">New Pipeline</DialogTitle>
+            <DialogTitle className="text-popover-foreground">Novo Funil</DialogTitle>
           </DialogHeader>
           <div className="py-2">
-            <Label className="text-muted-foreground">Pipeline Name</Label>
+            <Label className="text-muted-foreground">Nome do Funil</Label>
             <Input
               value={newPipelineName}
               onChange={(e) => setNewPipelineName(e.target.value)}
@@ -455,7 +455,7 @@ export default function PipelinesPage() {
               disabled={creating || !newPipelineName.trim()}
               className="bg-primary text-primary-foreground hover:bg-primary/90"
             >
-              {creating ? "Creating..." : "Create Pipeline"}
+              {creating ? "Criando..." : "Criar Funil"}
             </Button>
           </DialogFooter>
         </DialogContent>
