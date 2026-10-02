@@ -28,6 +28,7 @@ interface PipelineBoardProps {
   onDealMoved: (dealId: string, newStageId: string) => void;
   onAddDeal: (stageId: string) => void;
   onEditDeal: (deal: Deal) => void;
+  onDealsRefresh?: () => void;
 }
 
 export function PipelineBoard({
@@ -36,6 +37,7 @@ export function PipelineBoard({
   onDealMoved,
   onAddDeal,
   onEditDeal,
+  onDealsRefresh,
 }: PipelineBoardProps) {
   const { defaultCurrency } = useAuth();
   const [activeDealId, setActiveDealId] = useState<string | null>(null);
@@ -117,10 +119,12 @@ export function PipelineBoard({
               key={stage.id}
               stage={stage}
               deals={stageDeals}
+              allStages={sortedStages}
               totalValue={totalValue}
               currency={defaultCurrency}
               onAddDeal={onAddDeal}
               onEditDeal={onEditDeal}
+              onDealUpdated={onDealsRefresh}
             />
           );
         })}
@@ -139,6 +143,7 @@ export function PipelineBoard({
               stage={
                 sortedStages.find((s) => s.id === activeDeal.stage_id) ?? null
               }
+              allStages={sortedStages}
               onEdit={() => {}}
               isOverlay
             />
@@ -186,17 +191,21 @@ export function PipelineBoard({
 function StageColumn({
   stage,
   deals,
+  allStages,
   totalValue,
   currency,
   onAddDeal,
   onEditDeal,
+  onDealUpdated,
 }: {
   stage: PipelineStage;
   deals: Deal[];
+  allStages: PipelineStage[];
   totalValue: number;
   currency: string;
   onAddDeal: (stageId: string) => void;
   onEditDeal: (deal: Deal) => void;
+  onDealUpdated?: () => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: stage.id });
 
@@ -238,7 +247,9 @@ function StageColumn({
               key={deal.id}
               deal={deal}
               stage={stage}
+              allStages={allStages}
               onEdit={onEditDeal}
+              onDealUpdated={onDealUpdated}
             />
           ))
         )}
@@ -261,11 +272,15 @@ function StageColumn({
 function DraggableDealCard({
   deal,
   stage,
+  allStages,
   onEdit,
+  onDealUpdated,
 }: {
   deal: Deal;
   stage: PipelineStage;
+  allStages: PipelineStage[];
   onEdit: (deal: Deal) => void;
+  onDealUpdated?: () => void;
 }) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: deal.id,
@@ -278,7 +293,13 @@ function DraggableDealCard({
       {...attributes}
       style={{ opacity: isDragging ? 0.3 : 1, touchAction: "none" }}
     >
-      <DealCard deal={deal} stage={stage} onEdit={onEdit} />
+      <DealCard
+        deal={deal}
+        stage={stage}
+        allStages={allStages}
+        onEdit={onEdit}
+        onDealUpdated={onDealUpdated}
+      />
     </div>
   );
 }

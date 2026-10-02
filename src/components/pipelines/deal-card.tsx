@@ -3,11 +3,14 @@
 import type { Deal, PipelineStage } from "@/types";
 import { Calendar, Check, X } from "lucide-react";
 import { formatCurrency } from "@/lib/currency";
+import { DealCardActions } from "./deal-card-actions";
 
 interface DealCardProps {
   deal: Deal;
   stage: PipelineStage | null;
+  allStages?: PipelineStage[];
   onEdit: (deal: Deal) => void;
+  onDealUpdated?: () => void;
   isOverlay?: boolean;
 }
 
@@ -25,7 +28,14 @@ function initials(name?: string, fallback?: string) {
   return source.charAt(0).toUpperCase();
 }
 
-export function DealCard({ deal, stage, onEdit, isOverlay }: DealCardProps) {
+export function DealCard({
+  deal,
+  stage,
+  allStages = [],
+  onEdit,
+  onDealUpdated,
+  isOverlay,
+}: DealCardProps) {
   const contactLabel = deal.contact?.name || deal.contact?.phone || "No contact";
   const assigneeLabel = deal.assignee?.full_name || null;
 
@@ -56,18 +66,28 @@ export function DealCard({ deal, stage, onEdit, isOverlay }: DealCardProps) {
         <h4 className="flex-1 text-sm font-semibold leading-snug text-foreground break-words">
           {deal.title}
         </h4>
-        {deal.status === "won" && (
-          <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-semibold text-primary">
-            <Check className="h-3 w-3" />
-            Won
-          </span>
-        )}
-        {deal.status === "lost" && (
-          <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-red-500/15 px-2 py-0.5 text-[10px] font-semibold text-red-400">
-            <X className="h-3 w-3" />
-            Lost
-          </span>
-        )}
+        <div className="flex items-center gap-1 shrink-0">
+          {!isOverlay && (
+            <DealCardActions
+              deal={deal}
+              currentStage={stage}
+              allStages={allStages}
+              onDealUpdated={onDealUpdated}
+            />
+          )}
+          {deal.status === "won" && (
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-semibold text-primary">
+              <Check className="h-3 w-3" />
+              Won
+            </span>
+          )}
+          {deal.status === "lost" && (
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-red-500/15 px-2 py-0.5 text-[10px] font-semibold text-red-400">
+              <X className="h-3 w-3" />
+              Lost
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Contact row */}
