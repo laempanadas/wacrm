@@ -19,6 +19,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { format } from "date-fns";
+import { QuickDealCreation } from "./quick-deal-creation";
+import { DealQuickActions } from "./deal-quick-actions";
 
 interface ContactSidebarProps {
   contact: Contact | null;
@@ -208,41 +210,71 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
 
           {/* Active Deals */}
           <div>
-            <div className="flex items-center gap-2 px-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              <DollarSign className="h-3 w-3" />
-              Active Deals
+            <div className="flex items-center justify-between px-1">
+              <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                <DollarSign className="h-3 w-3" />
+                Active Deals
+              </div>
+              <QuickDealCreation
+                contact={contact}
+                onDealCreated={fetchContactData}
+              />
             </div>
             <div className="mt-2 space-y-2">
               {deals.length === 0 ? (
                 <p className="px-1 text-xs text-muted-foreground">No deals</p>
               ) : (
-                deals.map((deal) => (
-                  <div
-                    key={deal.id}
-                    className="rounded-lg bg-muted px-3 py-2"
-                  >
-                    <p className="text-sm font-medium text-foreground">
-                      {deal.title}
-                    </p>
-                    <div className="mt-1 flex items-center justify-between text-xs text-muted-foreground">
-                      <span>
-                        {deal.currency ?? "$"}
-                        {deal.value.toLocaleString()}
-                      </span>
-                      {deal.stage && (
-                        <span
-                          className="rounded-full px-1.5 py-0.5 text-[10px]"
-                          style={{
-                            backgroundColor: `${deal.stage.color}20`,
-                            color: deal.stage.color,
-                          }}
-                        >
-                          {deal.stage.name}
-                        </span>
-                      )}
+                deals.map((deal) => {
+                  const stages = (deals as any)[0]?.stage
+                    ? deals.map((d: any) => d.stage).filter(Boolean) as any[]
+                    : [];
+                  const currentStage = (deal as any)?.stage as any;
+
+                  return (
+                    <div
+                      key={deal.id}
+                      className="rounded-lg bg-muted px-3 py-2 flex items-center justify-between"
+                    >
+                      <div className="flex-1">
+                        <p className="text-sm font-medium text-foreground">
+                          {deal.title}
+                        </p>
+                        <div className="mt-1 flex items-center justify-between text-xs text-muted-foreground">
+                          <span>
+                            {deal.currency ?? "$"}
+                            {deal.value.toLocaleString()}
+                          </span>
+                          {currentStage && (
+                            <span
+                              className="rounded-full px-1.5 py-0.5 text-[10px]"
+                              style={{
+                                backgroundColor: `${currentStage.color}20`,
+                                color: currentStage.color,
+                              }}
+                            >
+                              {currentStage.name}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <DealQuickActions
+                        deal={deal}
+                        currentStage={currentStage}
+                        allStages={
+                          Array.from(
+                            new Map(
+                              (deals as any[])
+                                .map((d: any) => d.stage)
+                                .filter(Boolean)
+                                .map((s: any) => [s.id, s])
+                            ).values()
+                          ) as any[]
+                        }
+                        onDealUpdated={fetchContactData}
+                      />
                     </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>

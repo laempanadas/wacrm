@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { requireRole, toErrorResponse } from '@/lib/auth/account'
 import { supabaseAdmin } from '@/lib/automations/admin-client'
 import { moveDealToStage, PIPELINE_STAGES, type PipelineStage } from '@/lib/orders/pipeline-stages'
+import { sendStageNotification } from '@/lib/deals/stage-notifications'
 
 /**
  * POST /api/deals/[id]/move-stage
@@ -41,6 +42,27 @@ export async function POST(
         { error: `Could not move deal: ${result.reason}` },
         { status: 400 }
       )
+    }
+
+    // Enviar notificação automática no WhatsApp (best-effort)
+    try {
+      const { data: deal } = await admin
+        .from('deals')
+        .select('contact_id')
+        .eq('id', dealId)
+        .maybeSingle()
+
+      if (deal?.contact_id) {
+        await sendStageNotification({
+          db: admin,
+          accountId: ctx.accountId,
+          dealId,
+          contactId: deal.contact_id,
+          newStage: targetStage as PipelineStage,
+        })
+      }
+    } catch (err) {
+      console.warn('[move-stage] notification failed (non-blocking):', err)
     }
 
     return NextResponse.json({ ok: true, moved: true, stage: targetStage })
