@@ -22,11 +22,11 @@ interface StageNotificationParams {
  */
 const STAGE_MESSAGES: Record<string, string> = {
   [PIPELINE_STAGES.COOKING]:
-    '✅ Seu pedido foi confirmado e já está na cozinha sendo preparado! 🥟🔥',
+    'Seu pedido foi confirmado e já está na cozinha sendo preparado! 🥟🔥',
   [PIPELINE_STAGES.READY]:
-    '🎉 Seu pedido está pronto e saindo para entrega! 🛵💨',
+    'Seu pedido está pronto e saindo para entrega! 🛵💨',
   [PIPELINE_STAGES.DELIVERED]:
-    '🎊 Pedido entregue! Bom apetite e obrigado pela preferência! 🥟❤️',
+    'Pedido entregue! Bom apetite e obrigado pela preferência! 🥟❤️',
 }
 
 /**
