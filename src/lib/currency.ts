@@ -11,7 +11,7 @@
  */
 
 /** App-wide fallback when no account/deal currency is available. */
-export const DEFAULT_CURRENCY = "USD";
+export const DEFAULT_CURRENCY = "BRL";
 
 export interface CurrencyOption {
   /** ISO-4217 code, e.g. "USD". Stored verbatim in the DB. */
@@ -45,10 +45,9 @@ export const CURRENCIES: CurrencyOption[] = [
 ];
 
 /**
- * Format a deal value as a currency string. Whole-number output
- * (no minor units) — deal values are tracked to the dollar across
- * the app. `currency` defaults to USD so callers with nothing better
- * stay safe, but pass the account/deal currency wherever known.
+ * Format a deal value as a currency string with locale-specific formatting.
+ * For BRL (Brazilian Real), uses pt-BR locale to display "R$ 1.234,56".
+ * For other currencies, uses their default locale representation.
  *
  * Total by design: `Intl.NumberFormat` throws a RangeError on a
  * structurally invalid currency code, and `deals.currency` carries
@@ -63,26 +62,31 @@ export function formatCurrency(
 ): string {
   const code = (currency || DEFAULT_CURRENCY).trim();
   const amount = Number(value) || 0;
+  // Use pt-BR locale for Brazilian Real to display "R$ 1.234,56"
+  // For other currencies, use undefined (browser default)
+  const locale = code === "BRL" ? "pt-BR" : undefined;
   try {
-    return new Intl.NumberFormat(undefined, {
+    return new Intl.NumberFormat(locale, {
       style: "currency",
       currency: code,
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 0,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
     }).format(amount);
   } catch {
     // Invalid ISO code — show the raw code + grouped number so the
     // value is still legible instead of throwing.
-    return `${code} ${new Intl.NumberFormat(undefined, {
-      maximumFractionDigits: 0,
+    return `${code} ${new Intl.NumberFormat(locale, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
     }).format(amount)}`;
   }
 }
 
 /**
  * Compact currency for tight spaces (donut center, legend rows):
- * "$1.2M" / "€34.5k" / "₹900". Uses the currency's symbol from
+ * "R$ 1,2M" / "€34,5k" / "₹900". Uses the currency's symbol from
  * CURRENCIES, falling back to the code when we don't carry a symbol.
+ * For Brazilian Real, uses comma as decimal separator (pt-BR locale).
  */
 export function formatCurrencyShort(
   value: number,
@@ -91,7 +95,16 @@ export function formatCurrencyShort(
   const code = currency || DEFAULT_CURRENCY;
   const symbol = CURRENCIES.find((c) => c.code === code)?.symbol ?? `${code} `;
   const v = Number(value || 0);
-  if (v >= 1_000_000) return `${symbol}${(v / 1_000_000).toFixed(1)}M`;
-  if (v >= 1_000) return `${symbol}${(v / 1_000).toFixed(1)}k`;
-  return `${symbol}${v.toFixed(0)}`;
+  // Use comma as decimal separator for pt-BR
+  const decimalSeparator = code === "BRL" ? "," : ".";
+  const toFixedValue = (num: number, digits: number) => {
+    const fixed = num.toFixed(digits);
+    if (code === "BRL") {
+      return fixed.replace(".", ",");
+    }
+    return fixed;
+  };
+  if (v >= 1_000_000) return `${symbol}${toFixedValue(v / 1_000_000, 1)}M`;
+  if (v >= 1_000) return `${symbol}${toFixedValue(v / 1_000, 1)}k`;
+  return `${symbol}${toFixedValue(v, 0)}`;
 }
