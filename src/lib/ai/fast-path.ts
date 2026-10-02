@@ -2,7 +2,16 @@
  * Zero-Token Fast Path for common queries.
  * Intercepts frequent patterns before calling the LLM, saving tokens and latency.
  * Normalized matching: lowercase + removes diacritics.
+ *
+ * COST-OPTIMIZATION: Uses condensed delivery templates to minimize per-message charges
+ * from Meta WhatsApp Cloud API. Each response is a complete, self-contained message.
  */
+
+import {
+  TEMPLATE_ATENDIMENTO_CARDAPIO,
+  TEMPLATE_HORARIO_FUNCIONAMENTO,
+  TEMPLATE_FORMAS_PAGAMENTO,
+} from '@/lib/orders/delivery-templates'
 
 export interface FastPathMatch {
   matched: boolean
@@ -51,7 +60,7 @@ export function checkZeroTokenMatch(messageText: string): FastPathMatch {
   ])) {
     return {
       matched: true,
-      response: 'Boa noite! Sim, estamos sim! 🥟 O que vai querer pedir hoje? Nosso cardápio está aqui: https://www.laempanadas.com.br/',
+      response: TEMPLATE_ATENDIMENTO_CARDAPIO,
     }
   }
 
@@ -75,7 +84,7 @@ export function checkZeroTokenMatch(messageText: string): FastPathMatch {
     }
     return {
       matched: true,
-      response: '🥟 *La Empanadas*\n\n📱 Veja nosso cardápio completo:\nhttps://www.laempanadas.com.br/\n\nOu manda uma mensagem dizendo o que quer que a gente te ajuda! 😊',
+      response: TEMPLATE_ATENDIMENTO_CARDAPIO,
     }
   }
 
@@ -87,7 +96,7 @@ export function checkZeroTokenMatch(messageText: string): FastPathMatch {
       !normalized.includes('quero')) {
     return {
       matched: true,
-      response: '🥟 *La Empanadas*\n\n📱 Veja nosso cardápio completo:\nhttps://www.laempanadas.com.br/\n\nOu manda uma mensagem dizendo o que quer que a gente te ajuda! 😊',
+      response: TEMPLATE_ATENDIMENTO_CARDAPIO,
     }
   }
 
@@ -114,7 +123,7 @@ export function checkZeroTokenMatch(messageText: string): FastPathMatch {
   ])) {
     return {
       matched: true,
-      response: '💳 *Formas de Pagamento:*\n\n✅ *Pix* (aprovação imediata)\n✅ *Cartão de Crédito*\n✅ *Dinheiro na entrega*\n\nVocê receberá o link para pagar assim que confirmarmos seu pedido. Qualquer dúvida, me chama! 🥟',
+      response: TEMPLATE_FORMAS_PAGAMENTO,
     }
   }
 
@@ -134,7 +143,7 @@ export function checkZeroTokenMatch(messageText: string): FastPathMatch {
   ])) {
     return {
       matched: true,
-      response: '🕐 *Horário de Funcionamento:*\n\n⏰ Segunda a Domingo\n📍 19h às 00h (meia-noite)\n\nVocê pode fazer seu pedido agora! 🥟',
+      response: TEMPLATE_HORARIO_FUNCIONAMENTO,
     }
   }
 

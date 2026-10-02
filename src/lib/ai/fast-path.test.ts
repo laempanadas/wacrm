@@ -6,19 +6,19 @@ describe('fast-path zero-token matcher', () => {
     it('should match "estao atendendo"', () => {
       const result = checkZeroTokenMatch('Estão atendendo?')
       expect(result.matched).toBe(true)
-      expect(result.response).toContain('Sim, estamos sim')
+      expect(result.response).toContain('La Empanadas Argentinas')
     })
 
     it('should match "ola"', () => {
       const result = checkZeroTokenMatch('Olá')
       expect(result.matched).toBe(true)
-      expect(result.response).toContain('Boa noite')
+      expect(result.response).toContain('La Empanadas Argentinas')
     })
 
     it('should match "boa noite"', () => {
       const result = checkZeroTokenMatch('boa noite')
       expect(result.matched).toBe(true)
-      expect(result.response).toContain('estamos sim')
+      expect(result.response).toContain('cardápio')
     })
 
     it('should match "aberto" with normalization', () => {

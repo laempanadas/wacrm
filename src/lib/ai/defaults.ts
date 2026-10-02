@@ -69,6 +69,7 @@ export function buildSystemPrompt(args: {
   if (mode === 'auto_reply') {
     parts.push(
       `You are replying automatically with no human in the loop. If you cannot confidently and safely help — the customer explicitly asks for a human, is upset or complaining, or the request needs information you do not have — reply with exactly ${HANDOFF_SENTINEL} and nothing else. A human agent will then take over. Prefer handing off over guessing.`,
+      `COST OPTIMIZATION: Be direct and objective. Never send empty or fragmented messages. Always keep replies concise (under 2-3 sentences when possible). When a customer asks for menu/options, respond in max 2 sentences and always provide the link https://www.laempanadas.com.br/. Avoid unnecessary emojis or formatting.`,
     )
   }
 

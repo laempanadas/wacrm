@@ -3,11 +3,18 @@
  *
  * Envia notificações automáticas no WhatsApp quando o deal muda de stage.
  * Integra com engineSendText para enviar mensagens na conversa ativa.
+ *
+ * COST OPTIMIZATION: Usa templates condensados da Meta para minimizar cobrança por mensagem.
+ * Máximo de 2 mensagens por pedido (confirmação → entrega).
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { engineSendText } from '@/lib/flows/meta-send'
 import { PIPELINE_STAGES, type PipelineStage } from '@/lib/orders/pipeline-stages'
+import {
+  TEMPLATE_PEDIDO_NA_COZINHA,
+  TEMPLATE_SAIU_ENTREGA,
+} from '@/lib/orders/delivery-templates'
 
 interface StageNotificationParams {
   db: SupabaseClient
@@ -19,14 +26,17 @@ interface StageNotificationParams {
 
 /**
  * Mapeamento de stage para mensagem WhatsApp.
+ * Usa templates condensados para otimizar custos com Meta.
+ *
+ * ESTRATÉGIA DE 2 MENSAGENS:
+ * 1. "Na Cozinha": Confirmação de pagamento + entrada do pedido
+ * 2. "Pronto para Entrega": Notificação de saída
+ * 3. "Entregue": SEM mensagem (economiza cobrança da Meta)
  */
-const STAGE_MESSAGES: Record<string, string> = {
-  [PIPELINE_STAGES.COOKING]:
-    'Seu pedido foi confirmado e já está na cozinha sendo preparado! 🥟🔥',
-  [PIPELINE_STAGES.READY]:
-    'Seu pedido está pronto e saindo para entrega! 🛵💨',
-  [PIPELINE_STAGES.DELIVERED]:
-    'Pedido entregue! Bom apetite e obrigado pela preferência! 🥟❤️',
+const STAGE_MESSAGES: Record<string, string | null> = {
+  [PIPELINE_STAGES.COOKING]: TEMPLATE_PEDIDO_NA_COZINHA,
+  [PIPELINE_STAGES.READY]: TEMPLATE_SAIU_ENTREGA,
+  [PIPELINE_STAGES.DELIVERED]: null, // Sem mensagem — economiza cobrança
 }
 
 /**

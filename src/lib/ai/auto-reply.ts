@@ -7,6 +7,7 @@ import { buildSystemPrompt } from './defaults'
 import { latestUserMessage } from './query'
 import { engineSendText } from '@/lib/flows/meta-send'
 import { checkZeroTokenMatch } from './fast-path'
+import { TEMPLATE_LIMIT_REACHED } from '@/lib/orders/delivery-templates'
 
 interface DispatchArgs {
   /** Tenancy key — drives config, contact, and whatsapp_config lookups. */
@@ -206,6 +207,43 @@ export async function dispatchInboundToAiReply(
         ai_reply_count: conv.ai_reply_count,
         max: config.autoReplyMaxPerConversation,
       })
+
+      // COST-CAP: Envia apenas o link do cardápio sem consumir tokens da LLM
+      // Estratégia de custo: última mensagem com CTA clara antes de passar para agente humano
+      try {
+        // Verifica se já enviou a mensagem de limite (evita reenvio repetido)
+        const { data: limitSent } = await db
+          .from('conversations')
+          .select('id')
+          .eq('id', conversationId)
+          .eq('ai_autoreply_disabled', true)
+          .maybeSingle()
+
+        if (!limitSent) {
+          // Primeira vez que o limite é atingido — envia template de fallback
+          await engineSendText({
+            accountId,
+            userId: configOwnerUserId,
+            conversationId,
+            contactId,
+            text: TEMPLATE_LIMIT_REACHED,
+          })
+
+          // Desativa auto-reply para forçar handoff humano
+          await db
+            .from('conversations')
+            .update({ ai_autoreply_disabled: true })
+            .eq('id', conversationId)
+
+          console.log('[ai auto-reply] cost-cap: sent fallback template and disabled auto-reply', {
+            accountId,
+            conversationId,
+          })
+        }
+      } catch (err) {
+        console.warn('[ai auto-reply] cost-cap: failed to send fallback template:', err)
+      }
+
       return
     }
 
