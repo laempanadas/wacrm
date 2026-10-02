@@ -50,9 +50,22 @@ export function PipelineBoard({
   const dealsByStage = useMemo(() => {
     const map = new Map<string, Deal[]>();
     for (const stage of sortedStages) map.set(stage.id, []);
+
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const isFinalStage = (stageId: string) => stageId === sortedStages[sortedStages.length - 1]?.id;
+
     for (const deal of deals) {
       const bucket = map.get(deal.stage_id);
-      if (bucket) bucket.push(deal);
+      if (!bucket) continue;
+
+      // Filter final stage (Entregue/Won) to show only this month's deals
+      if (isFinalStage(deal.stage_id)) {
+        const dealDate = deal.updated_at ? new Date(deal.updated_at) : new Date(deal.created_at);
+        if (dealDate < monthStart) continue;
+      }
+
+      bucket.push(deal);
     }
     return map;
   }, [sortedStages, deals]);

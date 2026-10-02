@@ -56,8 +56,8 @@ export function PipelineAnalytics({ stages, deals }: PipelineAnalyticsProps) {
     const active = deals.filter((d) => d.status !== "lost");
     const openDeals = active.filter((d) => d.status !== "won");
 
-    const totalCount = active.length;
-    const totalValue = active.reduce((sum, d) => sum + Number(d.value || 0), 0);
+    const totalCount = openDeals.length;
+    const totalValue = openDeals.reduce((sum, d) => sum + Number(d.value || 0), 0);
     const avgValue = totalCount > 0 ? totalValue / totalCount : 0;
 
     const stageById = new Map(sortedStages.map((s) => [s.id, s]));
@@ -76,7 +76,8 @@ export function PipelineAnalytics({ stages, deals }: PipelineAnalyticsProps) {
     };
     const wonThisMonth = deals.filter(
       (d) => d.status === "won" && thisMonth(d),
-    ).length;
+    );
+    const wonThisMonthValue = wonThisMonth.reduce((sum, d) => sum + Number(d.value || 0), 0);
     const lostThisMonth = deals.filter(
       (d) => d.status === "lost" && thisMonth(d),
     ).length;
@@ -86,7 +87,8 @@ export function PipelineAnalytics({ stages, deals }: PipelineAnalyticsProps) {
       totalValue,
       avgValue,
       weightedValue,
-      wonThisMonth,
+      wonThisMonth: wonThisMonth.length,
+      wonThisMonthValue,
       lostThisMonth,
     };
   }, [deals, sortedStages]);
@@ -98,13 +100,13 @@ export function PipelineAnalytics({ stages, deals }: PipelineAnalyticsProps) {
           icon={<BarChart3 className="h-4 w-4 text-muted-foreground" />}
           label="Total de Pedidos"
           value={String(stats.totalCount)}
-          tooltip="Contagem de todos os pedidos neste funil que não estão marcados como Cancelado. Pedidos Faturados também são inclusos."
+          tooltip="Contagem de todos os pedidos abertos neste funil que não estão marcados como Cancelado ou Entregue."
         />
         <Metric
           icon={<DollarSign className="h-4 w-4 text-primary" />}
           label="Valor em Andamento"
           value={formatCurrency(stats.totalValue, defaultCurrency)}
-          tooltip="Soma dos valores em R$ de todos os pedidos neste funil, excluindo pedidos marcados como Cancelado."
+          tooltip="Soma dos valores em R$ de todos os pedidos abertos neste funil, excluindo pedidos Entregues e Cancelados."
         />
         <Metric
           icon={<Target className="h-4 w-4 text-blue-400" />}
@@ -121,8 +123,8 @@ export function PipelineAnalytics({ stages, deals }: PipelineAnalyticsProps) {
         <Metric
           icon={<Trophy className="h-4 w-4 text-primary" />}
           label="Faturamento do Mês"
-          value={String(stats.wonThisMonth)}
-          tooltip="Pedidos marcados como Faturado desde o primeiro dia do mês atual."
+          value={formatCurrency(stats.wonThisMonthValue, defaultCurrency)}
+          tooltip="Soma dos valores de todos os pedidos marcados como Faturado desde o primeiro dia do mês atual."
         />
         <Metric
           icon={<XCircle className="h-4 w-4 text-red-400" />}
