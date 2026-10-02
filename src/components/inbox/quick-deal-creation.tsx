@@ -8,7 +8,7 @@ import {
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { Plus, Loader2 } from 'lucide-react'
+import { Plus, Loader2, Check } from 'lucide-react'
 import { toast } from 'sonner'
 import type { Contact } from '@/types'
 
@@ -29,12 +29,40 @@ export function QuickDealCreation({
   const [value, setValue] = useState('')
   const [isLoading, setIsLoading] = useState(false)
 
+  /**
+   * Limpa e normaliza entrada de valor.
+   * Remove "R$", símbolos, espaços extras e converte vírgula para ponto.
+   */
+  const cleanValue = (input: string): string => {
+    // Remove "R$", símbolos de moeda e caracteres indesejados
+    let cleaned = input
+      .replace(/[R$\s]/g, '') // Remove R$, espaços
+      .replace(/[^\d,.-]/g, '') // Remove tudo exceto dígitos, vírgula, ponto, hífen
+      .trim()
+
+    return cleaned
+  }
+
   const parseValue = (input: string): number | null => {
     if (!input.trim()) return null
-    // Remove espaços e converte vírgula para ponto
-    const normalized = input.trim().replace(',', '.')
+    const cleaned = cleanValue(input)
+    if (!cleaned) return null
+    // Converte vírgula para ponto
+    const normalized = cleaned.replace(',', '.')
     const parsed = parseFloat(normalized)
     return isNaN(parsed) ? null : parsed
+  }
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const cleaned = cleanValue(e.target.value)
+    setValue(cleaned)
+  }
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    e.preventDefault()
+    const pastedText = e.clipboardData?.getData('text') || ''
+    const cleaned = cleanValue(pastedText)
+    setValue(cleaned)
   }
 
   const handleCreateDeal = async () => {
@@ -95,38 +123,53 @@ export function QuickDealCreation({
         </Button>
       </DropdownMenuTrigger>
 
-      <DropdownMenuContent align="start" className="w-48">
-        <div className="p-3 space-y-2">
-          <label className="text-xs font-semibold text-muted-foreground">
-            Valor do pedido (R$)
-          </label>
-          <div className="flex gap-2">
+      <DropdownMenuContent align="start" className="w-56">
+        <div className="p-4 space-y-3">
+          {/* Título */}
+          <div>
+            <label className="text-xs font-semibold text-foreground">
+              Valor do Pedido
+            </label>
+          </div>
+
+          {/* Input com prefixo R$ */}
+          <div className="relative">
+            <span className="absolute left-3 top-2.5 text-sm font-medium text-muted-foreground">
+              R$
+            </span>
             <Input
               type="text"
-              placeholder="ex: 56 ou 56,50"
+              placeholder="0,00"
               value={value}
-              onChange={(e) => setValue(e.target.value)}
+              onChange={handleChange}
+              onPaste={handlePaste}
               onKeyDown={handleKeyDown}
               autoFocus
-              className="h-8 text-sm"
+              className="h-9 text-sm pl-8 pr-3"
               disabled={isLoading}
               inputMode="decimal"
             />
-            <Button
-              size="sm"
-              onClick={handleCreateDeal}
-              disabled={isLoading || !value}
-              className="h-8 w-12"
-            >
-              {isLoading ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                'OK'
-              )}
-            </Button>
           </div>
-          <p className="text-[10px] text-muted-foreground">
-            Aceita: "56", "56,00" ou "56.50" (Enter para criar)
+
+          {/* Botão Salvar */}
+          <Button
+            onClick={handleCreateDeal}
+            disabled={isLoading || !value}
+            className="w-full h-9 bg-green-600 hover:bg-green-700 text-white gap-2"
+          >
+            {isLoading ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <>
+                <Check className="h-4 w-4" />
+                Salvar
+              </>
+            )}
+          </Button>
+
+          {/* Hint sutil */}
+          <p className="text-[11px] text-muted-foreground text-center">
+            Pressione Enter para salvar
           </p>
         </div>
       </DropdownMenuContent>
