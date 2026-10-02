@@ -63,19 +63,15 @@ export function PresenceHeartbeat() {
         const { error } = await supabase.rpc("touch_presence", {
           p_status: currentStatus(),
         });
+        // Silently ignore errors (RLS 403, network, etc)
+        // Presence is best-effort and should never cause errors in console
         if (error && !cancelled) {
-          // Non-fatal: presence is best-effort. Log once per failure so a
-          // misconfigured RPC is visible without spamming.
-          // 403 = RLS policy blocked; expected during auth transitions
-          if (error.code !== "PGRST301" && error.code !== "PGRST302") {
-            console.debug("[PresenceHeartbeat] touch_presence status:", error.code);
-          }
+          // Debug only - don't pollute console
+          // console.debug("[PresenceHeartbeat]", error.message);
         }
-      } catch (err) {
-        // Network or other errors - best-effort, don't crash
-        if (!cancelled) {
-          console.debug("[PresenceHeartbeat] touch_presence error:", err);
-        }
+      } catch {
+        // Silently ignore - network errors or other issues
+        // This is non-critical and shouldn't affect app
       }
     };
 

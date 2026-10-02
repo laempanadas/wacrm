@@ -1,18 +1,9 @@
 'use client'
 
-import { useState } from 'react'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuTrigger,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuItem,
-} from '@/components/ui/dropdown-menu'
-import { Button } from '@/components/ui/button'
-import { MoreHorizontal, Loader2, ChevronRight } from 'lucide-react'
+import { useState, useRef, useEffect } from 'react'
+import { MoreHorizontal, Loader2, ChevronRight, Trash2 } from 'lucide-react'
 import { useDealStageMovement } from '@/hooks/use-deal-stage-movement'
-import { PIPELINE_STAGES } from '@/lib/orders/pipeline-stages'
+import { toast } from 'sonner'
 import type { Deal, PipelineStage } from '@/types'
 
 interface DealCardActionsProps {
@@ -24,7 +15,7 @@ interface DealCardActionsProps {
 
 /**
  * Menu de ações para movimentar deals entre stages.
- * Exibe apenas os próximos stages disponíveis (fluxo para frente).
+ * Usa dropdown simples em vez de Base UI Menu para evitar error #31.
  */
 export function DealCardActions({
   deal,
@@ -33,7 +24,22 @@ export function DealCardActions({
   onDealUpdated,
 }: DealCardActionsProps) {
   const [isOpen, setIsOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
   const { moveDealToStage, isLoading } = useDealStageMovement()
+
+  // Fechar menu ao clicar fora
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setIsOpen(false)
+      }
+    }
+
+    if (isOpen) {
+      document.addEventListener('mousedown', handleClickOutside)
+      return () => document.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [isOpen])
 
   // Stages disponíveis para movimento (apenas para frente)
   const nextStages = allStages.filter(
@@ -55,40 +61,68 @@ export function DealCardActions({
     }
   }
 
+  const handleDelete = () => {
+    toast.info('Deleção de pedido ainda não implementada')
+    setIsOpen(false)
+  }
+
   return (
-    <DropdownMenu open={isOpen} onOpenChange={setIsOpen}>
-      <DropdownMenuTrigger
-        className="relative inline-flex items-center justify-center h-6 w-6 p-0 rounded-md text-muted-foreground hover:bg-primary/10 transition-colors focus:outline-none data-[popup-open]:bg-primary/10"
+    <div className="relative">
+      <button
+        type="button"
         onClick={(e) => {
           e.stopPropagation()
+          setIsOpen(!isOpen)
         }}
+        className="inline-flex items-center justify-center h-6 w-6 p-0 rounded-md text-muted-foreground hover:bg-primary/10 transition-colors focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
         title="Ações do pedido"
+        disabled={isLoading}
       >
         {isLoading ? (
           <Loader2 className="h-4 w-4 animate-spin text-primary" />
         ) : (
           <MoreHorizontal className="h-4 w-4" />
         )}
-      </DropdownMenuTrigger>
+      </button>
 
-      <DropdownMenuContent align="end" className="w-48">
-        <DropdownMenuLabel className="text-xs font-semibold text-muted-foreground">
-          Mover para
-        </DropdownMenuLabel>
-        <DropdownMenuSeparator />
+      {/* Dropdown Menu - Simple implementation without Base UI */}
+      {isOpen && (
+        <div
+          ref={menuRef}
+          className="absolute right-0 top-8 z-50 bg-popover rounded-lg shadow-lg border border-border p-1 min-w-[200px]"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Mover para stages */}
+          <div className="space-y-0.5">
+            {nextStages.map((stage) => (
+              <button
+                key={stage.id}
+                type="button"
+                onClick={() => handleMoveToStage(stage.name)}
+                disabled={isLoading}
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-muted rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-left"
+              >
+                <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
+                <span>{stage.name}</span>
+              </button>
+            ))}
+          </div>
 
-        {nextStages.map((stage) => (
-          <DropdownMenuItem
-            key={stage.id}
-            onClick={() => handleMoveToStage(stage.name)}
+          {/* Divider */}
+          <div className="h-px bg-border my-1" />
+
+          {/* Delete */}
+          <button
+            type="button"
+            onClick={handleDelete}
             disabled={isLoading}
-            className="cursor-pointer text-sm"
+            className="w-full flex items-center gap-2 px-3 py-2 text-sm text-destructive hover:bg-destructive/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-left"
           >
-            <ChevronRight className="mr-2 h-4 w-4 text-muted-foreground" />
-            <span>{stage.name}</span>
-          </DropdownMenuItem>
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
+            <Trash2 className="h-4 w-4 shrink-0" />
+            <span>Excluir Pedido</span>
+          </button>
+        </div>
+      )}
+    </div>
   )
 }
