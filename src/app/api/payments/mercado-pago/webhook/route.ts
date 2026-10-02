@@ -5,6 +5,7 @@ import { engineSendText } from '@/lib/flows/meta-send';
 import { getPaymentById } from '@/lib/payments/mercado-pago';
 import { markDealPaid } from '@/lib/orders/mark-deal-paid';
 import { markContactPaymentConfirmed } from '@/lib/orders/create-order';
+import { moveDealToStage, PIPELINE_STAGES } from '@/lib/orders/pipeline-stages';
 import {
   ORDER_STATUS_PAID,
   extractPaymentId,
@@ -167,11 +168,11 @@ async function notifyCustomer(order: {
 }
 
 /**
- * Moves the order's pipeline card to "Pago". Separate query for deal_id
- * so an orders table without that column can't break the payment
- * confirmation. Best-effort.
+ * Moves the order's pipeline card to "Na Cozinha" (MVP: payment_approved).
+ * Separate query for deal_id so an orders table without that column
+ * can't break the payment confirmation. Best-effort.
  */
-async function moveDealToPaidStage(
+async function moveDealToCookingStage(
   db: SupabaseClient,
   accountId: string,
   orderId: string
@@ -187,14 +188,14 @@ async function moveDealToPaidStage(
       console.warn(`[mp-webhook] Pedido ${orderId} sem deal vinculado — card não movido`, error?.message ?? '');
       return;
     }
-    const result = await markDealPaid(db, { accountId, dealId });
+    const result = await moveDealToStage(db, { accountId, dealId, targetStage: PIPELINE_STAGES.COOKING });
     if (result.moved) {
-      console.log(`[mp-webhook] Card ${result.dealId} movido para "Pago"`);
+      console.log(`[mp-webhook] Card ${dealId} movido para "Na Cozinha"`);
     } else {
       console.warn(`[mp-webhook] Card do pedido ${orderId} não movido: ${result.reason}`);
     }
   } catch (err) {
-    console.error('[mp-webhook] Erro ao mover card para "Pago":', err);
+    console.error('[mp-webhook] Erro ao mover card para "Na Cozinha":', err);
   }
 }
 
@@ -331,7 +332,7 @@ export async function POST(req: NextRequest) {
     console.log(`[mp-webhook] Pedido ${order.id} pago (${externalReference})`);
 
     if (order.account_id) {
-      await moveDealToPaidStage(db, order.account_id, order.id);
+      await moveDealToCookingStage(db, order.account_id, order.id);
     }
 
     if (order.account_id && order.contact_id) {
