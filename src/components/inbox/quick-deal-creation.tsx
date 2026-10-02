@@ -29,8 +29,17 @@ export function QuickDealCreation({
   const [value, setValue] = useState('')
   const [isLoading, setIsLoading] = useState(false)
 
+  const parseValue = (input: string): number | null => {
+    if (!input.trim()) return null
+    // Remove espaços e converte vírgula para ponto
+    const normalized = input.trim().replace(',', '.')
+    const parsed = parseFloat(normalized)
+    return isNaN(parsed) ? null : parsed
+  }
+
   const handleCreateDeal = async () => {
-    if (!value || isNaN(parseFloat(value))) {
+    const parsedValue = parseValue(value)
+    if (parsedValue === null || parsedValue < 0) {
       toast.error('Informe um valor válido')
       return
     }
@@ -44,7 +53,7 @@ export function QuickDealCreation({
         },
         body: JSON.stringify({
           contact_id: contact.id,
-          value: parseFloat(value),
+          value: parsedValue,
           title: `Pedido - ${contact.name || contact.phone}`,
         }),
       })
@@ -63,6 +72,13 @@ export function QuickDealCreation({
       toast.error(message)
     } finally {
       setIsLoading(false)
+    }
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && !isLoading) {
+      e.preventDefault()
+      handleCreateDeal()
     }
   }
 
@@ -86,19 +102,15 @@ export function QuickDealCreation({
           </label>
           <div className="flex gap-2">
             <Input
-              type="number"
-              placeholder="0.00"
+              type="text"
+              placeholder="ex: 56 ou 56,50"
               value={value}
               onChange={(e) => setValue(e.target.value)}
-              step="0.01"
-              min="0"
+              onKeyDown={handleKeyDown}
+              autoFocus
               className="h-8 text-sm"
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  handleCreateDeal()
-                }
-              }}
               disabled={isLoading}
+              inputMode="decimal"
             />
             <Button
               size="sm"
@@ -114,7 +126,7 @@ export function QuickDealCreation({
             </Button>
           </div>
           <p className="text-[10px] text-muted-foreground">
-            Será criado em "Novo Pedido"
+            Aceita: "56", "56,00" ou "56.50" (Enter para criar)
           </p>
         </div>
       </DropdownMenuContent>

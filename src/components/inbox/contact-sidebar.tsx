@@ -21,6 +21,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { format } from "date-fns";
 import { QuickDealCreation } from "./quick-deal-creation";
 import { DealQuickActions } from "./deal-quick-actions";
+import { TagManager } from "./tag-manager";
 
 interface ContactSidebarProps {
   contact: Contact | null;
@@ -32,6 +33,7 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
   const [deals, setDeals] = useState<Deal[]>([]);
   const [notes, setNotes] = useState<ContactNote[]>([]);
   const [tags, setTags] = useState<(Tag & { contact_tag_id: string })[]>([]);
+  const [allTags, setAllTags] = useState<Tag[]>([]);
   const [newNote, setNewNote] = useState("");
   const [addingNote, setAddingNote] = useState(false);
 
@@ -40,8 +42,8 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
 
     const supabase = createClient();
 
-    // Fetch deals, notes, and tags in parallel
-    const [dealsRes, notesRes, tagsRes] = await Promise.all([
+    // Fetch deals, notes, tags, and all account tags in parallel
+    const [dealsRes, notesRes, tagsRes, allTagsRes] = await Promise.all([
       supabase
         .from("deals")
         .select("*, stage:pipeline_stages(*)")
@@ -56,6 +58,11 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
         .from("contact_tags")
         .select("id, tag_id, tags(*)")
         .eq("contact_id", contact.id),
+      supabase
+        .from("tags")
+        .select("*")
+        .eq("account_id", accountId)
+        .order("name", { ascending: true }),
     ]);
 
     if (dealsRes.data) setDeals(dealsRes.data);
@@ -69,7 +76,8 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
         }));
       setTags(mapped);
     }
-  }, [contact]);
+    if (allTagsRes.data) setAllTags(allTagsRes.data);
+  }, [contact, accountId]);
 
   // Load on contact change. setContactData/setTags run inside async
   // Supabase callbacks, not synchronously in the effect body.
@@ -181,9 +189,17 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
 
           {/* Tags */}
           <div>
-            <div className="flex items-center gap-2 px-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              <TagIcon className="h-3 w-3" />
-              Tags
+            <div className="flex items-center justify-between px-1">
+              <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                <TagIcon className="h-3 w-3" />
+                Tags
+              </div>
+              <TagManager
+                contact={contact}
+                activeTags={tags}
+                allTags={allTags}
+                onTagsUpdated={fetchContactData}
+              />
             </div>
             <div className="mt-2 flex flex-wrap gap-1">
               {tags.length === 0 ? (
