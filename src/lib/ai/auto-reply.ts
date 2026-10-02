@@ -6,6 +6,7 @@ import { generateReply } from './generate'
 import { buildSystemPrompt } from './defaults'
 import { latestUserMessage } from './query'
 import { engineSendText } from '@/lib/flows/meta-send'
+import { checkZeroTokenMatch } from './fast-path'
 
 interface DispatchArgs {
   /** Tenancy key — drives config, contact, and whatsapp_config lookups. */
@@ -97,6 +98,35 @@ export async function dispatchInboundToAiReply(
       return
     }
 
+    // FEATURE: Reset automático de handoff após 2 horas de inatividade do agente
+    // Se ai_autoreply_disabled=true mas passaram 2h desde a última mensagem do agente,
+    // a conversa é reaberta para a IA responder novamente (clientes recorrentes).
+    const HANDOFF_RESET_THRESHOLD_MS = 2 * 60 * 60 * 1000 // 2 horas
+    if (conv.ai_autoreply_disabled && conv.last_agent_message_at) {
+      const lastAgentAt = new Date(conv.last_agent_message_at)
+      const now = new Date()
+      const timeSinceLastAgent = now.getTime() - lastAgentAt.getTime()
+
+      if (timeSinceLastAgent > HANDOFF_RESET_THRESHOLD_MS) {
+        console.log('[ai auto-reply] resetting handoff after 2h inactivity', {
+          accountId,
+          conversationId,
+          timeSinceLastAgentMs: timeSinceLastAgent,
+        })
+        // Reativa a IA e zera o contador de respostas
+        await db
+          .from('conversations')
+          .update({
+            ai_autoreply_disabled: false,
+            ai_reply_count: 0,
+          })
+          .eq('id', conversationId)
+        // Usa os valores resetados para o resto da lógica
+        conv.ai_autoreply_disabled = false
+        conv.ai_reply_count = 0
+      }
+    }
+
     // Closed conversations are intentionally left for a human to reopen
     // when a fresh inbound arrives from the customer.
     if (conv.status === 'closed') {
@@ -185,12 +215,49 @@ export async function dispatchInboundToAiReply(
       return
     }
 
+    const latestText = latestUserMessage(messages)
+
+    // FEATURE: Camada zero-token (Fast Path)
+    // Antes de chamar a LLM, tenta combinar perguntas frequentes (cardápio, horário, pix)
+    // Economiza tokens e reduz latência em ~90% para respostas determinísticas.
+    const fastPathResult = checkZeroTokenMatch(latestText)
+    if (fastPathResult.matched && fastPathResult.response) {
+      console.log('[ai auto-reply] zero-token match', {
+        accountId,
+        conversationId,
+        pattern: latestText.substring(0, 50),
+      })
+
+      // Resposta determinística — não gasta tokens da LLM
+      const text = fastPathResult.response
+      await engineSendText({
+        accountId,
+        userId: configOwnerUserId,
+        conversationId,
+        contactId,
+        text,
+      })
+      // Incrementa o contador de respostas da IA mesmo para fast-path
+      // (resposta automática é resposta automática)
+      const { data: claimed, error: claimErr } = await db.rpc(
+        'claim_ai_reply_slot',
+        {
+          conversation_id: conversationId,
+          max_replies: config.autoReplyMaxPerConversation,
+        },
+      )
+      if (claimErr || claimed !== true) {
+        console.log('[ai auto-reply] failed to claim reply slot for zero-token match', { claimErr })
+      }
+      return
+    }
+
     // Ground the reply in the account's knowledge base (best-effort).
     const knowledge = await retrieveKnowledge(
       db,
       accountId,
       config,
-      latestUserMessage(messages),
+      latestText,
     )
 
     const systemPrompt = buildSystemPrompt({
