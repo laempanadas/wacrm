@@ -22,6 +22,7 @@ import { format } from "date-fns";
 import { QuickDealCreation } from "./quick-deal-creation";
 import { DealQuickActions } from "./deal-quick-actions";
 import { TagManager } from "./tag-manager";
+import { isValidUuid } from "@/lib/utils/uuid";
 
 interface ContactSidebarProps {
   contact: Contact | null;
@@ -38,7 +39,7 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
   const [addingNote, setAddingNote] = useState(false);
 
   const fetchContactData = useCallback(async () => {
-    if (!contact || !accountId) return;
+    if (!contact || !isValidUuid(accountId)) return;
 
     const supabase = createClient();
 

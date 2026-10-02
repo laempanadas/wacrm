@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 
 import { createClient } from "@/lib/supabase/client";
 import { useAuth } from "@/hooks/use-auth";
+import { isValidUuid } from "@/lib/utils/uuid";
 import { HEARTBEAT_MS, IDLE_AFTER_MS, type StoredPresence } from "@/lib/presence";
 
 /**
@@ -31,7 +32,8 @@ export function PresenceHeartbeat() {
     // window on a fresh signup — authed but profile/account row not yet
     // created — would make touch_presence raise "No account for caller"
     // and log a spurious error. The effect re-runs once accountId lands.
-    if (!accountId) return;
+    // Validate UUID format to prevent "invalid input syntax for type uuid" errors.
+    if (!isValidUuid(accountId)) return;
 
     const supabase = createClient();
     let cancelled = false;

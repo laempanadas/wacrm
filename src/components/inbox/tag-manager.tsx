@@ -11,6 +11,7 @@ import {
 } from '@/components/ui/popover'
 import { Plus, Search, X, Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
+import { isValidUuid } from '@/lib/utils/uuid'
 import type { Contact, Tag } from '@/types'
 
 interface TagManagerProps {
