@@ -54,15 +54,33 @@ export function QuickDealCreation({
   }
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    e.stopPropagation()
     const cleaned = cleanValue(e.target.value)
     setValue(cleaned)
   }
 
   const handlePaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    e.stopPropagation()
     e.preventDefault()
     const pastedText = e.clipboardData?.getData('text') || ''
     const cleaned = cleanValue(pastedText)
     setValue(cleaned)
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    e.stopPropagation()
+    if (e.key === 'Enter' && !isLoading) {
+      e.preventDefault()
+      handleCreateDeal()
+    }
+  }
+
+  const handleKeyUp = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    e.stopPropagation()
+  }
+
+  const handleKeyPress = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    e.stopPropagation()
   }
 
   const handleCreateDeal = async () => {
@@ -103,12 +121,6 @@ export function QuickDealCreation({
     }
   }
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter' && !isLoading) {
-      e.preventDefault()
-      handleCreateDeal()
-    }
-  }
 
   return (
     <DropdownMenu open={isOpen} onOpenChange={setIsOpen}>
@@ -144,6 +156,8 @@ export function QuickDealCreation({
               onChange={handleChange}
               onPaste={handlePaste}
               onKeyDown={handleKeyDown}
+              onKeyUp={handleKeyUp}
+              onKeyPress={handleKeyPress}
               autoFocus
               className="h-9 text-sm pl-8 pr-3"
               disabled={isLoading}
