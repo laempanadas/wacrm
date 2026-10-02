@@ -6,6 +6,7 @@ import { getPaymentById } from '@/lib/payments/mercado-pago';
 import { markDealPaid } from '@/lib/orders/mark-deal-paid';
 import { markContactPaymentConfirmed } from '@/lib/orders/create-order';
 import { moveDealToStage, PIPELINE_STAGES } from '@/lib/orders/pipeline-stages';
+import { updateDealWithPayment } from '@/lib/deals/auto-deal-lifecycle';
 import {
   ORDER_STATUS_PAID,
   extractPaymentId,
@@ -332,7 +333,27 @@ export async function POST(req: NextRequest) {
     console.log(`[mp-webhook] Pedido ${order.id} pago (${externalReference})`);
 
     if (order.account_id) {
+      // Move deal para "Na Cozinha" quando pagamento é aprovado
       await moveDealToCookingStage(db, order.account_id, order.id);
+
+      // Atualiza deal com valor pago (automação de ciclo de vida)
+      try {
+        const { data: dealIdRow } = await db
+          .from('orders')
+          .select('deal_id')
+          .eq('id', order.id)
+          .maybeSingle();
+        const dealId = (dealIdRow as { deal_id?: string | null } | null)?.deal_id;
+        if (dealId) {
+          await updateDealWithPayment(db, {
+            accountId: order.account_id,
+            dealId,
+            paidAmount,
+          });
+        }
+      } catch (err) {
+        console.warn('[mp-webhook] failed to update deal with payment (non-blocking):', err);
+      }
     }
 
     if (order.account_id && order.contact_id) {

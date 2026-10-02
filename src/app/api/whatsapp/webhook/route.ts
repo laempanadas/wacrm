@@ -12,6 +12,7 @@ import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply'
 import { dispatchWebhookEvent } from '@/lib/webhooks/deliver'
 import { createPaymentLink } from '@/lib/payments/mercado-pago'
 import { createDealForOrder } from '@/lib/orders/create-order'
+import { ensureAutoDealForConversation } from '@/lib/deals/auto-deal-lifecycle'
 import {
   handleTemplateWebhookChange,
   isTemplateWebhookField,
@@ -831,7 +832,24 @@ async function processMessage(
     .eq('id', conversation.id)
 
   await flagBroadcastReplyIfAny(accountId, contactRecord.id)
- 
+
+  // ============================================================
+  // 🤖 AUTOMAÇÃO: CRIAR DEAL AUTOMATICAMENTE
+  // ============================================================
+  // Garante que existe um deal aberto para a conversa.
+  // Se já existe, reutiliza. Se não, cria novo (idempotente).
+  try {
+    await ensureAutoDealForConversation(supabaseAdmin(), {
+      accountId,
+      userId: configOwnerUserId,
+      contactId: contactRecord.id,
+      contactName: contactRecord.name || contactName,
+      conversationId: conversation.id,
+    })
+  } catch (err) {
+    console.warn('[webhook] auto-deal creation failed (non-blocking):', err)
+  }
+
   // ============================================================
   // ⚡ PEDIDO VINDO DO SITE (laempanadas.com.br)
   // ============================================================
