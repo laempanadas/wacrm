@@ -57,22 +57,18 @@ export function DealCardActions({
 
   return (
     <DropdownMenu open={isOpen} onOpenChange={setIsOpen}>
-      <DropdownMenuTrigger>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-6 w-6 p-0 hover:bg-primary/10"
-          onClick={(e) => {
-            e.stopPropagation()
-            e.preventDefault()
-          }}
-        >
-          {isLoading ? (
-            <Loader2 className="h-4 w-4 animate-spin text-primary" />
-          ) : (
-            <MoreHorizontal className="h-4 w-4" />
-          )}
-        </Button>
+      <DropdownMenuTrigger
+        className="relative inline-flex items-center justify-center h-6 w-6 p-0 rounded-md text-muted-foreground hover:bg-primary/10 transition-colors focus:outline-none data-[popup-open]:bg-primary/10"
+        onClick={(e) => {
+          e.stopPropagation()
+        }}
+        title="Ações do pedido"
+      >
+        {isLoading ? (
+          <Loader2 className="h-4 w-4 animate-spin text-primary" />
+        ) : (
+          <MoreHorizontal className="h-4 w-4" />
+        )}
       </DropdownMenuTrigger>
 
       <DropdownMenuContent align="end" className="w-48">
@@ -86,10 +82,10 @@ export function DealCardActions({
             key={stage.id}
             onClick={() => handleMoveToStage(stage.name)}
             disabled={isLoading}
-            className="cursor-pointer"
+            className="cursor-pointer text-sm"
           >
             <ChevronRight className="mr-2 h-4 w-4 text-muted-foreground" />
-            <span className="flex-1">{stage.name}</span>
+            <span>{stage.name}</span>
           </DropdownMenuItem>
         ))}
       </DropdownMenuContent>

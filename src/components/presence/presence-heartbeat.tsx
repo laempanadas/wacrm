@@ -56,13 +56,24 @@ export function PresenceHeartbeat() {
       const t = Date.now();
       if (t - lastBeatAt < 1_000) return;
       lastBeatAt = t;
-      const { error } = await supabase.rpc("touch_presence", {
-        p_status: currentStatus(),
-      });
-      if (error && !cancelled) {
-        // Non-fatal: presence is best-effort. Log once per failure so a
-        // misconfigured RPC is visible without spamming.
-        console.error("[PresenceHeartbeat] touch_presence failed:", error.message);
+
+      try {
+        const { error } = await supabase.rpc("touch_presence", {
+          p_status: currentStatus(),
+        });
+        if (error && !cancelled) {
+          // Non-fatal: presence is best-effort. Log once per failure so a
+          // misconfigured RPC is visible without spamming.
+          // 403 = RLS policy blocked; expected during auth transitions
+          if (error.code !== "PGRST301" && error.code !== "PGRST302") {
+            console.debug("[PresenceHeartbeat] touch_presence status:", error.code);
+          }
+        }
+      } catch (err) {
+        // Network or other errors - best-effort, don't crash
+        if (!cancelled) {
+          console.debug("[PresenceHeartbeat] touch_presence error:", err);
+        }
       }
     };
 

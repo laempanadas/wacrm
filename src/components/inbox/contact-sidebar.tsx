@@ -38,7 +38,7 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
   const [addingNote, setAddingNote] = useState(false);
 
   const fetchContactData = useCallback(async () => {
-    if (!contact) return;
+    if (!contact || !accountId) return;
 
     const supabase = createClient();
 
