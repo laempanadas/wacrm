@@ -834,26 +834,30 @@ async function processMessage(
   await flagBroadcastReplyIfAny(accountId, contactRecord.id)
 
   // ============================================================
-  // 🤖 AUTOMAÇÃO: CRIAR DEAL AUTOMATICAMENTE
-  // ============================================================
-  // Garante que existe um deal aberto para a conversa.
-  // Se já existe, reutiliza. Se não, cria novo (idempotente).
-  try {
-    await ensureAutoDealForConversation(supabaseAdmin(), {
-      accountId,
-      userId: configOwnerUserId,
-      contactId: contactRecord.id,
-      contactName: contactRecord.name || contactName,
-      conversationId: conversation.id,
-    })
-  } catch (err) {
-    console.warn('[webhook] auto-deal creation failed (non-blocking):', err)
-  }
-
-  // ============================================================
   // ⚡ PEDIDO VINDO DO SITE (laempanadas.com.br)
   // ============================================================
   const siteOrder = parseWebsiteOrder(contentText || '')
+
+  // ============================================================
+  // 🤖 AUTOMAÇÃO: CRIAR DEAL AUTOMATICAMENTE
+  // ============================================================
+  // Garante que existe um deal aberto para a conversa quando é mensagem comum.
+  // Pedidos de catálogo (order) e pedidos do site (siteOrder) gerenciam seus
+  // próprios deals com os dados completos (itens, total, endereço).
+  if (!order && !siteOrder) {
+    try {
+      await ensureAutoDealForConversation(supabaseAdmin(), {
+        accountId,
+        userId: configOwnerUserId,
+        contactId: contactRecord.id,
+        contactName: contactRecord.name || contactName,
+        conversationId: conversation.id,
+      })
+    } catch (err) {
+      console.warn('[webhook] auto-deal creation failed (non-blocking):', err)
+    }
+  }
+
   if (siteOrder && siteOrder.total > 0) {
     console.log('[webhook] Processando pedido do site. Total:', siteOrder.total)
 

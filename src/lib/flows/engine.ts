@@ -760,8 +760,11 @@ async function advanceFromNodeKey(
 
           // One reference ties the Mercado Pago preference to the orders
           // row, which is how the MP webhook and the reminder cron find
-          // the order once the customer pays.
-          const externalReference = `PED-${Date.now()}-${run.id.substring(0, 5)}`;
+          // the order once the customer pays. Uses a deterministic reference
+          // tied to the flow run to guarantee idempotency.
+          const externalReference =
+            (run.vars.external_reference as string | undefined) ||
+            `PED-${run.id.replace(/-/g, "").substring(0, 10)}`;
           const { data: contactRow } = await db
             .from("contacts")
             .select("phone")
@@ -769,11 +772,11 @@ async function advanceFromNodeKey(
             .maybeSingle();
           const payerPhone = (contactRow?.phone as string | undefined) ?? undefined;
 
-          // ⚠️ [CORREÇÃO]: Gera o Link do Mercado Pago automaticamente se houver total
-          let mpUrl = "";
+          // ⚠️ [CORREÇÃO]: Gera o Link do Mercado Pago automaticamente se houver total (reutiliza se já gerado)
+          let mpUrl = (run.vars.link_mercado_pago as string | undefined) || "";
           let mpItems: { title: string; quantity: number; unitPrice: number }[] = [];
           let preferenceId = "";
-          if (isDelivery && orderTotal > 0) {
+          if (isDelivery && orderTotal > 0 && !mpUrl) {
             try {
               const rawItems = Array.isArray(itens) ? itens : [];
               mpItems =
@@ -809,33 +812,32 @@ async function advanceFromNodeKey(
             }
           }
 
-          if (mpUrl) {
-            const newVars = { ...run.vars, link_mercado_pago: mpUrl };
-            await db.from("flow_runs").update({ vars: newVars }).eq("id", run.id);
-            run.vars = newVars;
-          } else if (isDelivery) {
+          if (isDelivery && !mpUrl) {
             paymentLinkMissing = true;
           }
 
           // Same columns the site and AI-agent paths write in the WhatsApp
           // webhook — the shape the MP webhook and reminder cron read.
-          let orderId: string | null = null;
-          if (mpUrl) {
+          let orderId: string | null = (run.vars.order_id as string | undefined) ?? null;
+          if (mpUrl && !orderId) {
             const { data: orderRow, error: orderErr } = await db
               .from("orders")
-              .insert({
-                account_id: run.account_id,
-                contact_id: run.contact_id,
-                external_reference: externalReference,
-                preference_id: preferenceId,
-                payment_url: mpUrl,
-                total: orderTotal,
-                items: mpItems,
-                delivery_address: orderAddress ?? "",
-                payer_phone: payerPhone ?? null,
-                payer_name: customerName,
-                status: "pending",
-              })
+              .upsert(
+                {
+                  account_id: run.account_id,
+                  contact_id: run.contact_id,
+                  external_reference: externalReference,
+                  preference_id: preferenceId,
+                  payment_url: mpUrl,
+                  total: orderTotal,
+                  items: mpItems,
+                  delivery_address: orderAddress ?? "",
+                  payer_phone: payerPhone ?? null,
+                  payer_name: customerName,
+                  status: "pending",
+                },
+                { onConflict: "external_reference" }
+              )
               .select("id")
               .maybeSingle();
             if (orderErr) {
@@ -850,7 +852,7 @@ async function advanceFromNodeKey(
             }
           }
 
-          // Criação do card no Pipeline CRM
+          // Criação do card no Pipeline CRM (reutiliza deal existente de forma idempotente)
           const result = await createOrderDeal(
             supabaseAdmin(),
             { accountId: run.account_id, userId: run.user_id },
@@ -879,6 +881,17 @@ async function advanceFromNodeKey(
               console.error("[flows] Erro ao vincular deal ao pedido:", dealLinkErr);
             }
           }
+
+          // Persiste as referências de deal e pedido nas variáveis da execução
+          const newVars = {
+            ...run.vars,
+            ...(mpUrl ? { link_mercado_pago: mpUrl } : {}),
+            deal_id: result.dealId,
+            external_reference: externalReference,
+            ...(orderId ? { order_id: orderId } : {}),
+          };
+          await db.from("flow_runs").update({ vars: newVars }).eq("id", run.id);
+          run.vars = newVars;
 
           await logEvent(db, run.id, "node_entered", node.node_key, {
             action_type: "create_order_deal",

@@ -196,37 +196,88 @@ export async function createOrderDeal(
     }
   }
 
-  // 4) Create deal (always create new deal here; dedup handled by externalReference above)
-  const dealPayload: any = {
-    account_id: ctx.accountId,
-    user_id: ctx.userId,
-    pipeline_id: pipeline.id,
-    stage_id: stage.id,
-    contact_id: input.contactId,
-    conversation_id: input.conversationId ?? null,
-    title: buildOrderTitle(input.customerName),
-    value: Number.isFinite(input.total) && input.total > 0 ? input.total : 0,
-    currency: 'BRL',
-    notes: buildOrderNotes({
-      deliveryKind: input.deliveryKind,
-      paymentMethod: input.paymentMethod,
-      deliveryAddress: input.deliveryAddress,
-    }),
-    status: 'open',
-  };
+  // 4) Resolve or create deal (idempotent: checks for existing open deal for this conversation or contact)
+  let dealId: string | null = null;
 
-  const { data: dealInsert, error: dealErr } = await supabase
-    .from('deals')
-    .insert(dealPayload)
-    .select('id')
-    .maybeSingle();
+  try {
+    let existingDealQuery = supabase
+      .from('deals')
+      .select('id, value, stage_id')
+      .eq('account_id', ctx.accountId)
+      .eq('contact_id', input.contactId)
+      .eq('pipeline_id', pipeline.id)
+      .eq('status', 'open');
 
-  if (dealErr) {
-    console.error('create deal error', dealErr);
-    throw dealErr;
+    if (input.conversationId) {
+      existingDealQuery = existingDealQuery.eq('conversation_id', input.conversationId);
+    }
+
+    const { data: existingDeal } = await existingDealQuery.limit(1).maybeSingle();
+
+    if (existingDeal?.id) {
+      // Reutiliza e atualiza o deal existente (ex.: deal criado no webhook com valor 0 ou deal anterior aberto)
+      const updatePayload: Record<string, unknown> = {
+        title: buildOrderTitle(input.customerName),
+        value: Number.isFinite(input.total) && input.total > 0 ? input.total : 0,
+        notes: buildOrderNotes({
+          deliveryKind: input.deliveryKind,
+          paymentMethod: input.paymentMethod,
+          deliveryAddress: input.deliveryAddress,
+        }),
+        stage_id: stage.id,
+      };
+      if (input.conversationId) {
+        updatePayload.conversation_id = input.conversationId;
+      }
+
+      const { error: updateErr } = await supabase
+        .from('deals')
+        .update(updatePayload)
+        .eq('id', existingDeal.id);
+
+      if (updateErr) {
+        console.warn('[createOrderDeal] update existing deal failed, falling back to insert:', updateErr);
+      } else {
+        dealId = existingDeal.id as string;
+      }
+    }
+  } catch (findDealErr) {
+    console.warn('[createOrderDeal] failed to check existing deal:', findDealErr);
   }
 
-  const dealId = dealInsert?.id;
+  if (!dealId) {
+    const dealPayload: Record<string, unknown> = {
+      account_id: ctx.accountId,
+      user_id: ctx.userId,
+      pipeline_id: pipeline.id,
+      stage_id: stage.id,
+      contact_id: input.contactId,
+      conversation_id: input.conversationId ?? null,
+      title: buildOrderTitle(input.customerName),
+      value: Number.isFinite(input.total) && input.total > 0 ? input.total : 0,
+      currency: 'BRL',
+      notes: buildOrderNotes({
+        deliveryKind: input.deliveryKind,
+        paymentMethod: input.paymentMethod,
+        deliveryAddress: input.deliveryAddress,
+      }),
+      status: 'open',
+    };
+
+    const { data: dealInsert, error: dealErr } = await supabase
+      .from('deals')
+      .insert(dealPayload)
+      .select('id')
+      .maybeSingle();
+
+    if (dealErr) {
+      console.error('create deal error', dealErr);
+      throw dealErr;
+    }
+
+    dealId = dealInsert?.id;
+  }
+
   if (!dealId) throw new Error('Failed to create deal (no id returned)');
 
   if (input.skipOrderRecord) {
@@ -236,7 +287,7 @@ export async function createOrderDeal(
   }
 
   // 5) Prepare order payload
-  const orderPayload: any = {
+  const orderPayload: Record<string, unknown> = {
     account_id: ctx.accountId,
     contact_id: input.contactId,
     deal_id: dealId,
@@ -251,7 +302,7 @@ export async function createOrderDeal(
   };
 
   // 6) Upsert or insert order
-  let orderRecord: any = null;
+  let orderRecord: Record<string, unknown> | null = null;
   if (externalReference) {
     try {
       const { data: upserted, error: upsertErr } = await supabase
@@ -299,7 +350,7 @@ export async function createOrderDeal(
     pipelineId: pipeline.id,
     stageId: stage.id,
     tagName,
-    orderId: orderRecord?.id,
+    orderId: (orderRecord?.id as string | undefined),
     orderAlreadyExisted: false,
   };
 }

@@ -189,6 +189,48 @@ describe('createOrderDeal', () => {
     expect(tables.contact_tags).toHaveLength(1);
   });
 
+  it('atualiza deal aberto existente para a conversa em vez de duplicar', async () => {
+    const tables = seededTables();
+    // Deal preexistente aberto criado pelo webhook (ensureAutoDealForConversation) com valor 0
+    tables.deals = [
+      {
+        id: 'deal-existing-1',
+        account_id: 'acc',
+        user_id: 'user',
+        pipeline_id: 'pipe',
+        stage_id: 'novo',
+        contact_id: 'contact-1',
+        conversation_id: 'conv-1',
+        title: 'Pedido - Maria',
+        value: 0,
+        status: 'open',
+      },
+    ];
+
+    const res = await createOrderDeal(fakeDb(tables), ctx, {
+      ...input,
+      skipOrderRecord: true,
+    });
+
+    expect(res.dealId).toBe('deal-existing-1');
+    expect(tables.deals).toHaveLength(1);
+    expect(tables.deals[0]).toMatchObject({
+      id: 'deal-existing-1',
+      value: 33.5,
+      title: 'Pedido - Maria',
+      stage_id: 'novo',
+    });
+  });
+
+  it('é idempotente mesmo com skipOrderRecord=true (como no Flow custom_action)', async () => {
+    const tables = seededTables();
+    const first = await createOrderDeal(fakeDb(tables), ctx, { ...input, skipOrderRecord: true });
+    const second = await createOrderDeal(fakeDb(tables), ctx, { ...input, skipOrderRecord: true });
+
+    expect(second.dealId).toBe(first.dealId);
+    expect(tables.deals).toHaveLength(1);
+  });
+
   it('falha com mensagem clara quando o pipeline não existe', async () => {
     const tables = seededTables();
     tables.pipelines = [];
