@@ -12,6 +12,9 @@ import {
   TEMPLATE_HORARIO_FUNCIONAMENTO,
   TEMPLATE_FORMAS_PAGAMENTO,
 } from '@/lib/orders/delivery-templates'
+import { hasOrderIntent } from '@/lib/orders/text-order-parser'
+
+export { hasOrderIntent }
 
 export interface FastPathMatch {
   matched: boolean
@@ -37,6 +40,12 @@ function matchesPatterns(text: string, patterns: string[]): boolean {
  */
 export function checkZeroTokenMatch(messageText: string): FastPathMatch {
   if (!messageText || messageText.trim().length === 0) {
+    return { matched: false, response: null }
+  }
+
+  // Se a mensagem contiver indicativos de pedido, NÃO dispara o fast-path!
+  // Permite que o processador de pedidos trate a mensagem adequadamente.
+  if (hasOrderIntent(messageText)) {
     return { matched: false, response: null }
   }
 

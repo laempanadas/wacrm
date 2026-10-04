@@ -3,18 +3,15 @@
  *
  * Orquestrador que:
  *  1) cria o deal no CRM (createOrderDeal) com paidOnline = false;
- *  2) chama o endpoint POST /api/payments/mercado-pago passando externalReference = dealId;
- *  3) em caso de falha na criação do link, anota o deal e retorna erro ao chamador.
- *
- * Requisitos:
- * - createOrderDeal exportado em src/lib/orders/create-order.ts
- * - Variável de ambiente NEXT_PUBLIC_APP_BASE_URL ou NEXT_PUBLIC_VERCEL_URL apontando para a aplicação
- * - Endpoint /api/payments/mercado-pago existente e capaz de aceitar externalReference
+ *  2) chama diretamente createPaymentLink do Mercado Pago passando externalReference = dealId;
+ *  3) grava o pedido na tabela 'orders' com deal_id e preference_id;
+ *  4) em caso de falha na criação do link, anota o deal e retorna erro ao chamador.
  */
 
 import { createClient } from '@supabase/supabase-js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createOrderDeal } from './create-order';
+import { createPaymentLink, isMercadoPagoConfigured } from '@/lib/payments/mercado-pago';
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
@@ -44,7 +41,7 @@ export interface CreateOrderWithMpResult {
 }
 
 /**
- * Orquestra a criação do deal e do link Mercado Pago.
+ * Orquestra a criação do deal e do link Mercado Pago de forma direta e resiliente.
  * ctx: { accountId, userId }
  */
 export async function createOrderWithMercadoPago(
@@ -56,9 +53,11 @@ export async function createOrderWithMercadoPago(
 
   try {
     // calcula total
-    const total = input.items.reduce((s, it) => s + (it.unitPrice || 0) * (it.quantity || 0), 0);
+    const total = Number(
+      input.items.reduce((s, it) => s + (it.unitPrice || 0) * (it.quantity || 0), 0).toFixed(2)
+    );
 
-    // 1) cria o deal no CRM (paidOnline = false)
+    // 1) cria o deal no CRM (paidOnline = false) na etapa "Novo Pedido"
     const createInput = {
       contactId: input.contactId,
       customerName: input.customerName,
@@ -73,70 +72,76 @@ export async function createOrderWithMercadoPago(
     const createRes = await createOrderDeal(admin, ctx, createInput);
     dealId = createRes.dealId;
 
-    // 2) chama endpoint interno de pagamentos para gerar link
-    const base =
-      process.env.NEXT_PUBLIC_APP_BASE_URL ||
-      process.env.NEXT_PUBLIC_VERCEL_URL ||
-      'http://localhost:3000';
-    const paymentEndpoint = `${base.replace(/\/$/, '')}/api/payments/mercado-pago`;
-
-    const resp = await fetch(paymentEndpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        items: input.items.map((it) => ({
-          title: it.title,
-          quantity: it.quantity,
-          unitPrice: it.unitPrice,
-          description: it.description,
-        })),
-        externalReference: dealId,
-        payerName: input.customerName,
-        payerPhone: input.payerPhone,
-        deliveryKind: input.deliveryKind,
-        deliveryAddress: input.deliveryAddress,
-        contactId: input.contactId,
-      }),
-    });
-
-    const body = await resp.json().catch(() => null);
-
-    if (!resp.ok || !body || !body.paymentUrl) {
-      // registra nota no deal para rastrear o problema
-      try {
-        if (dealId) {
-          await admin
-            .from('deals')
-            .update({
-              notes:
-                (createInput.customerName || '') +
-                '\n\n[Erro ao gerar link MP] ' +
-                (body?.error || 'sem resposta'),
-            })
-            .eq('id', dealId);
-        }
-      } catch (e) {
-        console.error('Falha ao atualizar notes do deal após erro MP', e);
-      }
-
+    if (!isMercadoPagoConfigured()) {
       return {
         ok: false,
         dealId,
-        error: body?.error || 'Erro ao criar link de pagamento no Mercado Pago',
+        error: 'Mercado Pago não configurado. Adicione MP_ACCESS_TOKEN nas variáveis de ambiente.',
       };
     }
 
-    // Sucesso
+    // 2) Cria o link de pagamento no Mercado Pago direto (sem loopback HTTP)
+    const paymentResult = await createPaymentLink({
+      items: input.items.map((it) => ({
+        title: it.title,
+        quantity: it.quantity,
+        unitPrice: it.unitPrice,
+        description: it.description,
+      })),
+      externalReference: dealId,
+      payerName: input.customerName,
+      payerPhone: input.payerPhone,
+      deliveryKind: input.deliveryKind,
+      deliveryAddress: input.deliveryAddress,
+    });
+
+    if (!paymentResult.ok || !paymentResult.paymentUrl) {
+      if (dealId) {
+        await admin
+          .from('deals')
+          .update({
+            notes: `${input.customerName || ''}\n\n[Erro ao gerar link MP] Falha ao criar preferência`,
+          })
+          .eq('id', dealId);
+      }
+      return {
+        ok: false,
+        dealId,
+        error: 'Erro ao criar link de pagamento no Mercado Pago',
+      };
+    }
+
+    // 3) Grava na tabela orders vinculada ao deal
+    try {
+      await admin.from('orders').insert({
+        account_id: ctx.accountId,
+        contact_id: input.contactId,
+        deal_id: dealId,
+        external_reference: dealId,
+        preference_id: paymentResult.preferenceId,
+        payment_url: paymentResult.paymentUrl,
+        total,
+        items: input.items,
+        delivery_address: input.deliveryAddress || '',
+        payer_phone: input.payerPhone || '',
+        payer_name: input.customerName,
+        status: 'pending',
+      });
+    } catch (orderErr) {
+      console.error('[createOrderWithMercadoPago] Erro ao gravar order:', orderErr);
+    }
+
+    // 4) Sucesso
     return {
       ok: true,
       dealId,
-      link_mercado_pago: body.paymentUrl,
-      preferenceId: body.preferenceId,
+      link_mercado_pago: paymentResult.paymentUrl,
+      preferenceId: paymentResult.preferenceId,
     };
-  } catch (err: any) {
+  } catch (err: unknown) {
     // em caso de erro inesperado, registra no deal se tivermos dealId
     try {
-      const message = err?.message ?? String(err);
+      const message = err instanceof Error ? err.message : String(err);
       if (typeof dealId === 'string' && dealId.length > 0) {
         await admin
           .from('deals')
@@ -151,6 +156,6 @@ export async function createOrderWithMercadoPago(
       console.error('Erro ao anotar deal em catch', e);
     }
 
-    return { ok: false, error: err?.message ?? String(err) };
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }

@@ -13,6 +13,8 @@ import { dispatchWebhookEvent } from '@/lib/webhooks/deliver'
 import { createPaymentLink } from '@/lib/payments/mercado-pago'
 import { createDealForOrder } from '@/lib/orders/create-order'
 import { ensureAutoDealForConversation } from '@/lib/deals/auto-deal-lifecycle'
+import { hasOrderIntent } from '@/lib/orders/text-order-parser'
+import { processFreeTextOrderInbound } from '@/lib/orders/text-order-flow'
 import {
   handleTemplateWebhookChange,
   isTemplateWebhookField,
@@ -566,12 +568,17 @@ async function extractTotalFromLastBotMessage(
   for (const msg of botMessages) {
     const text = msg.content_text || ''
 
-    // Regex: procura exatamente [TOTAL:] seguido de números e ponto decimal
+    // Regex: procura [TOTAL:] ou "Total: R$ ..."
     const match = text.match(/\[TOTAL:([\d.]+)\]/i)
-
     if (match) {
       const total = parseFloat(match[1])  // converte "140.00" → 140
       if (total > 0) return total          // retorna se for um valor válido
+    }
+
+    const matchBr = text.match(/Total:\s*\*?R\$\s*([\d.,]+)\*?/i)
+    if (matchBr) {
+      const total = parseCurrencyString(matchBr[1])
+      if (total > 0) return total
     }
   }
 
@@ -839,12 +846,52 @@ async function processMessage(
   const siteOrder = parseWebsiteOrder(contentText || '')
 
   // ============================================================
+  // 🥟 PEDIDO POR TEXTO LIVRE NO WHATSAPP
+  // ============================================================
+  if (!order && !siteOrder && (contentText || message.text?.body)) {
+    try {
+      const textOrderResult = await processFreeTextOrderInbound({
+        supabase: supabaseAdmin(),
+        accountId,
+        userId: configOwnerUserId,
+        contactRecord: {
+          id: contactRecord.id,
+          name: contactRecord.name,
+          phone: senderPhone,
+        },
+        contactName: contactRecord.name || contactName,
+        senderPhone,
+        conversationId: conversation.id,
+        inboundText: contentText ?? message.text?.body ?? '',
+        phoneNumberId,
+        accessToken,
+      })
+
+      if (textOrderResult.handled) {
+        console.log('[webhook] Mensagem processada pelo fluxo de pedido por texto livre:', textOrderResult.outcome)
+
+        await dispatchWebhookEvent(supabaseAdmin(), accountId, 'message.received', {
+          conversation_id: conversation.id,
+          contact_id: contactRecord.id,
+          whatsapp_message_id: message.id,
+          content_type: contentType,
+          text: contentText,
+        })
+
+        return
+      }
+    } catch (err) {
+      console.error('[webhook] Erro no fluxo de pedido por texto livre:', err)
+    }
+  }
+
+  // ============================================================
   // 🤖 AUTOMAÇÃO: CRIAR DEAL AUTOMATICAMENTE
   // ============================================================
   // Garante que existe um deal aberto para a conversa quando é mensagem comum.
-  // Pedidos de catálogo (order) e pedidos do site (siteOrder) gerenciam seus
+  // Pedidos de catálogo (order), site (siteOrder) e texto livre gerenciam seus
   // próprios deals com os dados completos (itens, total, endereço).
-  if (!order && !siteOrder) {
+  if (!order && !siteOrder && !hasOrderIntent(contentText || '')) {
     try {
       await ensureAutoDealForConversation(supabaseAdmin(), {
         accountId,

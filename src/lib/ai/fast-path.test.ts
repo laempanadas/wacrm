@@ -105,6 +105,13 @@ describe('fast-path zero-token matcher', () => {
       expect(result.response).toBeNull()
     })
 
+    it('should not match orders even if they start with greetings', () => {
+      expect(checkZeroTokenMatch('boa noite, quero 2 de carne e 1 de queijo').matched).toBe(false)
+      expect(checkZeroTokenMatch('oi, manda 2 carne e 1 coca zero').matched).toBe(false)
+      expect(checkZeroTokenMatch('ola me ve 3 calabresa').matched).toBe(false)
+      expect(checkZeroTokenMatch('2 carne, 2 calabresa, 1 coca zero lata').matched).toBe(false)
+    })
+
     it('should not match empty string', () => {
       const result = checkZeroTokenMatch('')
       expect(result.matched).toBe(false)
