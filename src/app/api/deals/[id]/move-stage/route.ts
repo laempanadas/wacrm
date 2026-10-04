@@ -1,8 +1,12 @@
-import { NextResponse } from 'next/server'
-import { requireRole, toErrorResponse } from '@/lib/auth/account'
-import { supabaseAdmin } from '@/lib/automations/admin-client'
-import { moveDealToStage, PIPELINE_STAGES, type PipelineStage } from '@/lib/orders/pipeline-stages'
-import { sendStageNotification } from '@/lib/deals/stage-notifications'
+import { NextResponse } from 'next/server';
+import { requireRole, toErrorResponse } from '@/lib/auth/account';
+import { supabaseAdmin } from '@/lib/automations/admin-client';
+import {
+  moveDealToStage,
+  PIPELINE_STAGES,
+  type PipelineStage,
+} from '@/lib/orders/pipeline-stages';
+import { sendStageNotification } from '@/lib/deals/stage-notifications';
 
 /**
  * POST /api/deals/[id]/move-stage
@@ -17,31 +21,40 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id: dealId } = await params
-    const ctx = await requireRole('agent')
-    const admin = supabaseAdmin()
+    const { id: dealId } = await params;
+    const ctx = await requireRole('agent');
+    const admin = supabaseAdmin();
 
-    const body = (await request.json().catch(() => null)) as { stage?: unknown } | null
-    const targetStage = body?.stage as string | undefined
+    const body = (await request.json().catch(() => null)) as {
+      stage?: unknown;
+    } | null;
+    const targetStage = body?.stage as string | undefined;
 
-    if (!targetStage || !Object.values(PIPELINE_STAGES).includes(targetStage as PipelineStage)) {
+    if (
+      !targetStage ||
+      !Object.values(PIPELINE_STAGES).includes(targetStage as PipelineStage)
+    ) {
       return NextResponse.json(
-        { error: 'Invalid stage. Valid stages: ' + Object.values(PIPELINE_STAGES).join(', ') },
+        {
+          error:
+            'Invalid stage. Valid stages: ' +
+            Object.values(PIPELINE_STAGES).join(', '),
+        },
         { status: 400 }
-      )
+      );
     }
 
     const result = await moveDealToStage(admin, {
       accountId: ctx.accountId,
       dealId,
       targetStage: targetStage as PipelineStage,
-    })
+    });
 
     if (!result.moved) {
       return NextResponse.json(
         { error: `Could not move deal: ${result.reason}` },
         { status: 400 }
-      )
+      );
     }
 
     // Enviar notificação automática no WhatsApp (best-effort)
@@ -50,7 +63,7 @@ export async function POST(
         .from('deals')
         .select('contact_id')
         .eq('id', dealId)
-        .maybeSingle()
+        .maybeSingle();
 
       if (deal?.contact_id) {
         await sendStageNotification({
@@ -59,14 +72,14 @@ export async function POST(
           dealId,
           contactId: deal.contact_id,
           newStage: targetStage as PipelineStage,
-        })
+        });
       }
     } catch (err) {
-      console.warn('[move-stage] notification failed (non-blocking):', err)
+      console.warn('[move-stage] notification failed (non-blocking):', err);
     }
 
-    return NextResponse.json({ ok: true, moved: true, stage: targetStage })
+    return NextResponse.json({ ok: true, moved: true, stage: targetStage });
   } catch (err) {
-    return toErrorResponse(err)
+    return toErrorResponse(err);
   }
 }

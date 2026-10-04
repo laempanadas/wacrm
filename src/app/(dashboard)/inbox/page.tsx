@@ -1,30 +1,35 @@
-"use client";
+'use client';
 
-import { useState, useCallback, useEffect, useRef } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
+import { useState, useCallback, useEffect, useRef } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { createClient } from '@/lib/supabase/client';
 import {
   CONVERSATION_SELECT,
   normalizeConversation,
-} from "@/lib/inbox/conversations";
-import type { Conversation, Message, Contact, ConversationStatus } from "@/types";
-import { useRealtime } from "@/hooks/use-realtime";
-import { ConversationList } from "@/components/inbox/conversation-list";
-import { MessageThread } from "@/components/inbox/message-thread";
-import { ContactSidebar } from "@/components/inbox/contact-sidebar";
-import { useAuth } from "@/hooks/use-auth"; // <- Consumido corretamente agora
-import { toast } from "sonner";
-import { WifiOff } from "lucide-react";
-import { cn } from "@/lib/utils";
+} from '@/lib/inbox/conversations';
+import type {
+  Conversation,
+  Message,
+  Contact,
+  ConversationStatus,
+} from '@/types';
+import { useRealtime } from '@/hooks/use-realtime';
+import { ConversationList } from '@/components/inbox/conversation-list';
+import { MessageThread } from '@/components/inbox/message-thread';
+import { ContactSidebar } from '@/components/inbox/contact-sidebar';
+import { useAuth } from '@/hooks/use-auth'; // <- Consumido corretamente agora
+import { toast } from 'sonner';
+import { WifiOff } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
 // Remembers the agent's show/hide choice for the desktop contact panel
 // across reloads and sessions (device-scoped, like the theme prefs).
-const CONTACT_PANEL_STORAGE_KEY = "wacrm:inbox:contact-panel-open";
+const CONTACT_PANEL_STORAGE_KEY = 'wacrm:inbox:contact-panel-open';
 
 export default function InboxPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  
+
   // ------------------------------------------------------------------
   // [REFATORAÇÃO - USO DO PROVEDOR GLOBAL]:
   // Consumimos diretamente o estado global que já carregou o perfil
@@ -37,7 +42,7 @@ export default function InboxPage() {
    * dashboard's recent-conversations list so the right thread opens
    * automatically instead of showing the empty center panel.
    */
-  const deepLinkConvId = searchParams.get("c");
+  const deepLinkConvId = searchParams.get('c');
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversation, setActiveConversation] =
@@ -80,7 +85,7 @@ export default function InboxPage() {
   useEffect(() => {
     try {
       const stored = localStorage.getItem(CONTACT_PANEL_STORAGE_KEY);
-      if (stored !== null) setContactPanelOpen(stored === "true");
+      if (stored !== null) setContactPanelOpen(stored === 'true');
     } catch {
       // localStorage can throw in private-browsing / sandboxed contexts.
     }
@@ -136,12 +141,12 @@ export default function InboxPage() {
     try {
       const supabase = createClient();
       const { data, error } = await supabase
-        .from("conversations")
+        .from('conversations')
         .select(CONVERSATION_SELECT)
-        .eq("id", convId)
+        .eq('id', convId)
         .maybeSingle();
       if (error) {
-        console.error("Failed to hydrate conversation:", {
+        console.error('Failed to hydrate conversation:', {
           message: error.message,
           details: error.details,
           hint: error.hint,
@@ -157,7 +162,7 @@ export default function InboxPage() {
           return prev.map((c) =>
             c.id === fetched.id
               ? { ...c, contact: c.contact ?? fetched.contact }
-              : c,
+              : c
           );
         }
         return [fetched, ...prev];
@@ -179,20 +184,20 @@ export default function InboxPage() {
       const supabase = createClient();
       try {
         const { data, error } = await supabase
-          .from("whatsapp_config")
-          .select("status")
-          .eq("account_id", accountId)
+          .from('whatsapp_config')
+          .select('status')
+          .eq('account_id', accountId)
           .maybeSingle();
 
         if (error) {
-          console.error("Failed to check WhatsApp connection:", error);
+          console.error('Failed to check WhatsApp connection:', error);
           setWhatsappConnected(false);
           return;
         }
 
-        setWhatsappConnected(data?.status === "connected");
+        setWhatsappConnected(data?.status === 'connected');
       } catch (err) {
-        console.error("Failed to check WhatsApp connection threw:", err);
+        console.error('Failed to check WhatsApp connection threw:', err);
         setWhatsappConnected(false);
       }
     };
@@ -206,16 +211,13 @@ export default function InboxPage() {
       const newMsg = event.new;
       const activeConv = activeConversationRef.current; // <- Usando Ref Estável
 
-      if (event.eventType === "INSERT") {
+      if (event.eventType === 'INSERT') {
         // Add to messages if it belongs to active conversation
-        if (
-          activeConv &&
-          newMsg.conversation_id === activeConv.id
-        ) {
+        if (activeConv && newMsg.conversation_id === activeConv.id) {
           setMessages((prev) => {
             if (prev.some((m) => m.id === newMsg.id)) return prev;
             const withoutOptimistic = prev.filter(
-              (m) => !m.id.startsWith("temp-")
+              (m) => !m.id.startsWith('temp-')
             );
             return [...withoutOptimistic, newMsg];
           });
@@ -227,22 +229,22 @@ export default function InboxPage() {
               c.id === newMsg.conversation_id
                 ? {
                     ...c,
-                    last_message_text: newMsg.content_text ?? "",
+                    last_message_text: newMsg.content_text ?? '',
                     last_message_at: newMsg.created_at,
                     unread_count:
                       activeConv?.id === newMsg.conversation_id
                         ? 0
                         : c.unread_count + 1,
                   }
-                : c,
-            ),
+                : c
+            )
           );
         } else {
           hydrateConversation(newMsg.conversation_id);
         }
       }
 
-      if (event.eventType === "UPDATE") {
+      if (event.eventType === 'UPDATE') {
         setMessages((prev) =>
           prev.map((m) => (m.id === newMsg.id ? { ...m, ...newMsg } : m))
         );
@@ -261,7 +263,7 @@ export default function InboxPage() {
       const conv = event.new;
       const activeConv = activeConversationRef.current; // <- Usando Ref Estável
 
-      if (event.eventType === "INSERT") {
+      if (event.eventType === 'INSERT') {
         if (!knownConvIdsRef.current.has(conv.id)) {
           setConversations((prev) => {
             if (prev.some((c) => c.id === conv.id)) return prev;
@@ -271,7 +273,7 @@ export default function InboxPage() {
         }
       }
 
-      if (event.eventType === "UPDATE") {
+      if (event.eventType === 'UPDATE') {
         if (knownConvIdsRef.current.has(conv.id)) {
           const isActive = activeConv?.id === conv.id;
           setConversations((prev) =>
@@ -282,8 +284,8 @@ export default function InboxPage() {
                     ...conv,
                     unread_count: isActive ? 0 : conv.unread_count,
                   }
-                : c,
-            ),
+                : c
+            )
           );
         } else {
           hydrateConversation(conv.id);
@@ -291,9 +293,7 @@ export default function InboxPage() {
 
         // Update active conversation if it changed
         if (activeConv && conv.id === activeConv.id) {
-          setActiveConversation((prev) =>
-            prev ? { ...prev, ...conv } : prev
-          );
+          setActiveConversation((prev) => (prev ? { ...prev, ...conv } : prev));
         }
       }
     },
@@ -302,7 +302,7 @@ export default function InboxPage() {
 
   // Subscribe to realtime.
   const { isConnected } = useRealtime({
-    channelName: "inbox-realtime",
+    channelName: 'inbox-realtime',
     onMessageEvent: handleMessageEvent,
     onConversationEvent: handleConversationEvent,
     enabled: true,
@@ -330,13 +330,13 @@ export default function InboxPage() {
    */
   useEffect(() => {
     const onVisibility = () => {
-      if (document.visibilityState === "visible") {
+      if (document.visibilityState === 'visible') {
         setResyncToken((n) => n + 1);
       }
     };
-    document.addEventListener("visibilitychange", onVisibility);
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
-      document.removeEventListener("visibilitychange", onVisibility);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
   }, []);
 
@@ -365,8 +365,8 @@ export default function InboxPage() {
           if (match.unread_count > 0) {
             setConversations((prev) =>
               prev.map((c) =>
-                c.id === match.id ? { ...c, unread_count: 0 } : c,
-              ),
+                c.id === match.id ? { ...c, unread_count: 0 } : c
+              )
             );
           }
         }
@@ -383,10 +383,8 @@ export default function InboxPage() {
       setMessages([]);
       setConversations((prev) =>
         prev.map((c) =>
-          c.id === conv.id && c.unread_count > 0
-            ? { ...c, unread_count: 0 }
-            : c,
-        ),
+          c.id === conv.id && c.unread_count > 0 ? { ...c, unread_count: 0 } : c
+        )
       );
       autoSelectedForDeepLinkRef.current = conv.id;
       router.replace(`/inbox?c=${conv.id}`, { scroll: false });
@@ -399,9 +397,8 @@ export default function InboxPage() {
     setActiveContact(null);
     setMessages([]);
     autoSelectedForDeepLinkRef.current = null;
-    router.replace("/inbox", { scroll: false });
+    router.replace('/inbox', { scroll: false });
   }, [router]);
-
 
   const handleMessagesLoaded = useCallback((loaded: Message[]) => {
     setMessages(loaded);
@@ -474,8 +471,8 @@ export default function InboxPage() {
         {/* Left panel: Conversation list. */}
         <div
           className={cn(
-            "flex h-full flex-1 lg:flex-none",
-            hasActiveConv ? "hidden lg:flex" : "flex",
+            'flex h-full flex-1 lg:flex-none',
+            hasActiveConv ? 'hidden lg:flex' : 'flex'
           )}
         >
           <ConversationList
@@ -490,8 +487,8 @@ export default function InboxPage() {
         {/* Center panel: Message thread. */}
         <div
           className={cn(
-            "flex h-full min-w-0 flex-1 lg:flex",
-            hasActiveConv ? "flex" : "hidden lg:flex",
+            'flex h-full min-w-0 flex-1 lg:flex',
+            hasActiveConv ? 'flex' : 'hidden lg:flex'
           )}
         >
           <MessageThread

@@ -50,7 +50,10 @@ export async function POST(request: Request) {
     // 1. Garante sessão válida e obtém o contexto da conta
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const accountContext: any = await getCurrentAccount();
-    const accountId = accountContext.accountId || accountContext.id || accountContext.account_id;
+    const accountId =
+      accountContext.accountId ||
+      accountContext.id ||
+      accountContext.account_id;
 
     if (!isMercadoPagoConfigured()) {
       return NextResponse.json(
@@ -76,7 +79,10 @@ export async function POST(request: Request) {
         const title = typeof it.title === 'string' ? it.title.trim() : '';
         const quantity = Number(it.quantity);
         const unitPrice = Number(it.unitPrice);
-        const description = typeof it.description === 'string' ? it.description.trim() : undefined;
+        const description =
+          typeof it.description === 'string'
+            ? it.description.trim()
+            : undefined;
         return { title, quantity, unitPrice, description };
       })
       .filter(
@@ -91,7 +97,8 @@ export async function POST(request: Request) {
     if (!items.length) {
       return NextResponse.json(
         {
-          error: 'Informe ao menos um item válido (title, quantity, unitPrice).',
+          error:
+            'Informe ao menos um item válido (title, quantity, unitPrice).',
         },
         { status: 400 }
       );
@@ -122,12 +129,16 @@ export async function POST(request: Request) {
 
     // Gera um externalReference único e rastreável
     const externalReference =
-      typeof body?.externalReference === 'string' && body.externalReference.trim().length > 0
+      typeof body?.externalReference === 'string' &&
+      body.externalReference.trim().length > 0
         ? body.externalReference.trim()
         : `PED-${Date.now()}-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
 
     // Calcula o valor total do pedido (server-side)
-    const totalAmount = items.reduce((acc, it) => acc + it.quantity * it.unitPrice, 0);
+    const totalAmount = items.reduce(
+      (acc, it) => acc + it.quantity * it.unitPrice,
+      0
+    );
 
     // --- IDENTITY / IDEMPOTENCY: tentar reusar pedido pendente existente quando externalReference for fornecido
     if (externalReference) {
@@ -141,13 +152,18 @@ export async function POST(request: Request) {
           .limit(1);
 
         if (findErr) {
-          console.error('[Mercado Pago] Erro ao consultar orders por external_reference', { externalReference, err: findErr });
+          console.error(
+            '[Mercado Pago] Erro ao consultar orders por external_reference',
+            { externalReference, err: findErr }
+          );
         } else if (existingOrders && existingOrders.length > 0) {
           const existing = existingOrders[0] as any;
           const createdAt = new Date(existing.created_at);
           const ageMin = (Date.now() - createdAt.getTime()) / 60000;
           if (ageMin <= 30 && existing.preference_id && existing.payment_url) {
-            console.log(`[Mercado Pago] Reutilizando preferência existente para externalReference=${externalReference}, orderId=${existing.id}`);
+            console.log(
+              `[Mercado Pago] Reutilizando preferência existente para externalReference=${externalReference}, orderId=${existing.id}`
+            );
             // Retornar no mesmo formato que o cliente espera (compatível)
             return NextResponse.json({
               ok: true,
@@ -159,7 +175,10 @@ export async function POST(request: Request) {
           }
         }
       } catch (qe) {
-        console.error('[Mercado Pago] Falha ao verificar order existente', { externalReference, err: qe });
+        console.error('[Mercado Pago] Falha ao verificar order existente', {
+          externalReference,
+          err: qe,
+        });
         // Continua — fallback é criar nova preferência
       }
     }
@@ -195,15 +214,26 @@ export async function POST(request: Request) {
           insertPayload.deal_id = externalReference;
         }
 
-        const { error: insertErr } = await supabaseAdmin().from('orders').insert(insertPayload);
+        const { error: insertErr } = await supabaseAdmin()
+          .from('orders')
+          .insert(insertPayload);
         if (insertErr) {
           // Logamos a falha mas não impedimos a resposta ao cliente (mantemos compatibilidade)
-          console.error('[Mercado Pago] Erro ao gravar pedido na tabela orders:', insertErr, { payload: insertPayload });
+          console.error(
+            '[Mercado Pago] Erro ao gravar pedido na tabela orders:',
+            insertErr,
+            { payload: insertPayload }
+          );
         } else {
-          console.log(`[Mercado Pago] Pedido ${externalReference} gravado com sucesso na tabela orders.`);
+          console.log(
+            `[Mercado Pago] Pedido ${externalReference} gravado com sucesso na tabela orders.`
+          );
         }
       } catch (dbError) {
-        console.error('[Mercado Pago] Erro ao gravar pedido na tabela orders (catch):', dbError);
+        console.error(
+          '[Mercado Pago] Erro ao gravar pedido na tabela orders (catch):',
+          dbError
+        );
       }
     }
 

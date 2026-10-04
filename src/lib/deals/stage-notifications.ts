@@ -8,20 +8,23 @@
  * Máximo de 2 mensagens por pedido (confirmação → entrega).
  */
 
-import type { SupabaseClient } from '@supabase/supabase-js'
-import { engineSendText } from '@/lib/flows/meta-send'
-import { PIPELINE_STAGES, type PipelineStage } from '@/lib/orders/pipeline-stages'
+import type { SupabaseClient } from '@supabase/supabase-js';
+import { engineSendText } from '@/lib/flows/meta-send';
+import {
+  PIPELINE_STAGES,
+  type PipelineStage,
+} from '@/lib/orders/pipeline-stages';
 import {
   TEMPLATE_PEDIDO_NA_COZINHA,
   TEMPLATE_SAIU_ENTREGA,
-} from '@/lib/orders/delivery-templates'
+} from '@/lib/orders/delivery-templates';
 
 interface StageNotificationParams {
-  db: SupabaseClient
-  accountId: string
-  dealId: string
-  contactId: string
-  newStage: PipelineStage
+  db: SupabaseClient;
+  accountId: string;
+  dealId: string;
+  contactId: string;
+  newStage: PipelineStage;
 }
 
 /**
@@ -37,21 +40,21 @@ const STAGE_MESSAGES: Record<string, string | null> = {
   [PIPELINE_STAGES.COOKING]: TEMPLATE_PEDIDO_NA_COZINHA,
   [PIPELINE_STAGES.READY]: TEMPLATE_SAIU_ENTREGA,
   [PIPELINE_STAGES.DELIVERED]: null, // Sem mensagem — economiza cobrança
-}
+};
 
 /**
  * Envia notificação automática ao cliente quando deal muda de stage.
  * Best-effort: erros são logados mas não interrompem o fluxo.
  */
 export async function sendStageNotification(
-  params: StageNotificationParams,
+  params: StageNotificationParams
 ): Promise<void> {
-  const { db, accountId, dealId, contactId, newStage } = params
+  const { db, accountId, dealId, contactId, newStage } = params;
 
-  const message = STAGE_MESSAGES[newStage]
+  const message = STAGE_MESSAGES[newStage];
   if (!message) {
     // Stage sem notificação configurada
-    return
+    return;
   }
 
   try {
@@ -63,14 +66,14 @@ export async function sendStageNotification(
       .eq('contact_id', contactId)
       .order('updated_at', { ascending: false })
       .limit(1)
-      .maybeSingle()
+      .maybeSingle();
 
     if (convErr || !conversation) {
       console.warn(
         '[stage-notifications] no active conversation for contact:',
         contactId
-      )
-      return
+      );
+      return;
     }
 
     // Envia mensagem na conversa ativa
@@ -80,15 +83,15 @@ export async function sendStageNotification(
       conversationId: conversation.id,
       contactId,
       text: message,
-    })
+    });
 
     console.log('[stage-notifications] sent for stage:', {
       dealId,
       stage: newStage,
       conversationId: conversation.id,
-    })
+    });
   } catch (err) {
-    console.error('[stage-notifications] failed to send:', err)
+    console.error('[stage-notifications] failed to send:', err);
     // Non-blocking: continue with deal movement
   }
 }

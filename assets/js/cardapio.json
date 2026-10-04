@@ -11,7 +11,7 @@
       "id": "emp_romeu",
       "nome": "Empanada Romeu e Julieta",
       "descricao": "Massa recheada com goiabada cascão e muçarela.",
-      "preco": 14.50,
+      "preco": 14.5,
       "imagem": "assets/js/img/ROMEU.webp",
       "categoriaId": "doce"
     },
@@ -19,7 +19,7 @@
       "id": "emp_queijo_tomate",
       "nome": "Empanada de Queijo, Tomate, Manjericão e Orégano",
       "descricao": "Leveza do estilo caprese com queijo, tomates frescos picados e manjericão aromático.",
-      "preco": 14.00,
+      "preco": 14.0,
       "imagem": "assets/js/img/QUEIJO-TOMATE.webp",
       "categoriaId": "salgada"
     },
@@ -27,7 +27,7 @@
       "id": "emp_queijo_cebola",
       "nome": "Empanada de Queijo com Cebola Caramelizada",
       "descricao": "Contraste agridoce do queijo derretido com cebolas lentamente douradas.",
-      "preco": 14.00,
+      "preco": 14.0,
       "imagem": "assets/js/img/QUEIJO-CEBOLA.webp",
       "categoriaId": "salgada"
     },
@@ -35,7 +35,7 @@
       "id": "emp_palmito",
       "nome": "Empanada de Palmito",
       "descricao": "Recheio cremoso com pedaços macios de palmito pupunha.",
-      "preco": 14.00,
+      "preco": 14.0,
       "imagem": "assets/js/img/PALMITO.webp",
       "categoriaId": "salgada"
     },
@@ -43,7 +43,7 @@
       "id": "emp_hamburguer",
       "nome": "Empanada de Carne com Ovos",
       "descricao": "Tradicional recheio de carne bovina moída com ovos cozidos picados.",
-      "preco": 14.00,
+      "preco": 14.0,
       "imagem": "assets/js/img/CARNE.webp",
       "categoriaId": "salgada"
     },
@@ -51,7 +51,7 @@
       "id": "emp_ Frango com Espinafre e Cheddar",
       "nome": "Empanada de Frango com Espinafre e Cheddar",
       "descricao": "Combinação suave de peito de frango, folhas frescas de espinafre e cheddar.",
-      "preco": 14.00,
+      "preco": 14.0,
       "imagem": "assets/js/img/FRANGO.webp",
       "categoriaId": "salgada"
     },
@@ -59,7 +59,7 @@
       "id": "emp_Espinafre com Ricota e Tomate Seco",
       "nome": "Empanada de Espinafre com Ricota e Tomate Seco",
       "descricao": "Recheio vegetariano leve de espinafre fresco, ricota macia e tomate seco.",
-      "preco": 14.00,
+      "preco": 14.0,
       "imagem": "assets/js/img/ESPINAFRE-RICOTA.webp",
       "categoriaId": "salgada"
     },
@@ -67,7 +67,7 @@
       "id": "emp_Escarola com Queijo",
       "nome": "Empanada de Escarola com Queijo",
       "descricao": "Escarola refogada no alho e azeite com uma generosa camada de queijo.",
-      "preco": 14.00,
+      "preco": 14.0,
       "imagem": "assets/js/img/ESCAROLA.webp",
       "categoriaId": "salgada"
     },
@@ -75,7 +75,7 @@
       "id": "emp_Bacon Cheeseburger",
       "nome": "Empanada Bacon Cheeseburger",
       "descricao": "Hambúrguer bovino, queijo derretido e pedaços crocantes de bacon frito.",
-      "preco": 14.00,
+      "preco": 14.0,
       "imagem": "assets/js/img/CHEESBACON.webp",
       "categoriaId": "salgada"
     },
@@ -83,7 +83,7 @@
       "id": "empcalabresa",
       "nome": "Empanada de Calabresa com Cream Cheese",
       "descricao": "Calabresa moída de alta qualidade unida à cremosidade do cream cheese.",
-      "preco": 14.00,
+      "preco": 14.0,
       "imagem": "assets/js/img/CALABRESA.webp",
       "categoriaId": "salgada"
     },
@@ -91,7 +91,7 @@
       "id": "empchocolate",
       "nome": "Empanada de Chocolate ao Leite com Morango",
       "descricao": "Saborosa combinação de chocolate ao leite cremoso com pedaços de morango.",
-      "preco": 16.90,
+      "preco": 16.9,
       "imagem": "assets/js/img/CHOCOLATE.webp",
       "categoriaId": "doce"
     },
@@ -99,7 +99,7 @@
       "id": "emp_Atum",
       "nome": "Empanada de Atum com Queijo",
       "descricao": "Atum sólido conservado mesclado com queijo muçarela derretido.",
-      "preco": 14.00,
+      "preco": 14.0,
       "imagem": "assets/js/img/ATUM.webp",
       "categoriaId": "salgada"
     },
@@ -107,7 +107,7 @@
       "id": "combo_coca",
       "nome": "Combo Coca-Cola",
       "descricao": "Contém 4 Empanadas à sua escolha + 1 Refrigerante Coca-Cola de 600ml.",
-      "preco": 62.90,
+      "preco": 62.9,
       "imagem": "assets/js/img/empanada_combo_coca_600ml.webp",
       "categoriaId": "combo"
     },
@@ -115,7 +115,7 @@
       "id": "combo_familia",
       "nome": "Combo Família (8 Empanadas Assadas)",
       "descricao": "8 empanadas assadas à sua escolha para dividir com quem você gosta.",
-      "preco": 102.00,
+      "preco": 102.0,
       "imagem": "assets/js/img/empanadas_combo_8.webp",
       "categoriaId": "combo"
     },
@@ -123,7 +123,7 @@
       "id": "combo_quatro",
       "nome": "Combo 4 Empanadas",
       "descricao": "Leve 4 empanadas assadas de qualquer sabor com preço promocional.",
-      "preco": 52.90,
+      "preco": 52.9,
       "imagem": "assets/js/img/empanadas_combo_4.webp",
       "categoriaId": "combo"
     },
@@ -131,7 +131,7 @@
       "id": "combo_quatro_ovomaltine",
       "nome": "Combo 4 Empanadas + Tortinha de Ovomaltine",
       "descricao": "Leve 4 empanadas assadas de qualquer sabor com preço promocional + Tortinha de Ovomaltine.",
-      "preco": 69.00,
+      "preco": 69.0,
       "imagem": "assets/js/img/COMBO_4_OVOMALTINE.webp",
       "categoriaId": "combo"
     },
@@ -139,7 +139,7 @@
       "id": "combo_quatro_cheesecake",
       "nome": "Combo 4 Empanadas + Cheesecake de Frutas Vermelhas",
       "descricao": "Leve 4 empanadas assadas de qualquer sabor com preço promocional + Cheesecake de Frutas Vermelhas.",
-      "preco": 69.00,
+      "preco": 69.0,
       "imagem": "assets/js/img/COMBO-4-EMPANADAS-CHEESECAKE-_1_.webp",
       "categoriaId": "combo"
     },
@@ -147,7 +147,7 @@
       "id": "beb_coca_original_350",
       "nome": "Coca-Cola Original 350ml",
       "descricao": "Lata de 350ml de Coca-Cola sabor original gelada.",
-      "preco": 8.50,
+      "preco": 8.5,
       "imagem": "assets/js/img/coca-cola-lata-350ml.avif",
       "categoriaId": "bebida"
     },
@@ -155,7 +155,7 @@
       "id": "beb_coca_zero_350",
       "nome": "Coca-Cola sem Açúcar 350ml",
       "descricao": "Lata de 350ml de Coca-Cola sabor zero açúcar gelada.",
-      "preco": 8.50,
+      "preco": 8.5,
       "imagem": "assets/js/img/cocacolazero.avif",
       "categoriaId": "bebida"
     },
@@ -163,7 +163,7 @@
       "id": "beb_coca_600",
       "nome": "Coca-Cola Original 600ml",
       "descricao": "Garrafa de 600ml ideal para acompanhar sua empanada.",
-      "preco": 15.00,
+      "preco": 15.0,
       "imagem": "https://images.unsplash.com/photo-1622483767028-3f66f32aef97?w=500&auto=format&fit=crop&q=60",
       "categoriaId": "bebida"
     },
@@ -171,7 +171,7 @@
       "id": "beb_coca_zero_600",
       "nome": "Coca-Cola Zero 600ml",
       "descricao": "Garrafa de 600ml de Coca-Cola sabor zero açúcar.",
-      "preco": 15.00,
+      "preco": 15.0,
       "imagem": "https://images.unsplash.com/photo-1622483767028-3f66f32aef97?w=500&auto=format&fit=crop&q=60",
       "categoriaId": "bebida"
     },
@@ -179,7 +179,7 @@
       "id": "beb_coca_2l",
       "nome": "Coca-Cola 2L",
       "descricao": "Tamanho família. Garrafa de 2 litros.",
-      "preco": 25.00,
+      "preco": 25.0,
       "imagem": "https://images.unsplash.com/photo-1622483767028-3f66f32aef97?w=500&auto=format&fit=crop&q=60",
       "categoriaId": "bebida"
     },
@@ -187,7 +187,7 @@
       "id": "beb_coca_zero_2l",
       "nome": "Coca-Cola zero 2L",
       "descricao": "Tamanho família. Garrafa de 2 litros.",
-      "preco": 25.00,
+      "preco": 25.0,
       "imagem": "assets/js/img/coca-cola-zero-2l.avif",
       "categoriaId": "bebida"
     },
@@ -195,7 +195,7 @@
       "id": "vin_la_plata",
       "nome": "Vinho La Plata Branco Argentino 750ml",
       "descricao": "Vinho argentino branco jovem e refrescante, ideal para empanadas vegetarianas.",
-      "preco": 55.90,
+      "preco": 55.9,
       "imagem": "https://images.unsplash.com/photo-1510812431401-41d2bd2722f3?w=500&auto=format&fit=crop&q=60",
       "categoriaId": "vinho"
     },
@@ -203,7 +203,7 @@
       "id": "vin_san_telmo",
       "nome": "Vinho Tinto Argentino San Telmo Malbec 750ml",
       "descricao": "Clássico Malbec de Mendoza de aroma frutado, perfeito com empanada de carne ou costela.",
-      "preco": 79.90,
+      "preco": 79.9,
       "imagem": "https://images.unsplash.com/photo-1510812431401-41d2bd2722f3?w=500&auto=format&fit=crop&q=60",
       "categoriaId": "vinho"
     },
@@ -211,7 +211,7 @@
       "id": "vin_cavic",
       "nome": "Vinho Tinto Seco Argentino Cavic 750ml",
       "descricao": "Vinho de mesa tinto seco argentino, fácil de beber no dia a dia.",
-      "preco": 40.00,
+      "preco": 40.0,
       "imagem": "https://images.unsplash.com/photo-1510812431401-41d2bd2722f3?w=500&auto=format&fit=crop&q=60",
       "categoriaId": "vinho"
     }

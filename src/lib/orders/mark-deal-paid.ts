@@ -1,13 +1,29 @@
 // src/lib/orders/mark-deal-paid.ts
 
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { ORDERS_PAID_STAGE_NAME } from './create-order';
+import {
+  ORDERS_PAID_STAGE_NAME,
+  markContactPaymentConfirmed,
+  TAG_CONFIRMADO,
+  TAG_AGUARDANDO,
+  TAG_HUMANO,
+} from './create-order';
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export { TAG_CONFIRMADO, TAG_AGUARDANDO, TAG_HUMANO };
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export type MarkDealPaidResult =
   | { moved: true; dealId: string; stageId: string; stageCreated: boolean }
-  | { moved: false; reason: 'invalid_deal_id' | 'deal_not_found' | 'stage_unavailable' | 'update_failed' };
+  | {
+      moved: false;
+      reason:
+        | 'invalid_deal_id'
+        | 'deal_not_found'
+        | 'stage_unavailable'
+        | 'update_failed';
+    };
 
 /**
  * Moves an order's deal to the "Pago" stage of its pipeline and marks it
@@ -20,11 +36,12 @@ export async function markDealPaid(
 ): Promise<MarkDealPaidResult> {
   // orders.deal_id isn't always a deal id (the payment route stores the
   // external reference there), so don't send junk to a uuid column.
-  if (!UUID_RE.test(args.dealId)) return { moved: false, reason: 'invalid_deal_id' };
+  if (!UUID_RE.test(args.dealId))
+    return { moved: false, reason: 'invalid_deal_id' };
 
   const { data: deal } = await db
     .from('deals')
-    .select('id, pipeline_id')
+    .select('id, pipeline_id, contact_id, user_id')
     .eq('id', args.dealId)
     .eq('account_id', args.accountId)
     .maybeSingle();
@@ -36,12 +53,16 @@ export async function markDealPaid(
     .eq('pipeline_id', deal.pipeline_id);
 
   let stageId = (stages ?? []).find(
-    (s: { name: string }) => s.name.trim().toLowerCase() === ORDERS_PAID_STAGE_NAME.toLowerCase()
+    (s: { name: string }) =>
+      s.name.trim().toLowerCase() === ORDERS_PAID_STAGE_NAME.toLowerCase()
   )?.id as string | undefined;
   let stageCreated = false;
 
   if (!stageId) {
-    const lastPosition = Math.max(-1, ...(stages ?? []).map((s: { position: number }) => s.position));
+    const lastPosition = Math.max(
+      -1,
+      ...(stages ?? []).map((s: { position: number }) => s.position)
+    );
     const { data: created, error } = await db
       .from('pipeline_stages')
       .insert({
@@ -62,11 +83,30 @@ export async function markDealPaid(
 
   const { error: updateErr } = await db
     .from('deals')
-    .update({ stage_id: stageId, status: 'won', updated_at: new Date().toISOString() })
+    .update({
+      stage_id: stageId,
+      status: 'won',
+      updated_at: new Date().toISOString(),
+    })
     .eq('id', deal.id);
   if (updateErr) {
     console.error('[markDealPaid] Could not update deal:', updateErr);
     return { moved: false, reason: 'update_failed' };
+  }
+
+  if (deal.contact_id) {
+    try {
+      await markContactPaymentConfirmed(
+        db,
+        { accountId: args.accountId, userId: (deal.user_id as string) || '' },
+        deal.contact_id as string
+      );
+    } catch (err) {
+      console.warn(
+        '[markDealPaid] Falha ao atualizar tag de confirmação no contato:',
+        err
+      );
+    }
   }
 
   return { moved: true, dealId: deal.id, stageId, stageCreated };

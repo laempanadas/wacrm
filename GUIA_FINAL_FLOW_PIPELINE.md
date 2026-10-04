@@ -1,6 +1,7 @@
 # 🚀 GUIA PRÁTICO: Implementar Flow → Pipeline Automático
 
 ## ✅ Status Atual
+
 - ✅ Banco de dados: Migration já pronta com `set_var` e `custom_action`
 - ✅ Endpoint `/api/orders`: Já existe e funciona
 - ❌ Engine do Flow: Precisa suportar `custom_action`
@@ -10,6 +11,7 @@
 ---
 
 ## 🎯 Objetivo
+
 **Quando flow terminar → Deal aparece automaticamente no Pipeline**
 
 ---
@@ -19,6 +21,7 @@
 ## 📁 Arquivo: `src/lib/flows/types.ts`
 
 ### Encontre:
+
 ```typescript
 export interface SendMessageNodeConfig {
   text: string;
@@ -43,6 +46,7 @@ export interface CustomActionNodeConfig {
 ```
 
 ### Adicione também (se não existir):
+
 ```typescript
 export interface SetVarNodeConfig {
   /**
@@ -61,26 +65,29 @@ export interface SetVarNodeConfig {
 ## 📁 Arquivo: `src/lib/flows/engine.ts`
 
 ### 2.1 Adicionar Imports
+
 **Encontre:**
+
 ```typescript
 import {
   type CollectInputNodeConfig,
   type ConditionNodeConfig,
   // ... outros tipos
   type KeywordTriggerConfig,
-} from "./types";
+} from './types';
 ```
 
 **Adicione:**
+
 ```typescript
 import {
   type CollectInputNodeConfig,
   type ConditionNodeConfig,
-  type CustomActionNodeConfig,  // ← ADD
-  type SetVarNodeConfig,         // ← ADD
+  type CustomActionNodeConfig, // ← ADD
+  type SetVarNodeConfig, // ← ADD
   // ... outros tipos
   type KeywordTriggerConfig,
-} from "./types";
+} from './types';
 ```
 
 ### 2.2 Adicionar Função de Custom Action
@@ -96,22 +103,17 @@ import {
  */
 async function executeCustomAction(
   db: AdminClient,
-  run: FlowRunRow,
+  run: FlowRunRow
 ): Promise<void> {
   try {
-    const cfg = run.current_node_key 
-      ? (/* get config from node */ {} as unknown as CustomActionNodeConfig)
+    const cfg = run.current_node_key
+      ? /* get config from node */ ({} as unknown as CustomActionNodeConfig)
       : null;
-    
+
     if (!cfg || cfg.action !== 'create_order_deal') return;
 
-    const {
-      nome,
-      total,
-      endereco,
-      delivery_type,
-      payment_method,
-    } = run.vars as Record<string, unknown>;
+    const { nome, total, endereco, delivery_type, payment_method } =
+      run.vars as Record<string, unknown>;
 
     if (!nome || total === undefined || !delivery_type) {
       console.warn('[flows] Missing required order vars');
@@ -130,7 +132,7 @@ async function executeCustomAction(
           deliveryKind: String(delivery_type),
           paymentMethod: payment_method || 'pix',
           total: Number(total),
-          deliveryAddress: 
+          deliveryAddress:
             delivery_type === 'delivery' ? String(endereco) : undefined,
           paidOnline: payment_method === 'mercado_pago',
           conversationId: run.conversation_id,
@@ -140,9 +142,7 @@ async function executeCustomAction(
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(
-        `Order API ${response.status}: ${errorText}`
-      );
+      throw new Error(`Order API ${response.status}: ${errorText}`);
     }
 
     const result = await response.json();
@@ -168,17 +168,17 @@ async function executeCustomAction(
 async function executeSetVar(
   db: AdminClient,
   run: FlowRunRow,
-  node: FlowNodeRow,
-): Promise<{ outcome: "advanced"; node_key: string }> {
+  node: FlowNodeRow
+): Promise<{ outcome: 'advanced'; node_key: string }> {
   const cfg = node.config as unknown as SetVarNodeConfig;
-  
+
   if (cfg.var_key) {
     const newVars = { ...run.vars, [cfg.var_key]: cfg.var_value };
     const { error } = await db
       .from('flow_runs')
       .update({ vars: newVars })
       .eq('id', run.id);
-    
+
     if (!error) {
       run.vars = newVars;
       await logEvent(db, run.id, 'node_entered', node.node_key, {
@@ -187,7 +187,7 @@ async function executeSetVar(
       });
     }
   }
-  
+
   return { outcome: 'advanced', node_key: node.node_key };
 }
 ```
@@ -197,6 +197,7 @@ async function executeSetVar(
 **Encontre a função `advanceFromNodeKey` (por volta da linha 580):**
 
 **Procure por:**
+
 ```typescript
 if (node.node_type === "set_tag") {
   const cfg = node.config as unknown as SetTagNodeConfig;
@@ -211,17 +212,17 @@ if (node.node_type === "set_tag") {
 **ADICIONE DEPOIS:**
 
 ```typescript
-if (node.node_type === "set_var") {
+if (node.node_type === 'set_var') {
   const result = await executeSetVar(db, run, node);
   const advanced = await advanceCurrentNodeKey(
     db,
     run.id,
     run.current_node_key,
-    result.node_key,
+    result.node_key
   );
   if (!advanced) {
-    await logEvent(db, run.id, "error", node.node_key, {
-      reason: "lost_race_during_advance",
+    await logEvent(db, run.id, 'error', node.node_key, {
+      reason: 'lost_race_during_advance',
     });
   }
   const cfg = node.config as unknown as SetVarNodeConfig;
@@ -229,7 +230,7 @@ if (node.node_type === "set_var") {
   continue;
 }
 
-if (node.node_type === "custom_action") {
+if (node.node_type === 'custom_action') {
   await executeCustomAction(db, run);
   const cfg = node.config as unknown as CustomActionNodeConfig;
   currentKey = cfg.next_node_key;
@@ -246,6 +247,7 @@ if (node.node_type === "custom_action") {
 ### 3.1 Adicionar Imports
 
 **Encontre:**
+
 ```typescript
 import type {
   CollectInputNodeConfig,
@@ -257,10 +259,11 @@ import type {
 ```
 
 **Mude para:**
+
 ```typescript
 import type {
   CollectInputNodeConfig,
-  CustomActionNodeConfig,  // ← ADD
+  CustomActionNodeConfig, // ← ADD
   HandoffNodeConfig,
   SendButtonsNodeConfig,
   SendListNodeConfig,
@@ -299,17 +302,20 @@ import type {
 ### 3.3 Atualizar Confirmações
 
 **Para CADA nó de confirmação:**
+
 - `confirm_pix`
 - `confirm_cartao_delivery`
 - `confirm_pagamento_retirada`
 - `confirm_mercado_pago`
 
 **MUDE:**
+
 ```typescript
 next_node_key: 'handoff_pedido',  // ← OLD
 ```
 
 **PARA:**
+
 ```typescript
 next_node_key: 'criar_deal_automatico',  // ← NEW
 ```
@@ -317,6 +323,7 @@ next_node_key: 'criar_deal_automatico',  // ← NEW
 ### 3.4 Exemplo Completo
 
 **Antes:**
+
 ```typescript
 {
   node_key: 'confirm_pix',
@@ -336,6 +343,7 @@ next_node_key: 'criar_deal_automatico',  // ← NEW
 ```
 
 **Depois:**
+
 ```typescript
 {
   node_key: 'confirm_pix',
@@ -372,6 +380,7 @@ next_node_key: 'criar_deal_automatico',  // ← NEW
 ## ⚠️ Pré-requisitos no Banco
 
 **O flow espera:**
+
 1. Pipeline com nome: `"Pedidos Delivery"`
 2. Stage com nome: `"Novo Pedido"` (dentro do pipeline)
 
@@ -383,6 +392,7 @@ next_node_key: 'criar_deal_automatico',  // ← NEW
 4. Adicione stage: `Novo Pedido`
 
 **OU via SQL:**
+
 ```sql
 -- Criar pipeline
 INSERT INTO pipelines (account_id, user_id, name)
@@ -439,13 +449,13 @@ npm run dev
 
 # 🐛 Troubleshooting
 
-| Erro | Causa | Solução |
-|------|-------|---------|
-| **"Pipeline 'Pedidos Delivery' não encontrado"** | Pipeline não existe | Criar pipeline via Dashboard |
-| **"Stage 'Novo Pedido' não encontrado"** | Stage não existe | Criar stage no pipeline |
-| **Deal não aparece** | Custom action falhou silenciosamente | Verificar logs: `[flows]` |
-| **"contactId required"** | `run.contact_id` é null | Verificar integração WhatsApp |
-| **API 400 bad request** | Dados do flow incompletos | Verificar `vars` no log |
+| Erro                                             | Causa                                | Solução                       |
+| ------------------------------------------------ | ------------------------------------ | ----------------------------- |
+| **"Pipeline 'Pedidos Delivery' não encontrado"** | Pipeline não existe                  | Criar pipeline via Dashboard  |
+| **"Stage 'Novo Pedido' não encontrado"**         | Stage não existe                     | Criar stage no pipeline       |
+| **Deal não aparece**                             | Custom action falhou silenciosamente | Verificar logs: `[flows]`     |
+| **"contactId required"**                         | `run.contact_id` é null              | Verificar integração WhatsApp |
+| **API 400 bad request**                          | Dados do flow incompletos            | Verificar `vars` no log       |
 
 ### Debug: Ver Vars do Flow
 
@@ -459,25 +469,30 @@ console.log('[DEBUG] Flow vars:', JSON.stringify(run.vars, null, 2));
 # ✅ Checklist de Implementação
 
 ### Tipos TypeScript
+
 - [ ] Adicionei `CustomActionNodeConfig` em `types.ts`
 - [ ] Adicionei `SetVarNodeConfig` em `types.ts`
 
 ### Engine
+
 - [ ] Importei novos tipos em `engine.ts`
 - [ ] Adicionei `executeCustomAction()` em `engine.ts`
 - [ ] Adicionei `executeSetVar()` em `engine.ts`
 - [ ] Integrei no `advanceFromNodeKey()` loop
 
 ### Flow
+
 - [ ] Importei `CustomActionNodeConfig` em `pedido-empanadas-flow.ts`
 - [ ] Adicionei nó `criar_deal_automatico`
 - [ ] Mudei todos os confirm_* → `next_node_key: 'criar_deal_automatico'`
 
 ### Banco
+
 - [ ] Pipeline "Pedidos Delivery" existe
 - [ ] Stage "Novo Pedido" existe
 
 ### Testes
+
 - [ ] Dev server rodando
 - [ ] Enviei pedido via WhatsApp
 - [ ] Deal aparece no pipeline

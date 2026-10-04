@@ -90,6 +90,7 @@ closeDealAsDelivered(db, { accountId, dealId })
 ```
 
 **Características:**
+
 - ✅ Idempotente: múltiplas mensagens = 1 deal
 - ✅ Best-effort: falhas em criação não interrompem webhook
 - ✅ Busca ciclo de 6 horas (evita deals obsoletos)
@@ -117,18 +118,20 @@ try {
     contactId: contactRecord.id,
     contactName: contactRecord.name || contactName,
     conversationId: conversation.id,
-  })
+  });
 } catch (err) {
-  console.warn('[webhook] auto-deal creation failed (non-blocking):', err)
+  console.warn('[webhook] auto-deal creation failed (non-blocking):', err);
 }
 ```
 
 **Quando executa:**
+
 - ✅ Toda vez que uma mensagem é recebida
 - ✅ Depois dos fluxos (flows) serem processados
 - ✅ Antes de IA responder
 
 **Resultado:**
+
 - Se deal existe → reutiliza
 - Se não existe → cria em "Novo Pedido"
 
@@ -148,10 +151,12 @@ if (dealId) {
 ```
 
 **Quando executa:**
+
 - ✅ Quando Mercado Pago aprova pagamento
 - ✅ Após order.status = 'paid'
 
 **Resultado:**
+
 - ✅ Deal.value atualizado com paidAmount
 - ✅ Deal move para "Na Cozinha" (payment_approved)
 - ✅ Cliente recebe notificação
@@ -183,11 +188,11 @@ const existingDeal = await findActiveConversationDeal(
   db,
   accountId,
   contactId,
-  conversationId,  // ← Chave específica da conversa
-)
+  conversationId // ← Chave específica da conversa
+);
 
 if (existingDeal) {
-  return { dealId: existingDeal.id, isNew: false }
+  return { dealId: existingDeal.id, isNew: false };
 }
 ```
 
@@ -196,23 +201,27 @@ if (existingDeal) {
 ## Cenários Testados
 
 ✅ **Novo cliente, primeira mensagem**
+
 - Deal criado em "Novo Pedido"
 - Título: "Pedido - [nome ou telefone]"
 - Status: open
 - Value: 0
 
 ✅ **Cliente reenvia mensagem 1h depois**
+
 - Deal reutilizado (mesma conversa, 6h recente)
 - Nada criado
 - Value: 0 (até pagamento)
 
 ✅ **Cliente faz pedido e paga**
+
 - Webhook MP recebido
 - Deal.value = 140.50 (paidAmount)
 - Deal move para "Na Cozinha"
 - Order.status = 'payment_approved'
 
 ✅ **Múltiplos clientes simultâneos**
+
 - Cada cliente = seu próprio deal
 - Sem race conditions (conversa_id é única)
 

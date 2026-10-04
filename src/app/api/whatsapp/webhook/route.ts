@@ -1,37 +1,37 @@
-import { NextResponse, after } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
-import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
-import { getCatalogProductNames, getMediaUrl } from '@/lib/whatsapp/meta-api'
-import { productNameFromCardapio } from '@/lib/cardapio/product-names'
-import { normalizePhone } from '@/lib/whatsapp/phone-utils'
-import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe'
-import { verifyMetaWebhookSignature } from '@/lib/whatsapp/webhook-signature'
-import { runAutomationsForTrigger } from '@/lib/automations/engine'
-import { dispatchInboundToFlows } from '@/lib/flows/engine'
-import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply'
-import { dispatchWebhookEvent } from '@/lib/webhooks/deliver'
-import { createPaymentLink } from '@/lib/payments/mercado-pago'
-import { createDealForOrder } from '@/lib/orders/create-order'
-import { ensureAutoDealForConversation } from '@/lib/deals/auto-deal-lifecycle'
-import { hasOrderIntent } from '@/lib/orders/text-order-parser'
-import { processFreeTextOrderInbound } from '@/lib/orders/text-order-flow'
+import { NextResponse, after } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
+import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption';
+import { getCatalogProductNames, getMediaUrl } from '@/lib/whatsapp/meta-api';
+import { productNameFromCardapio } from '@/lib/cardapio/product-names';
+import { normalizePhone } from '@/lib/whatsapp/phone-utils';
+import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe';
+import { verifyMetaWebhookSignature } from '@/lib/whatsapp/webhook-signature';
+import { runAutomationsForTrigger } from '@/lib/automations/engine';
+import { dispatchInboundToFlows } from '@/lib/flows/engine';
+import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply';
+import { dispatchWebhookEvent } from '@/lib/webhooks/deliver';
+import { createPaymentLink } from '@/lib/payments/mercado-pago';
+import { createDealForOrder } from '@/lib/orders/create-order';
+import { ensureAutoDealForConversation } from '@/lib/deals/auto-deal-lifecycle';
+import { hasOrderIntent } from '@/lib/orders/text-order-parser';
+import { processFreeTextOrderInbound } from '@/lib/orders/text-order-flow';
 import {
   handleTemplateWebhookChange,
   isTemplateWebhookField,
-} from '@/lib/whatsapp/template-webhook'
+} from '@/lib/whatsapp/template-webhook';
 
-export const maxDuration = 60
+export const maxDuration = 60;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let _adminClient: any = null
+let _adminClient: any = null;
 function supabaseAdmin() {
   if (!_adminClient) {
     _adminClient = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.SUPABASE_SERVICE_ROLE_KEY!
-    )
+    );
   }
-  return _adminClient
+  return _adminClient;
 }
 
 /**
@@ -53,139 +53,165 @@ async function saveOrderCustomFields(
   accountId: string,
   contactId: string,
   fields: {
-    itens?: string
-    endereco?: string
-    formaPagamento?: string
-    nomeCliente?: string
+    itens?: string;
+    endereco?: string;
+    formaPagamento?: string;
+    nomeCliente?: string;
   }
 ): Promise<void> {
   try {
     // Mapa nome-do-campo → valor, descartando vazios.
-    const byName: Record<string, string> = {}
-    if (fields.itens && fields.itens.trim()) byName['Itens_pedido'] = fields.itens.trim()
-    if (fields.endereco && fields.endereco.trim()) byName['Endereco_entrega'] = fields.endereco.trim()
+    const byName: Record<string, string> = {};
+    if (fields.itens && fields.itens.trim())
+      byName['Itens_pedido'] = fields.itens.trim();
+    if (fields.endereco && fields.endereco.trim())
+      byName['Endereco_entrega'] = fields.endereco.trim();
     if (fields.formaPagamento && fields.formaPagamento.trim())
-      byName['Forma_pagamento'] = fields.formaPagamento.trim()
+      byName['Forma_pagamento'] = fields.formaPagamento.trim();
     if (fields.nomeCliente && fields.nomeCliente.trim())
-      byName['Nome_cliente'] = fields.nomeCliente.trim()
+      byName['Nome_cliente'] = fields.nomeCliente.trim();
 
-    const names = Object.keys(byName)
-    if (names.length === 0) return
+    const names = Object.keys(byName);
+    if (names.length === 0) return;
 
     // Busca os IDs dos campos personalizados pelo nome, dentro da conta.
     const { data: defs, error: defsErr } = await supabase
       .from('custom_fields')
       .select('id, field_name')
       .eq('account_id', accountId)
-      .in('field_name', names)
+      .in('field_name', names);
 
     if (defsErr) {
-      console.error('[custom-fields] Erro ao buscar definições de campos:', defsErr)
-      return
+      console.error(
+        '[custom-fields] Erro ao buscar definições de campos:',
+        defsErr
+      );
+      return;
     }
     if (!defs || defs.length === 0) {
       console.warn(
         '[custom-fields] Nenhum campo personalizado encontrado para:',
         names.join(', ')
-      )
-      return
+      );
+      return;
     }
 
     const rows = defs
-      .filter((d: { id: string; field_name: string }) => byName[d.field_name] !== undefined)
+      .filter(
+        (d: { id: string; field_name: string }) =>
+          byName[d.field_name] !== undefined
+      )
       .map((d: { id: string; field_name: string }) => ({
         contact_id: contactId,
         custom_field_id: d.id,
         value: byName[d.field_name],
-      }))
+      }));
 
-    if (rows.length === 0) return
+    if (rows.length === 0) return;
 
     const { error: upsertErr } = await supabase
       .from('contact_custom_values')
-      .upsert(rows, { onConflict: 'contact_id,custom_field_id' })
+      .upsert(rows, { onConflict: 'contact_id,custom_field_id' });
 
     if (upsertErr) {
-      console.error('[custom-fields] Erro ao gravar valores dos campos:', upsertErr)
-      return
+      console.error(
+        '[custom-fields] Erro ao gravar valores dos campos:',
+        upsertErr
+      );
+      return;
     }
 
     console.log(
       `[custom-fields] Campos preenchidos para contato ${contactId}:`,
       names.join(', ')
-    )
+    );
   } catch (err) {
-    console.error('[custom-fields] Falha inesperada ao preencher campos do pedido:', err)
+    console.error(
+      '[custom-fields] Falha inesperada ao preencher campos do pedido:',
+      err
+    );
   }
 }
 
 interface WhatsAppMessage {
-  id: string
-  from: string
-  timestamp: string
-  type: string
-  text?: { body: string }
-  image?: { id: string; mime_type: string; caption?: string }
-  video?: { id: string; mime_type: string; caption?: string }
-  document?: { id: string; mime_type: string; filename?: string; caption?: string }
-  audio?: { id: string; mime_type: string }
-  sticker?: { id: string; mime_type: string }
-  location?: { latitude: number; longitude: number; name?: string; address?: string }
-  reaction?: { message_id: string; emoji: string }
+  id: string;
+  from: string;
+  timestamp: string;
+  type: string;
+  text?: { body: string };
+  image?: { id: string; mime_type: string; caption?: string };
+  video?: { id: string; mime_type: string; caption?: string };
+  document?: {
+    id: string;
+    mime_type: string;
+    filename?: string;
+    caption?: string;
+  };
+  audio?: { id: string; mime_type: string };
+  sticker?: { id: string; mime_type: string };
+  location?: {
+    latitude: number;
+    longitude: number;
+    name?: string;
+    address?: string;
+  };
+  reaction?: { message_id: string; emoji: string };
   interactive?: {
-    type: 'button_reply' | 'list_reply'
-    button_reply?: { id: string; title: string }
-    list_reply?: { id: string; title: string; description?: string }
-  }
+    type: 'button_reply' | 'list_reply';
+    button_reply?: { id: string; title: string };
+    list_reply?: { id: string; title: string; description?: string };
+  };
   order?: {
-    catalog_id?: string
-    text?: string
+    catalog_id?: string;
+    text?: string;
     product_items?: Array<{
-      product_retailer_id: string
-      quantity: number
-      item_price: number
-      currency?: string
-    }>
-  }
-  context?: { id: string }
+      product_retailer_id: string;
+      quantity: number;
+      item_price: number;
+      currency?: string;
+    }>;
+  };
+  context?: { id: string };
 }
 
 interface WhatsAppWebhookEntry {
-  id: string
+  id: string;
   changes: Array<{
     value: {
-      messaging_product: string
+      messaging_product: string;
       metadata: {
-        display_phone_number: string
-        phone_number_id: string
-      }
+        display_phone_number: string;
+        phone_number_id: string;
+      };
       contacts?: Array<{
-        profile: { name: string }
-        wa_id: string
-      }>
-      messages?: WhatsAppMessage[]
+        profile: { name: string };
+        wa_id: string;
+      }>;
+      messages?: WhatsAppMessage[];
       statuses?: Array<{
-        id: string
-        status: string
-        timestamp: string
-        recipient_id: string
-      }>
-    }
-    field: string
-  }>
+        id: string;
+        status: string;
+        timestamp: string;
+        recipient_id: string;
+      }>;
+    };
+    field: string;
+  }>;
 }
 
 export function shouldAttemptAiReply(args: {
-  flowConsumed: boolean
-  outcome?: string
-  interactiveReplyId: string | null
-  inboundText: string
+  flowConsumed: boolean;
+  outcome?: string;
+  interactiveReplyId: string | null;
+  inboundText: string;
 }): boolean {
-  const trimmed = args.inboundText.trim()
+  const trimmed = args.inboundText.trim();
   const decision =
     !!trimmed &&
     !args.interactiveReplyId &&
-    (!args.flowConsumed || args.outcome === 'no_match' || args.outcome === 'duplicate_inbound_ignored')
+    (!args.flowConsumed ||
+      args.outcome === 'no_match' ||
+      args.outcome === 'duplicate_inbound_ignored');
 
   if (process.env.NODE_ENV !== 'production') {
     console.log('[webhook] ai gate', {
@@ -194,47 +220,47 @@ export function shouldAttemptAiReply(args: {
       interactiveReplyId: args.interactiveReplyId,
       inboundTextLength: trimmed.length,
       decision,
-    })
+    });
   }
 
-  return decision
+  return decision;
 }
 
 // GET - Webhook verification
 export async function GET(request: Request) {
   try {
-    const { searchParams } = new URL(request.url)
-    const mode = searchParams.get('hub.mode')
-    const challenge = searchParams.get('hub.challenge')
-    const verifyToken = searchParams.get('hub.verify_token')
+    const { searchParams } = new URL(request.url);
+    const mode = searchParams.get('hub.mode');
+    const challenge = searchParams.get('hub.challenge');
+    const verifyToken = searchParams.get('hub.verify_token');
 
     if (mode !== 'subscribe' || !challenge || !verifyToken) {
       return NextResponse.json(
         { error: 'Missing verification parameters' },
         { status: 400 }
-      )
+      );
     }
 
     const { data: configs, error: configError } = await supabaseAdmin()
       .from('whatsapp_config')
-      .select('id, verify_token')
+      .select('id, verify_token');
 
     if (configError || !configs) {
-      console.error('Error fetching configs for verification:', configError)
+      console.error('Error fetching configs for verification:', configError);
       return NextResponse.json(
         { error: 'Verification failed' },
         { status: 403 }
-      )
+      );
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let matchedConfig: any = null
+    let matchedConfig: any = null;
     for (const config of configs) {
-      if (!config.verify_token) continue
+      if (!config.verify_token) continue;
       try {
         if (decrypt(config.verify_token) === verifyToken) {
-          matchedConfig = config
-          break
+          matchedConfig = config;
+          break;
         }
       } catch {
         // ignora erro de chave
@@ -246,96 +272,96 @@ export async function GET(request: Request) {
         void supabaseAdmin()
           .from('whatsapp_config')
           .update({ verify_token: encrypt(verifyToken) })
-          .eq('id', matchedConfig.id)
+          .eq('id', matchedConfig.id);
       }
       return new Response(challenge, {
         status: 200,
         headers: { 'Content-Type': 'text/plain' },
-      })
+      });
     }
 
     return NextResponse.json(
       { error: 'Verification token mismatch' },
       { status: 403 }
-    )
+    );
   } catch (error) {
-    console.error('Error in webhook GET verification:', error)
+    console.error('Error in webhook GET verification:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }
-    )
+    );
   }
 }
 
 // POST - Receive messages
 export async function POST(request: Request) {
-  const rawBody = await request.text()
-  const signature = request.headers.get('x-hub-signature-256')
+  const rawBody = await request.text();
+  const signature = request.headers.get('x-hub-signature-256');
 
   if (!verifyMetaWebhookSignature(rawBody, signature)) {
-    console.warn('[webhook] rejected request with invalid signature')
-    return NextResponse.json({ error: 'Invalid signature' }, { status: 401 })
+    console.warn('[webhook] rejected request with invalid signature');
+    return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
   }
 
-  let body: { entry?: WhatsAppWebhookEntry[] }
+  let body: { entry?: WhatsAppWebhookEntry[] };
   try {
-    body = JSON.parse(rawBody)
+    body = JSON.parse(rawBody);
   } catch {
-    return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
+    return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }
 
   after(async () => {
     try {
-      await processWebhook(body)
+      await processWebhook(body);
     } catch (error) {
-      console.error('Error processing webhook:', error)
+      console.error('Error processing webhook:', error);
     }
-  })
+  });
 
-  return NextResponse.json({ status: 'received' }, { status: 200 })
+  return NextResponse.json({ status: 'received' }, { status: 200 });
 }
 
 async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
-  if (!body.entry) return
+  if (!body.entry) return;
 
   for (const entry of body.entry) {
     for (const change of entry.changes) {
       if (isTemplateWebhookField(change.field)) {
         await handleTemplateWebhookChange(
           { field: change.field, value: change.value as unknown },
-          supabaseAdmin(),
-        )
-        continue
+          supabaseAdmin()
+        );
+        continue;
       }
 
-      const value = change.value
+      const value = change.value;
 
       if (value.statuses) {
         for (const status of value.statuses) {
-          await handleStatusUpdate(status)
+          await handleStatusUpdate(status);
         }
       }
 
-      if (!value.messages || !value.contacts) continue
+      if (!value.messages || !value.contacts) continue;
 
-      const phoneNumberId = value.metadata.phone_number_id
+      const phoneNumberId = value.metadata.phone_number_id;
 
       const { data: configRows, error: configError } = await supabaseAdmin()
         .from('whatsapp_config')
         .select('*')
-        .eq('phone_number_id', phoneNumberId)
+        .eq('phone_number_id', phoneNumberId);
 
       if (configError || !configRows || configRows.length === 0) {
-        console.error('No config found for phone_number_id:', phoneNumberId)
-        continue
+        console.error('No config found for phone_number_id:', phoneNumberId);
+        continue;
       }
 
-      const config = configRows[0]
-      const decryptedAccessToken = decrypt(config.access_token)
+      const config = configRows[0];
+      const decryptedAccessToken = decrypt(config.access_token);
 
       for (let i = 0; i < value.messages.length; i++) {
-        const message = value.messages[i]
-        const contact = value.contacts[i] || value.contacts[0]
+        const message = value.messages[i];
+        const contact = value.contacts[i] || value.contacts[0];
 
         await processMessage(
           message,
@@ -344,58 +370,65 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
           config.user_id,
           decryptedAccessToken,
           phoneNumberId
-        )
+        );
       }
     }
   }
 }
 
-const RECIPIENT_STATUS_LADDER = ['pending', 'sent', 'delivered', 'read', 'replied'] as const
+const RECIPIENT_STATUS_LADDER = [
+  'pending',
+  'sent',
+  'delivered',
+  'read',
+  'replied',
+] as const;
 
 function ladderLevel(s: string): number {
-  const idx = (RECIPIENT_STATUS_LADDER as readonly string[]).indexOf(s)
-  return idx < 0 ? -1 : idx
+  const idx = (RECIPIENT_STATUS_LADDER as readonly string[]).indexOf(s);
+  return idx < 0 ? -1 : idx;
 }
 
 function isValidStatusTransition(current: string, incoming: string): boolean {
-  if (incoming === 'failed') return current === 'pending' || current === 'sent'
-  if (current === 'failed') return false
-  const ci = ladderLevel(current)
-  const ii = ladderLevel(incoming)
-  if (ii < 0) return false
-  if (ci < 0) return true
-  return ii > ci
+  if (incoming === 'failed') return current === 'pending' || current === 'sent';
+  if (current === 'failed') return false;
+  const ci = ladderLevel(current);
+  const ii = ladderLevel(incoming);
+  if (ii < 0) return false;
+  if (ci < 0) return true;
+  return ii > ci;
 }
 
 async function handleStatusUpdate(status: {
-  id: string
-  status: string
-  timestamp: string
-  recipient_id: string
+  id: string;
+  status: string;
+  timestamp: string;
+  recipient_id: string;
 }) {
   await supabaseAdmin()
     .from('messages')
     .update({ status: status.status })
-    .eq('message_id', status.id)
+    .eq('message_id', status.id);
 
-  const tsIso = new Date(parseInt(status.timestamp) * 1000).toISOString()
+  const tsIso = new Date(parseInt(status.timestamp) * 1000).toISOString();
 
   const { data: recipient } = await supabaseAdmin()
     .from('broadcast_recipients')
     .select('id, status')
     .eq('whatsapp_message_id', status.id)
-    .maybeSingle()
+    .maybeSingle();
 
   if (recipient && isValidStatusTransition(recipient.status, status.status)) {
-    const update: Record<string, unknown> = { status: status.status }
-    if (status.status === 'sent' && !('sent_at' in update)) update.sent_at = tsIso
-    if (status.status === 'delivered') update.delivered_at = tsIso
-    if (status.status === 'read') update.read_at = tsIso
+    const update: Record<string, unknown> = { status: status.status };
+    if (status.status === 'sent' && !('sent_at' in update))
+      update.sent_at = tsIso;
+    if (status.status === 'delivered') update.delivered_at = tsIso;
+    if (status.status === 'read') update.read_at = tsIso;
 
     await supabaseAdmin()
       .from('broadcast_recipients')
       .update(update)
-      .eq('id', recipient.id)
+      .eq('id', recipient.id);
   }
 
   const { data: msgRow } = await supabaseAdmin()
@@ -403,10 +436,10 @@ async function handleStatusUpdate(status: {
     .select('conversation_id, conversations(account_id)')
     .eq('message_id', status.id)
     .limit(1)
-    .maybeSingle()
+    .maybeSingle();
 
   if (msgRow) {
-    const conv = msgRow.conversations as { account_id: string } | null
+    const conv = msgRow.conversations as { account_id: string } | null;
     if (conv?.account_id) {
       await dispatchWebhookEvent(
         supabaseAdmin(),
@@ -417,7 +450,7 @@ async function handleStatusUpdate(status: {
           conversation_id: msgRow.conversation_id,
           status: status.status,
         }
-      )
+      );
     }
   }
 }
@@ -431,16 +464,16 @@ async function flagBroadcastReplyIfAny(accountId: string, contactId: string) {
       .eq('broadcasts.account_id', accountId)
       .in('status', ['sent', 'delivered', 'read'])
       .order('created_at', { ascending: false })
-      .limit(1)
+      .limit(1);
 
-    if (!recs || recs.length === 0) return
+    if (!recs || recs.length === 0) return;
 
     await supabaseAdmin()
       .from('broadcast_recipients')
       .update({ status: 'replied', replied_at: new Date().toISOString() })
-      .eq('id', recs[0].id)
+      .eq('id', recs[0].id);
   } catch (err) {
-    console.error('flagBroadcastReplyIfAny failed:', err)
+    console.error('flagBroadcastReplyIfAny failed:', err);
   }
 }
 
@@ -453,8 +486,8 @@ async function lookupInternalIdByMetaId(
     .select('id')
     .eq('message_id', metaId)
     .eq('conversation_id', conversationId)
-    .maybeSingle()
-  return data?.id ?? null
+    .maybeSingle();
+  return data?.id ?? null;
 }
 
 async function handleReaction(
@@ -462,14 +495,14 @@ async function handleReaction(
   conversationId: string,
   contactId: string
 ) {
-  const reaction = message.reaction
-  if (!reaction?.message_id) return
+  const reaction = message.reaction;
+  if (!reaction?.message_id) return;
 
   const targetInternalId = await lookupInternalIdByMetaId(
     reaction.message_id,
     conversationId
-  )
-  if (!targetInternalId) return
+  );
+  if (!targetInternalId) return;
 
   if (!reaction.emoji) {
     await supabaseAdmin()
@@ -477,72 +510,79 @@ async function handleReaction(
       .delete()
       .eq('message_id', targetInternalId)
       .eq('actor_type', 'customer')
-      .eq('actor_id', contactId)
-    return
+      .eq('actor_id', contactId);
+    return;
   }
 
-  await supabaseAdmin()
-    .from('message_reactions')
-    .upsert(
-      {
-        message_id: targetInternalId,
-        conversation_id: conversationId,
-        actor_type: 'customer',
-        actor_id: contactId,
-        emoji: reaction.emoji,
-      },
-      { onConflict: 'message_id,actor_type,actor_id' }
-    )
+  await supabaseAdmin().from('message_reactions').upsert(
+    {
+      message_id: targetInternalId,
+      conversation_id: conversationId,
+      actor_type: 'customer',
+      actor_id: contactId,
+      emoji: reaction.emoji,
+    },
+    { onConflict: 'message_id,actor_type,actor_id' }
+  );
 }
 
 function parseCurrencyString(raw: string): number {
-  if (!raw) return 0
-  const cleaned = raw.trim().replace(/[^\d.,]/g, '')
-  if (!cleaned) return 0
+  if (!raw) return 0;
+  const cleaned = raw.trim().replace(/[^\d.,]/g, '');
+  if (!cleaned) return 0;
 
   if (cleaned.includes('.') && cleaned.includes(',')) {
     if (cleaned.lastIndexOf(',') > cleaned.lastIndexOf('.')) {
-      return parseFloat(cleaned.replace(/\./g, '').replace(',', '.')) || 0
+      return parseFloat(cleaned.replace(/\./g, '').replace(',', '.')) || 0;
     }
-    return parseFloat(cleaned.replace(/,/g, '')) || 0
+    return parseFloat(cleaned.replace(/,/g, '')) || 0;
   }
 
   if (cleaned.includes(',')) {
-    return parseFloat(cleaned.replace(',', '.')) || 0
+    return parseFloat(cleaned.replace(',', '.')) || 0;
   }
 
   if (cleaned.includes('.')) {
-    const parts = cleaned.split('.')
+    const parts = cleaned.split('.');
     if (parts.length === 2 && parts[1].length <= 2) {
-      return parseFloat(cleaned) || 0
+      return parseFloat(cleaned) || 0;
     }
-    return parseFloat(cleaned.replace(/\./g, '')) || 0
+    return parseFloat(cleaned.replace(/\./g, '')) || 0;
   }
 
-  return parseFloat(cleaned) || 0
+  return parseFloat(cleaned) || 0;
 }
 /**
  * ETAPA 2 — Detecta se o cliente quer pagar
  */
 function isPaymentConfirmation(text: string): boolean {
-  if (!text) return false
+  if (!text) return false;
 
   const normalized = text
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
-    .trim()
+    .trim();
 
   const triggers = [
-    'pagar', 'pago', 'paguei',
-    'credito', 'debito', 'cartao',
-    'pix', 'link', 'pagamento',
-    'quero pagar', 'pode mandar',
-    'manda o link', 'como pago',
-    'confirmar', 'confirmo',
-  ]
+    'pagar',
+    'pago',
+    'paguei',
+    'credito',
+    'debito',
+    'cartao',
+    'pix',
+    'link',
+    'pagamento',
+    'quero pagar',
+    'pode mandar',
+    'manda o link',
+    'como pago',
+    'confirmar',
+    'confirmo',
+  ];
 
-  return triggers.some((t) => normalized.includes(t))
+  return triggers.some((t) => normalized.includes(t));
 }
 /**
  * ETAPA 3 — Lê o [TOTAL:XXX.XX] deixado pela IA nas últimas mensagens
@@ -551,7 +591,6 @@ function isPaymentConfirmation(text: string): boolean {
 async function extractTotalFromLastBotMessage(
   conversationId: string
 ): Promise<number | null> {
-
   // 1. Busca as últimas 5 mensagens do bot nessa conversa
   const { data: botMessages } = await supabaseAdmin()
     .from('messages')
@@ -559,31 +598,31 @@ async function extractTotalFromLastBotMessage(
     .eq('conversation_id', conversationId)
     .eq('sender_type', 'bot')
     .order('created_at', { ascending: false })
-    .limit(5)
+    .limit(5);
 
   // 2. Se não encontrou nenhuma mensagem do bot, retorna null
-  if (!botMessages || botMessages.length === 0) return null
+  if (!botMessages || botMessages.length === 0) return null;
 
   // 3. Percorre as mensagens procurando o marcador [TOTAL:XXX.XX]
   for (const msg of botMessages) {
-    const text = msg.content_text || ''
+    const text = msg.content_text || '';
 
     // Regex: procura [TOTAL:] ou "Total: R$ ..."
-    const match = text.match(/\[TOTAL:([\d.]+)\]/i)
+    const match = text.match(/\[TOTAL:([\d.]+)\]/i);
     if (match) {
-      const total = parseFloat(match[1])  // converte "140.00" → 140
-      if (total > 0) return total          // retorna se for um valor válido
+      const total = parseFloat(match[1]); // converte "140.00" → 140
+      if (total > 0) return total; // retorna se for um valor válido
     }
 
-    const matchBr = text.match(/Total:\s*\*?R\$\s*([\d.,]+)\*?/i)
+    const matchBr = text.match(/Total:\s*\*?R\$\s*([\d.,]+)\*?/i);
     if (matchBr) {
-      const total = parseCurrencyString(matchBr[1])
-      if (total > 0) return total
+      const total = parseCurrencyString(matchBr[1]);
+      if (total > 0) return total;
     }
   }
 
   // 4. Não encontrou marcador em nenhuma das 5 mensagens
-  return null
+  return null;
 }
 
 /**
@@ -591,34 +630,37 @@ async function extractTotalFromLastBotMessage(
  */
 function parseWebsiteOrder(text: string) {
   if (!text || !text.toUpperCase().includes('LA EMPANADAS - NOVO PEDIDO')) {
-    return null
+    return null;
   }
 
-  const clienteMatch = text.match(/(?:\*?Cliente:\*?)\s*([^\n\r*]+)/i)
-  const cliente = clienteMatch ? clienteMatch[1].trim() : 'Cliente'
+  const clienteMatch = text.match(/(?:\*?Cliente:\*?)\s*([^\n\r*]+)/i);
+  const cliente = clienteMatch ? clienteMatch[1].trim() : 'Cliente';
 
-  const enderecoMatch = text.match(/(?:\*?Entregar em:\*?)\s*([^\n\r*]+)/i)
-  const endereco = enderecoMatch ? enderecoMatch[1].trim() : ''
+  const enderecoMatch = text.match(/(?:\*?Entregar em:\*?)\s*([^\n\r*]+)/i);
+  const endereco = enderecoMatch ? enderecoMatch[1].trim() : '';
 
-  const totalMatch = text.match(/(?:\*?Total(?: Estimado)?:\*?)\s*R\$\s*([\d.,]+)/i)
-  const total = totalMatch ? parseCurrencyString(totalMatch[1]) : 0
+  const totalMatch = text.match(
+    /(?:\*?Total(?: Estimado)?:\*?)\s*R\$\s*([\d.,]+)/i
+  );
+  const total = totalMatch ? parseCurrencyString(totalMatch[1]) : 0;
 
-  const items: Array<{ title: string; quantity: number; unitPrice: number }> = []
+  const items: Array<{ title: string; quantity: number; unitPrice: number }> =
+    [];
   // Suporta: - 1x, • 1 x, 1x, etc.
-  const itemRegex = /(?:[-•*]\s*)?(\d+)\s*x\s*([^[—\n\r]+)(?:\[([^\]]+)\])?/gi
-  let match: RegExpExecArray | null
+  const itemRegex = /(?:[-•*]\s*)?(\d+)\s*x\s*([^[—\n\r]+)(?:\[([^\]]+)\])?/gi;
+  let match: RegExpExecArray | null;
   while ((match = itemRegex.exec(text)) !== null) {
-    const quantity = parseInt(match[1], 10) || 1
-    const title = match[2].trim()
-    items.push({ title, quantity, unitPrice: 0 })
+    const quantity = parseInt(match[1], 10) || 1;
+    const title = match[2].trim();
+    items.push({ title, quantity, unitPrice: 0 });
   }
 
   if (items.length > 0 && total > 0) {
-    const totalQty = items.reduce((acc, it) => acc + it.quantity, 0)
-    const unitAvg = total / (totalQty || 1)
-    items.forEach((it) => (it.unitPrice = Number(unitAvg.toFixed(2))))
+    const totalQty = items.reduce((acc, it) => acc + it.quantity, 0);
+    const unitAvg = total / (totalQty || 1);
+    items.forEach((it) => (it.unitPrice = Number(unitAvg.toFixed(2))));
   } else if (items.length === 0 && total > 0) {
-    items.push({ title: 'Pedido de Empanadas', quantity: 1, unitPrice: total })
+    items.push({ title: 'Pedido de Empanadas', quantity: 1, unitPrice: total });
   }
 
   return {
@@ -627,24 +669,24 @@ function parseWebsiteOrder(text: string) {
     total,
     totalFormatado: `R$ ${total.toFixed(2).replace('.', ',')}`,
     items,
-  }
+  };
 }
 
 /**
  * 🛡️ [BLINDAGEM TOTAL]: Envia Botão CTA (≤20 chars) com Fallback para Mensagem de Texto
  */
 async function sendWhatsAppPaymentMessage(params: {
-  phoneNumberId: string
-  accessToken: string
-  toPhone: string
-  headerText: string
-  bodyText: string
-  footerText: string
-  buttonText: string
-  buttonUrl: string
+  phoneNumberId: string;
+  accessToken: string;
+  toPhone: string;
+  headerText: string;
+  bodyText: string;
+  footerText: string;
+  buttonText: string;
+  buttonUrl: string;
 }): Promise<{ messageId: string | null; formattedText: string }> {
   // Limite estrito de 20 caracteres da Meta para o botão
-  const label = (params.buttonText || '💳 Pagar Agora').trim().substring(0, 20)
+  const label = (params.buttonText || '💳 Pagar Agora').trim().substring(0, 20);
 
   // 1. Tenta enviar como Botão CTA Nativo
   try {
@@ -683,24 +725,27 @@ async function sendWhatsAppPaymentMessage(params: {
           },
         }),
       }
-    )
-    const data = await res.json()
+    );
+    const data = await res.json();
     if (data?.messages?.[0]?.id) {
       return {
         messageId: data.messages[0].id,
         formattedText: `${params.bodyText}\n[Botão: ${label}]`,
-      }
+      };
     }
-    console.warn('[WhatsApp CTA Button Failed] Tentando fallback de texto:', data)
+    console.warn(
+      '[WhatsApp CTA Button Failed] Tentando fallback de texto:',
+      data
+    );
   } catch (error) {
-    console.error('[WhatsApp CTA Error]:', error)
+    console.error('[WhatsApp CTA Error]:', error);
   }
 
   // 2. Plano de contingência garantido (Mensagem de Texto)
   const fallbackText =
     `${params.bodyText}\n\n` +
     `👉 *Link para pagamento (Pix ou Cartão):*\n${params.buttonUrl}\n\n` +
-    `_${params.footerText}_`
+    `_${params.footerText}_`;
 
   try {
     const resText = await fetch(
@@ -719,15 +764,15 @@ async function sendWhatsAppPaymentMessage(params: {
           text: { body: fallbackText },
         }),
       }
-    )
-    const dataText = await resText.json()
+    );
+    const dataText = await resText.json();
     return {
       messageId: dataText?.messages?.[0]?.id || null,
       formattedText: fallbackText,
-    }
+    };
   } catch (err) {
-    console.error('[WhatsApp Fallback Error]:', err)
-    return { messageId: null, formattedText: fallbackText }
+    console.error('[WhatsApp Fallback Error]:', err);
+    return { messageId: null, formattedText: fallbackText };
   }
 }
 
@@ -739,82 +784,95 @@ async function processMessage(
   accessToken: string,
   phoneNumberId: string
 ) {
-  const senderPhone = normalizePhone(message.from)
-  const contactName = contact.profile.name
+  const senderPhone = normalizePhone(message.from);
+  const contactName = contact.profile.name;
 
   const contactOutcome = await findOrCreateContact(
     accountId,
     configOwnerUserId,
     senderPhone,
     contactName
-  )
-  if (!contactOutcome) return
-  const contactRecord = contactOutcome.contact
+  );
+  if (!contactOutcome) return;
+  const contactRecord = contactOutcome.contact;
 
   const convResult = await findOrCreateConversation(
     accountId,
     configOwnerUserId,
     contactRecord.id
-  )
-  if (!convResult) return
-  const conversation = convResult.conversation
+  );
+  if (!convResult) return;
+  const conversation = convResult.conversation;
 
   if (convResult.created) {
-    await dispatchWebhookEvent(supabaseAdmin(), accountId, 'conversation.created', {
-      conversation_id: conversation.id,
-      contact_id: contactRecord.id,
-    })
+    await dispatchWebhookEvent(
+      supabaseAdmin(),
+      accountId,
+      'conversation.created',
+      {
+        conversation_id: conversation.id,
+        contact_id: contactRecord.id,
+      }
+    );
   }
 
   if (message.type === 'reaction') {
-    await handleReaction(message, conversation.id, contactRecord.id)
-    return
+    await handleReaction(message, conversation.id, contactRecord.id);
+    return;
   }
 
   const { contentText, mediaUrl, interactiveReplyId, order } =
-    await parseMessageContent(message, accessToken)
+    await parseMessageContent(message, accessToken);
 
-  let replyToInternalId: string | null = null
+  let replyToInternalId: string | null = null;
   if (message.context?.id) {
     replyToInternalId = await lookupInternalIdByMetaId(
       message.context.id,
       conversation.id
-    )
+    );
   }
 
   const ALLOWED_CONTENT_TYPES = new Set([
-    'text', 'image', 'document', 'audio', 'video',
-    'location', 'template', 'interactive',
-  ])
+    'text',
+    'image',
+    'document',
+    'audio',
+    'video',
+    'location',
+    'template',
+    'interactive',
+  ]);
   const contentType = ALLOWED_CONTENT_TYPES.has(message.type)
     ? message.type
     : message.type === 'sticker'
       ? 'image'
-      : 'text'
+      : 'text';
 
   const { count: priorCustomerMsgCount } = await supabaseAdmin()
     .from('messages')
     .select('id', { count: 'exact', head: true })
     .eq('conversation_id', conversation.id)
-    .eq('sender_type', 'customer')
-  const isFirstInboundMessage = (priorCustomerMsgCount ?? 0) === 0
+    .eq('sender_type', 'customer');
+  const isFirstInboundMessage = (priorCustomerMsgCount ?? 0) === 0;
 
-  const { error: msgError } = await supabaseAdmin().from('messages').insert({
-    conversation_id: conversation.id,
-    sender_type: 'customer',
-    content_type: contentType,
-    content_text: contentText,
-    media_url: mediaUrl,
-    message_id: message.id,
-    status: 'delivered',
-    created_at: new Date(parseInt(message.timestamp) * 1000).toISOString(),
-    reply_to_message_id: replyToInternalId,
-    interactive_reply_id: interactiveReplyId,
-  })
+  const { error: msgError } = await supabaseAdmin()
+    .from('messages')
+    .insert({
+      conversation_id: conversation.id,
+      sender_type: 'customer',
+      content_type: contentType,
+      content_text: contentText,
+      media_url: mediaUrl,
+      message_id: message.id,
+      status: 'delivered',
+      created_at: new Date(parseInt(message.timestamp) * 1000).toISOString(),
+      reply_to_message_id: replyToInternalId,
+      interactive_reply_id: interactiveReplyId,
+    });
 
   if (msgError) {
-    console.error('Error inserting message:', msgError)
-    return
+    console.error('Error inserting message:', msgError);
+    return;
   }
 
   const conversationUpdate: Record<string, unknown> = {
@@ -822,28 +880,28 @@ async function processMessage(
     last_message_at: new Date().toISOString(),
     unread_count: (conversation.unread_count || 0) + 1,
     updated_at: new Date().toISOString(),
-  }
+  };
 
   // Reabertura automática (Opção A): se o cliente já havia sido atendido e a
   // conversa foi fechada (ex.: após pagamento aprovado), uma nova mensagem
   // reabre a conversa e zera o contador de respostas da IA, para que a IA
   // volte a atender do zero dentro do limite por conversa.
   if (conversation.status === 'closed') {
-    conversationUpdate.status = 'open'
-    conversationUpdate.ai_reply_count = 0
+    conversationUpdate.status = 'open';
+    conversationUpdate.ai_reply_count = 0;
   }
 
   await supabaseAdmin()
     .from('conversations')
     .update(conversationUpdate)
-    .eq('id', conversation.id)
+    .eq('id', conversation.id);
 
-  await flagBroadcastReplyIfAny(accountId, contactRecord.id)
+  await flagBroadcastReplyIfAny(accountId, contactRecord.id);
 
   // ============================================================
   // ⚡ PEDIDO VINDO DO SITE (laempanadas.com.br)
   // ============================================================
-  const siteOrder = parseWebsiteOrder(contentText || '')
+  const siteOrder = parseWebsiteOrder(contentText || '');
 
   // ============================================================
   // 🥟 PEDIDO POR TEXTO LIVRE NO WHATSAPP
@@ -865,23 +923,31 @@ async function processMessage(
         inboundText: contentText ?? message.text?.body ?? '',
         phoneNumberId,
         accessToken,
-      })
+      });
 
       if (textOrderResult.handled) {
-        console.log('[webhook] Mensagem processada pelo fluxo de pedido por texto livre:', textOrderResult.outcome)
+        console.log(
+          '[webhook] Mensagem processada pelo fluxo de pedido por texto livre:',
+          textOrderResult.outcome
+        );
 
-        await dispatchWebhookEvent(supabaseAdmin(), accountId, 'message.received', {
-          conversation_id: conversation.id,
-          contact_id: contactRecord.id,
-          whatsapp_message_id: message.id,
-          content_type: contentType,
-          text: contentText,
-        })
+        await dispatchWebhookEvent(
+          supabaseAdmin(),
+          accountId,
+          'message.received',
+          {
+            conversation_id: conversation.id,
+            contact_id: contactRecord.id,
+            whatsapp_message_id: message.id,
+            content_type: contentType,
+            text: contentText,
+          }
+        );
 
-        return
+        return;
       }
     } catch (err) {
-      console.error('[webhook] Erro no fluxo de pedido por texto livre:', err)
+      console.error('[webhook] Erro no fluxo de pedido por texto livre:', err);
     }
   }
 
@@ -899,16 +965,19 @@ async function processMessage(
         contactId: contactRecord.id,
         contactName: contactRecord.name || contactName,
         conversationId: conversation.id,
-      })
+      });
     } catch (err) {
-      console.warn('[webhook] auto-deal creation failed (non-blocking):', err)
+      console.warn('[webhook] auto-deal creation failed (non-blocking):', err);
     }
   }
 
   if (siteOrder && siteOrder.total > 0) {
-    console.log('[webhook] Processando pedido do site. Total:', siteOrder.total)
+    console.log(
+      '[webhook] Processando pedido do site. Total:',
+      siteOrder.total
+    );
 
-    const externalRef = `SITE-${Date.now()}-${contactRecord.id.substring(0, 5)}`
+    const externalRef = `SITE-${Date.now()}-${contactRecord.id.substring(0, 5)}`;
 
     const paymentResult = await createPaymentLink({
       items: siteOrder.items,
@@ -917,7 +986,7 @@ async function processMessage(
       payerPhone: senderPhone,
       deliveryKind: 'delivery',
       deliveryAddress: siteOrder.endereco,
-    })
+    });
 
     if (paymentResult.paymentUrl) {
       // 🛡️ SALVA NA TABELA ORDERS PARA O CRON DE 15 MIN E O WEBHOOK DO MERCADO PAGO ENCONTRAREM
@@ -937,11 +1006,17 @@ async function processMessage(
           status: 'pending',
         })
         .select('id')
-        .maybeSingle()
+        .maybeSingle();
       if (siteInsertErr) {
-        console.error('[webhook] Erro ao gravar pedido na tabela orders:', siteInsertErr)
+        console.error(
+          '[webhook] Erro ao gravar pedido na tabela orders:',
+          siteInsertErr
+        );
       } else {
-        console.log('[webhook] Pedido do site gravado na tabela orders:', externalRef)
+        console.log(
+          '[webhook] Pedido do site gravado na tabela orders:',
+          externalRef
+        );
       }
 
       // Card no pipeline "Pedidos Delivery", como os pedidos do catálogo.
@@ -960,23 +1035,28 @@ async function processMessage(
           conversationId: conversation.id,
           external_reference: externalRef,
         }
-      )
+      );
 
       // Preenche os campos personalizados do contato com os dados do pedido.
-      await saveOrderCustomFields(supabaseAdmin(), accountId, contactRecord.id, {
-        itens: siteOrder.items
-          .map((it) => `${it.quantity}x ${it.title}`)
-          .join(', '),
-        endereco: siteOrder.endereco,
-        formaPagamento: 'Mercado Pago',
-        nomeCliente: siteOrder.cliente,
-      })
+      await saveOrderCustomFields(
+        supabaseAdmin(),
+        accountId,
+        contactRecord.id,
+        {
+          itens: siteOrder.items
+            .map((it) => `${it.quantity}x ${it.title}`)
+            .join(', '),
+          endereco: siteOrder.endereco,
+          formaPagamento: 'Mercado Pago',
+          nomeCliente: siteOrder.cliente,
+        }
+      );
 
       const bodyText =
         `Olá, *${siteOrder.cliente}*! Recebemos seu pedido com sucesso! 🥟✨\n\n` +
         `📍 *Entrega:* ${siteOrder.endereco || 'A combinar'}\n` +
         `💵 *Total:* ${siteOrder.totalFormatado}\n\n` +
-        `Clique no botão abaixo para pagar com segurança via Pix (aprovação imediata) ou Cartão:`
+        `Clique no botão abaixo para pagar com segurança via Pix (aprovação imediata) ou Cartão:`;
 
       // Envia via CTA ou Fallback garantido
       const sendResult = await sendWhatsAppPaymentMessage({
@@ -988,7 +1068,7 @@ async function processMessage(
         footerText: 'Mercado Pago • Produção imediata após confirmação',
         buttonText: '💳 Pagar Agora',
         buttonUrl: paymentResult.paymentUrl,
-      })
+      });
 
       if (sendResult.messageId) {
         await supabaseAdmin().from('messages').insert({
@@ -999,26 +1079,28 @@ async function processMessage(
           message_id: sendResult.messageId,
           status: 'sent',
           created_at: new Date().toISOString(),
-        })
+        });
       }
     }
 
-    return
+    return;
   }
   // ============================================================
   // 💳 ETAPA 4 — PAGAMENTO VIA AGENTE IA
   // Detecta intenção de pagar e gera link do Mercado Pago
   // ============================================================
   if (!siteOrder && isPaymentConfirmation(contentText || '')) {
-
     // Busca o total que a IA deixou marcado na conversa
-    const totalDoAgente = await extractTotalFromLastBotMessage(conversation.id)
+    const totalDoAgente = await extractTotalFromLastBotMessage(conversation.id);
 
     if (totalDoAgente && totalDoAgente > 0) {
-      console.log('[agente] Pagamento solicitado. Total encontrado:', totalDoAgente)
+      console.log(
+        '[agente] Pagamento solicitado. Total encontrado:',
+        totalDoAgente
+      );
 
       // Gera um ID único para esse pedido
-      const externalRef = `AGENTE-${Date.now()}-${contactRecord.id.substring(0, 5)}`
+      const externalRef = `AGENTE-${Date.now()}-${contactRecord.id.substring(0, 5)}`;
 
       // Chama a mesma função que já funciona para o site
       const paymentResult = await createPaymentLink({
@@ -1034,32 +1116,38 @@ async function processMessage(
         payerPhone: senderPhone,
         deliveryKind: 'delivery',
         deliveryAddress: '',
-      })
+      });
 
       if (paymentResult.paymentUrl) {
-
         // Salva o pedido na tabela orders (igual ao fluxo do site)
-        const { data: agentOrderRow, error: agentInsertErr } = await supabaseAdmin()
-          .from('orders')
-          .insert({
-            account_id: accountId,
-            contact_id: contactRecord.id,
-            external_reference: externalRef,
-            preference_id: paymentResult.preferenceId,
-            payment_url: paymentResult.paymentUrl,
-            total: totalDoAgente,
-            items: [{ title: 'Pedido WhatsApp', quantity: 1, unitPrice: totalDoAgente }],
-            delivery_address: '',
-            payer_phone: senderPhone,
-            payer_name: contactRecord.name || contactName,
-            status: 'pending',
-          })
-          .select('id')
-          .maybeSingle()
+        const { data: agentOrderRow, error: agentInsertErr } =
+          await supabaseAdmin()
+            .from('orders')
+            .insert({
+              account_id: accountId,
+              contact_id: contactRecord.id,
+              external_reference: externalRef,
+              preference_id: paymentResult.preferenceId,
+              payment_url: paymentResult.paymentUrl,
+              total: totalDoAgente,
+              items: [
+                {
+                  title: 'Pedido WhatsApp',
+                  quantity: 1,
+                  unitPrice: totalDoAgente,
+                },
+              ],
+              delivery_address: '',
+              payer_phone: senderPhone,
+              payer_name: contactRecord.name || contactName,
+              status: 'pending',
+            })
+            .select('id')
+            .maybeSingle();
         if (agentInsertErr) {
-          console.error('[agente] Erro ao gravar pedido:', agentInsertErr)
+          console.error('[agente] Erro ao gravar pedido:', agentInsertErr);
         } else {
-          console.log('[agente] Pedido gravado na tabela orders:', externalRef)
+          console.log('[agente] Pedido gravado na tabela orders:', externalRef);
         }
 
         // Card no pipeline "Pedidos Delivery", como os pedidos do catálogo.
@@ -1077,26 +1165,31 @@ async function processMessage(
             conversationId: conversation.id,
             external_reference: externalRef,
           }
-        )
+        );
 
         // Preenche os campos personalizados do contato com os dados do pedido.
         // O agente não coleta itens detalhados nem endereço, então gravamos um
         // resumo com o total e a forma/nome disponíveis.
-        await saveOrderCustomFields(supabaseAdmin(), accountId, contactRecord.id, {
-          itens: `Pedido WhatsApp - R$ ${totalDoAgente.toFixed(2).replace('.', ',')}`,
-          formaPagamento: 'Mercado Pago',
-          nomeCliente: contactRecord.name || contactName,
-        })
+        await saveOrderCustomFields(
+          supabaseAdmin(),
+          accountId,
+          contactRecord.id,
+          {
+            itens: `Pedido WhatsApp - R$ ${totalDoAgente.toFixed(2).replace('.', ',')}`,
+            formaPagamento: 'Mercado Pago',
+            nomeCliente: contactRecord.name || contactName,
+          }
+        );
 
         // Formata o total para exibir: 140 → "R$ 140,00"
-        const fmt = (v: number) => `R$ ${v.toFixed(2).replace('.', ',')}`
+        const fmt = (v: number) => `R$ ${v.toFixed(2).replace('.', ',')}`;
 
         // Monta o corpo da mensagem
         const bodyText =
           `Perfeito, *${contactRecord.name || contactName}*! 🥟\n\n` +
           `💵 *Total: ${fmt(totalDoAgente)}*\n` +
           `🚚 Frete: GRÁTIS\n\n` +
-          `Clique no botão abaixo para pagar com Pix (aprovação imediata) ou Cartão:`
+          `Clique no botão abaixo para pagar com Pix (aprovação imediata) ou Cartão:`;
 
         // Envia o botão de pagamento (CTA ou texto como fallback)
         const sendResult = await sendWhatsAppPaymentMessage({
@@ -1108,7 +1201,7 @@ async function processMessage(
           footerText: 'Mercado Pago • Produção imediata após confirmação',
           buttonText: '💳 Pagar Agora',
           buttonUrl: paymentResult.paymentUrl,
-        })
+        });
 
         // Salva a mensagem enviada no histórico da conversa
         if (sendResult.messageId) {
@@ -1120,11 +1213,11 @@ async function processMessage(
             message_id: sendResult.messageId,
             status: 'sent',
             created_at: new Date().toISOString(),
-          })
+          });
         }
 
         // Para aqui — não aciona a IA nessa rodada
-        return
+        return;
       }
     }
   }
@@ -1136,45 +1229,46 @@ async function processMessage(
     userId: configOwnerUserId,
     contactId: contactRecord.id,
     conversationId: conversation.id,
-    message:
-      order
+    message: order
+      ? {
+          kind: 'catalog_order',
+          text: contentText ?? '',
+          total: order.total,
+          items: order.items,
+          meta_message_id: message.id,
+        }
+      : interactiveReplyId
         ? {
-            kind: 'catalog_order',
-            text: contentText ?? '',
-            total: order.total,
-            items: order.items,
+            kind: 'interactive_reply',
+            reply_id: interactiveReplyId,
+            reply_title: contentText ?? '',
             meta_message_id: message.id,
           }
-        : interactiveReplyId
-          ? {
-              kind: 'interactive_reply',
-              reply_id: interactiveReplyId,
-              reply_title: contentText ?? '',
-              meta_message_id: message.id,
-            }
-          : {
-              kind: 'text',
-              text: contentText ?? message.text?.body ?? '',
-              meta_message_id: message.id,
-            },
+        : {
+            kind: 'text',
+            text: contentText ?? message.text?.body ?? '',
+            meta_message_id: message.id,
+          },
     isFirstInboundMessage,
-  })
-  const flowConsumed = flowResult.consumed
+  });
+  const flowConsumed = flowResult.consumed;
 
-  const inboundText = contentText ?? message.text?.body ?? ''
+  const inboundText = contentText ?? message.text?.body ?? '';
   const automationTriggers: (
     | 'new_contact_created'
     | 'first_inbound_message'
     | 'new_message_received'
     | 'keyword_match'
-  )[] = []
+  )[] = [];
 
   if (!flowConsumed) {
-    automationTriggers.push('new_message_received', 'keyword_match')
+    automationTriggers.push('new_message_received', 'keyword_match');
   }
 
-  if (contactOutcome.wasCreated) automationTriggers.unshift('new_contact_created')
-  if (isFirstInboundMessage) automationTriggers.unshift('first_inbound_message')
+  if (contactOutcome.wasCreated)
+    automationTriggers.unshift('new_contact_created');
+  if (isFirstInboundMessage)
+    automationTriggers.unshift('first_inbound_message');
   for (const triggerType of automationTriggers) {
     runAutomationsForTrigger({
       accountId,
@@ -1185,17 +1279,19 @@ async function processMessage(
         conversation_id: conversation.id,
         contact_name: contactRecord.name,
       },
-    }).catch((err) => console.error('[automations] dispatch failed:', err))
+    }).catch((err) => console.error('[automations] dispatch failed:', err));
   }
 
   // A cart the order flow already picked up (or a Meta retry of it) must
   // not also get an AI reply — the customer would get two answers.
-  const shouldAttemptAi = !(order && flowConsumed) && shouldAttemptAiReply({
-    flowConsumed,
-    outcome: flowResult.outcome,
-    interactiveReplyId,
-    inboundText,
-  })
+  const shouldAttemptAi =
+    !(order && flowConsumed) &&
+    shouldAttemptAiReply({
+      flowConsumed,
+      outcome: flowResult.outcome,
+      interactiveReplyId,
+      inboundText,
+    });
 
   if (shouldAttemptAi) {
     await dispatchInboundToAiReply({
@@ -1203,7 +1299,7 @@ async function processMessage(
       conversationId: conversation.id,
       contactId: contactRecord.id,
       configOwnerUserId,
-    })
+    });
   }
 
   await dispatchWebhookEvent(supabaseAdmin(), accountId, 'message.received', {
@@ -1212,34 +1308,39 @@ async function processMessage(
     whatsapp_message_id: message.id,
     content_type: contentType,
     text: contentText,
-  })
+  });
 }
 
 async function parseMessageContent(
   message: WhatsAppMessage,
   accessToken: string
 ): Promise<{
-  contentText: string | null
-  mediaUrl: string | null
-  mediaType: string | null
-  interactiveReplyId: string | null
+  contentText: string | null;
+  mediaUrl: string | null;
+  mediaType: string | null;
+  interactiveReplyId: string | null;
   order: {
-    total: number
-    items: Array<{ retailer_id: string; name?: string; quantity: number; unit_price: number }>
-  } | null
+    total: number;
+    items: Array<{
+      retailer_id: string;
+      name?: string;
+      quantity: number;
+      unit_price: number;
+    }>;
+  } | null;
 }> {
   const verifyAndBuildUrl = async (mediaId: string): Promise<string | null> => {
     try {
-      await getMediaUrl({ mediaId, accessToken })
-      return `/api/whatsapp/media/${mediaId}`
+      await getMediaUrl({ mediaId, accessToken });
+      return `/api/whatsapp/media/${mediaId}`;
     } catch (error) {
       console.error(
         `Failed to verify media ${mediaId} with Meta:`,
         error instanceof Error ? error.message : error
-      )
-      return null
+      );
+      return null;
     }
-  }
+  };
 
   const empty = {
     contentText: null,
@@ -1247,11 +1348,11 @@ async function parseMessageContent(
     mediaType: null,
     interactiveReplyId: null,
     order: null,
-  }
+  };
 
   switch (message.type) {
     case 'text':
-      return { ...empty, contentText: message.text?.body || null }
+      return { ...empty, contentText: message.text?.body || null };
 
     case 'image':
       if (message.image?.id) {
@@ -1260,9 +1361,9 @@ async function parseMessageContent(
           contentText: message.image.caption || null,
           mediaUrl: await verifyAndBuildUrl(message.image.id),
           mediaType: message.image.mime_type,
-        }
+        };
       }
-      return empty
+      return empty;
 
     case 'video':
       if (message.video?.id) {
@@ -1271,9 +1372,9 @@ async function parseMessageContent(
           contentText: message.video.caption || null,
           mediaUrl: await verifyAndBuildUrl(message.video.id),
           mediaType: message.video.mime_type,
-        }
+        };
       }
-      return empty
+      return empty;
 
     case 'document':
       if (message.document?.id) {
@@ -1283,9 +1384,9 @@ async function parseMessageContent(
             message.document.caption || message.document.filename || null,
           mediaUrl: await verifyAndBuildUrl(message.document.id),
           mediaType: message.document.mime_type,
-        }
+        };
       }
-      return empty
+      return empty;
 
     case 'audio':
       if (message.audio?.id) {
@@ -1293,9 +1394,9 @@ async function parseMessageContent(
           ...empty,
           mediaUrl: await verifyAndBuildUrl(message.audio.id),
           mediaType: message.audio.mime_type,
-        }
+        };
       }
-      return empty
+      return empty;
 
     case 'sticker':
       if (message.sticker?.id) {
@@ -1303,47 +1404,51 @@ async function parseMessageContent(
           ...empty,
           mediaUrl: await verifyAndBuildUrl(message.sticker.id),
           mediaType: message.sticker.mime_type,
-        }
+        };
       }
-      return empty
+      return empty;
 
     case 'location':
       if (message.location) {
-        const loc = message.location
-        const locationText = [loc.name, loc.address, `${loc.latitude},${loc.longitude}`]
+        const loc = message.location;
+        const locationText = [
+          loc.name,
+          loc.address,
+          `${loc.latitude},${loc.longitude}`,
+        ]
           .filter(Boolean)
-          .join(' - ')
-        return { ...empty, contentText: locationText }
+          .join(' - ');
+        return { ...empty, contentText: locationText };
       }
-      return empty
+      return empty;
 
     case 'reaction':
-      return { ...empty, contentText: message.reaction?.emoji || null }
+      return { ...empty, contentText: message.reaction?.emoji || null };
 
     case 'interactive': {
       const reply =
-        message.interactive?.button_reply ?? message.interactive?.list_reply
+        message.interactive?.button_reply ?? message.interactive?.list_reply;
       if (reply?.id) {
         return {
           ...empty,
           contentText: reply.title || reply.id,
           interactiveReplyId: reply.id,
-        }
+        };
       }
-      return { ...empty, contentText: '[Interactive reply]' }
+      return { ...empty, contentText: '[Interactive reply]' };
     }
 
     case 'order': {
-      const productItems = message.order?.product_items ?? []
+      const productItems = message.order?.product_items ?? [];
       // Local cardápio first; ask Meta only for ids it doesn't know.
-      const names: Record<string, string> = {}
+      const names: Record<string, string> = {};
       for (const it of productItems) {
-        const local = productNameFromCardapio(it.product_retailer_id)
-        if (local) names[it.product_retailer_id] = local
+        const local = productNameFromCardapio(it.product_retailer_id);
+        if (local) names[it.product_retailer_id] = local;
       }
       const unknownIds = productItems
         .map((it) => it.product_retailer_id)
-        .filter((id) => !names[id])
+        .filter((id) => !names[id]);
       if (message.order?.catalog_id && unknownIds.length) {
         try {
           Object.assign(
@@ -1353,13 +1458,13 @@ async function parseMessageContent(
               retailerIds: unknownIds,
               accessToken,
             })
-          )
+          );
         } catch (err) {
           // Falls back to the retailer_id; the order still goes through.
           console.error(
             '[webhook] catalog product name lookup failed:',
             err instanceof Error ? err.message : err
-          )
+          );
         }
       }
       const items = productItems.map((it) => ({
@@ -1367,42 +1472,42 @@ async function parseMessageContent(
         name: names[it.product_retailer_id],
         quantity: it.quantity,
         unit_price: it.item_price,
-      }))
+      }));
       const total = items.reduce(
         (sum, it) => sum + it.quantity * it.unit_price,
         0
-      )
-      const fmt = (v: number) => `R$ ${v.toFixed(2).replace('.', ',')}`
+      );
+      const fmt = (v: number) => `R$ ${v.toFixed(2).replace('.', ',')}`;
       const lines = items.map(
         (it) =>
           `• ${it.quantity}x ${it.name ?? it.retailer_id} — ${fmt(it.quantity * it.unit_price)}`
-      )
+      );
       const summary = [
         '🛒 Novo pedido pelo catálogo:',
         ...lines,
         `Total: ${fmt(total)}`,
-      ].join('\n')
+      ].join('\n');
       return {
         ...empty,
         contentText: summary,
         order: { total, items },
-      }
+      };
     }
 
     default:
       return {
         ...empty,
         contentText: `[Unsupported message type: ${message.type}]`,
-      }
+      };
   }
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-type ContactRow = any
+type ContactRow = any;
 
 interface ContactOutcome {
-  contact: ContactRow
-  wasCreated: boolean
+  contact: ContactRow;
+  wasCreated: boolean;
 }
 
 async function findOrCreateContact(
@@ -1414,17 +1519,17 @@ async function findOrCreateContact(
   const existingContact = await findExistingContact(
     supabaseAdmin(),
     accountId,
-    phone,
-  )
+    phone
+  );
 
   if (existingContact) {
     if (name && name !== existingContact.name) {
       await supabaseAdmin()
         .from('contacts')
         .update({ name, updated_at: new Date().toISOString() })
-        .eq('id', existingContact.id)
+        .eq('id', existingContact.id);
     }
-    return { contact: existingContact, wasCreated: false }
+    return { contact: existingContact, wasCreated: false };
   }
 
   const { data: newContact, error: createError } = await supabaseAdmin()
@@ -1436,34 +1541,38 @@ async function findOrCreateContact(
       name: name || phone,
     })
     .select()
-    .single()
+    .single();
 
   if (createError) {
     if (isUniqueViolation(createError)) {
-      const raced = await findExistingContact(supabaseAdmin(), accountId, phone)
-      if (raced) return { contact: raced, wasCreated: false }
+      const raced = await findExistingContact(
+        supabaseAdmin(),
+        accountId,
+        phone
+      );
+      if (raced) return { contact: raced, wasCreated: false };
     }
-    console.error('Error creating contact:', createError)
-    return null
+    console.error('Error creating contact:', createError);
+    return null;
   }
 
-  return { contact: newContact, wasCreated: true }
+  return { contact: newContact, wasCreated: true };
 }
 
 async function findOrCreateConversation(
   accountId: string,
   configOwnerUserId: string,
-  contactId: string,
+  contactId: string
 ) {
   const { data: existing, error: findError } = await supabaseAdmin()
     .from('conversations')
     .select('*')
     .eq('account_id', accountId)
     .eq('contact_id', contactId)
-    .single()
+    .single();
 
   if (!findError && existing) {
-    return { conversation: existing, created: false }
+    return { conversation: existing, created: false };
   }
 
   const { data: newConv, error: createError } = await supabaseAdmin()
@@ -1474,12 +1583,12 @@ async function findOrCreateConversation(
       contact_id: contactId,
     })
     .select()
-    .single()
+    .single();
 
   if (createError) {
-    console.error('Error creating conversation:', createError)
-    return null
+    console.error('Error creating conversation:', createError);
+    return null;
   }
 
-  return { conversation: newConv, created: true }
+  return { conversation: newConv, created: true };
 }

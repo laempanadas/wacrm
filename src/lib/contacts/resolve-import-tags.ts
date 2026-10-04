@@ -1,4 +1,8 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import {
+  isForbiddenContactTag,
+  normalizeContactTagName,
+} from '@/lib/orders/create-order';
 
 const DEFAULT_TAG_COLOR = '#3b82f6';
 
@@ -33,17 +37,24 @@ export async function resolveImportTagIds(
 
   const uniqueNames: string[] = [];
   const seen = new Set<string>();
+  const skippedNames: string[] = [];
+
   for (const raw of tagNames) {
     const name = raw.trim();
     if (!name) continue;
-    const key = name.toLowerCase();
+    if (isForbiddenContactTag(name)) {
+      skippedNames.push(name);
+      continue;
+    }
+    const normalized = normalizeContactTagName(name) || name;
+    const key = normalized.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    uniqueNames.push(name);
+    uniqueNames.push(normalized);
   }
 
   if (uniqueNames.length === 0) {
-    return { tagIdByKey: new Map(), skippedNames: [] };
+    return { tagIdByKey: new Map(), skippedNames };
   }
 
   const { data: existing, error: fetchError } = await supabase
@@ -59,7 +70,6 @@ export async function resolveImportTagIds(
     if (!tagIdByKey.has(key)) tagIdByKey.set(key, tag.id);
   }
 
-  const skippedNames: string[] = [];
   const toCreate: string[] = [];
 
   for (const name of uniqueNames) {

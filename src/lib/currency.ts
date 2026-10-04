@@ -11,7 +11,7 @@
  */
 
 /** App-wide fallback when no account/deal currency is available. */
-export const DEFAULT_CURRENCY = "BRL";
+export const DEFAULT_CURRENCY = 'BRL';
 
 export interface CurrencyOption {
   /** ISO-4217 code, e.g. "USD". Stored verbatim in the DB. */
@@ -28,20 +28,20 @@ export interface CurrencyOption {
  * list to offer more — nothing else needs to change.
  */
 export const CURRENCIES: CurrencyOption[] = [
-  { code: "USD", label: "US Dollar", symbol: "$" },
-  { code: "EUR", label: "Euro", symbol: "€" },
-  { code: "GBP", label: "British Pound", symbol: "£" },
-  { code: "INR", label: "Indian Rupee", symbol: "₹" },
-  { code: "AUD", label: "Australian Dollar", symbol: "A$" },
-  { code: "CAD", label: "Canadian Dollar", symbol: "C$" },
-  { code: "BRL", label: "Brazilian Real", symbol: "R$" },
-  { code: "JPY", label: "Japanese Yen", symbol: "¥" },
-  { code: "CNY", label: "Chinese Yuan", symbol: "¥" },
-  { code: "AED", label: "UAE Dirham", symbol: "د.إ" },
-  { code: "ZAR", label: "South African Rand", symbol: "R" },
-  { code: "NGN", label: "Nigerian Naira", symbol: "₦" },
-  { code: "SGD", label: "Singapore Dollar", symbol: "S$" },
-  { code: "MXN", label: "Mexican Peso", symbol: "$" },
+  { code: 'USD', label: 'US Dollar', symbol: '$' },
+  { code: 'EUR', label: 'Euro', symbol: '€' },
+  { code: 'GBP', label: 'British Pound', symbol: '£' },
+  { code: 'INR', label: 'Indian Rupee', symbol: '₹' },
+  { code: 'AUD', label: 'Australian Dollar', symbol: 'A$' },
+  { code: 'CAD', label: 'Canadian Dollar', symbol: 'C$' },
+  { code: 'BRL', label: 'Brazilian Real', symbol: 'R$' },
+  { code: 'JPY', label: 'Japanese Yen', symbol: '¥' },
+  { code: 'CNY', label: 'Chinese Yuan', symbol: '¥' },
+  { code: 'AED', label: 'UAE Dirham', symbol: 'د.إ' },
+  { code: 'ZAR', label: 'South African Rand', symbol: 'R' },
+  { code: 'NGN', label: 'Nigerian Naira', symbol: '₦' },
+  { code: 'SGD', label: 'Singapore Dollar', symbol: 'S$' },
+  { code: 'MXN', label: 'Mexican Peso', symbol: '$' },
 ];
 
 /**
@@ -58,16 +58,16 @@ export const CURRENCIES: CurrencyOption[] = [
  */
 export function formatCurrency(
   value: number,
-  currency: string = DEFAULT_CURRENCY,
+  currency: string = DEFAULT_CURRENCY
 ): string {
   const code = (currency || DEFAULT_CURRENCY).trim();
   const amount = Number(value) || 0;
   // Use pt-BR locale for Brazilian Real to display "R$ 1.234,56"
   // For other currencies, use undefined (browser default)
-  const locale = code === "BRL" ? "pt-BR" : undefined;
+  const locale = code === 'BRL' ? 'pt-BR' : undefined;
   try {
     return new Intl.NumberFormat(locale, {
-      style: "currency",
+      style: 'currency',
       currency: code,
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
@@ -90,17 +90,17 @@ export function formatCurrency(
  */
 export function formatCurrencyShort(
   value: number,
-  currency: string = DEFAULT_CURRENCY,
+  currency: string = DEFAULT_CURRENCY
 ): string {
   const code = currency || DEFAULT_CURRENCY;
   const symbol = CURRENCIES.find((c) => c.code === code)?.symbol ?? `${code} `;
   const v = Number(value || 0);
   // Use comma as decimal separator for pt-BR
-  const decimalSeparator = code === "BRL" ? "," : ".";
+  const decimalSeparator = code === 'BRL' ? ',' : '.';
   const toFixedValue = (num: number, digits: number) => {
     const fixed = num.toFixed(digits);
-    if (code === "BRL") {
-      return fixed.replace(".", ",");
+    if (code === 'BRL') {
+      return fixed.replace('.', ',');
     }
     return fixed;
   };

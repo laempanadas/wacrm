@@ -25,10 +25,10 @@ No painel da Vercel:
 
 ## 2. Variáveis do Mercado Pago
 
-| Variável           | Onde usar        | Obrigatória | Descrição                                                                 |
-| ------------------ | ---------------- | ----------- | ------------------------------------------------------------------------- |
-| `MP_ACCESS_TOKEN`  | **Servidor**     | Sim¹        | Access Token da sua conta Mercado Pago (Checkout Pro). **Segredo.**       |
-| `MP_PUBLIC_KEY`    | Cliente/servidor | Opcional    | Public Key (usada apenas se houver checkout no frontend).                 |
+| Variável          | Onde usar        | Obrigatória | Descrição                                                           |
+| ----------------- | ---------------- | ----------- | ------------------------------------------------------------------- |
+| `MP_ACCESS_TOKEN` | **Servidor**     | Sim¹        | Access Token da sua conta Mercado Pago (Checkout Pro). **Segredo.** |
+| `MP_PUBLIC_KEY`   | Cliente/servidor | Opcional    | Public Key (usada apenas se houver checkout no frontend).           |
 
 ¹ A integração é **opcional**: enquanto `MP_ACCESS_TOKEN` não estiver
 definido, o CRM funciona normalmente e a interface mostra um aviso
@@ -52,12 +52,12 @@ Veja também: [`docs/mercado-pago-setup.md`](./mercado-pago-setup.md).
 
 Estas já são necessárias para o CRM funcionar (Supabase e criptografia):
 
-| Variável                        | Onde usar    | Descrição                                             |
-| ------------------------------- | ------------ | ----------------------------------------------------- |
-| `NEXT_PUBLIC_SUPABASE_URL`      | Cliente      | URL do projeto Supabase.                              |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Cliente      | Chave pública (anon) do Supabase.                     |
-| `SUPABASE_SERVICE_ROLE_KEY`     | **Servidor** | Chave service-role do Supabase. **Segredo.**          |
-| `ENCRYPTION_KEY`                | **Servidor** | Chave de criptografia (hex de 64 caracteres). Segredo.|
+| Variável                        | Onde usar    | Descrição                                              |
+| ------------------------------- | ------------ | ------------------------------------------------------ |
+| `NEXT_PUBLIC_SUPABASE_URL`      | Cliente      | URL do projeto Supabase.                               |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Cliente      | Chave pública (anon) do Supabase.                      |
+| `SUPABASE_SERVICE_ROLE_KEY`     | **Servidor** | Chave service-role do Supabase. **Segredo.**           |
+| `ENCRYPTION_KEY`                | **Servidor** | Chave de criptografia (hex de 64 caracteres). Segredo. |
 
 > Consulte `.env.example` / `.env.local.example` para a lista completa e
 > valores de exemplo.

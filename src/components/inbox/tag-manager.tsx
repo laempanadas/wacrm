@@ -1,24 +1,28 @@
-'use client'
+'use client';
 
-import { useState, useCallback, useMemo } from 'react'
-import { createClient } from '@/lib/supabase/client'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
+import { useState, useCallback, useMemo } from 'react';
+import { createClient } from '@/lib/supabase/client';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
-} from '@/components/ui/popover'
-import { Plus, Search, X, Loader2 } from 'lucide-react'
-import { toast } from 'sonner'
-import { isValidUuid } from '@/lib/utils/uuid'
-import type { Contact, Tag } from '@/types'
+} from '@/components/ui/popover';
+import { Plus, Search, X, Loader2 } from 'lucide-react';
+import { toast } from 'sonner';
+import { useAuth } from '@/hooks/use-auth';
+import {
+  isForbiddenContactTag,
+  normalizeContactTagName,
+} from '@/lib/orders/create-order';
+import type { Contact, Tag } from '@/types';
 
 interface TagManagerProps {
-  contact: Contact
-  activeTags: (Tag & { contact_tag_id: string })[]
-  allTags: Tag[]
-  onTagsUpdated?: () => void
+  contact: Contact;
+  activeTags: (Tag & { contact_tag_id: string })[];
+  allTags: Tag[];
+  onTagsUpdated?: () => void;
 }
 
 /**
@@ -31,43 +35,56 @@ export function TagManager({
   allTags,
   onTagsUpdated,
 }: TagManagerProps) {
-  const [isOpen, setIsOpen] = useState(false)
-  const [searchQuery, setSearchQuery] = useState('')
-  const [isLoading, setIsLoading] = useState(false)
+  const { user, accountId } = useAuth();
+  const [isOpen, setIsOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
   const [localActiveTags, setLocalActiveTags] = useState<string[]>(
     activeTags.map((t) => t.id)
-  )
+  );
 
-  const supabase = createClient()
+  const supabase = createClient();
+
+  // Filtrar tags (removendo variáveis internas e etapas de kanban proibidas)
+  const sanitizedAllTags = useMemo(() => {
+    return allTags.filter((t) => !isForbiddenContactTag(t.name));
+  }, [allTags]);
 
   // Filtrar tags baseado na busca
   const filteredTags = useMemo(() => {
-    const normalized = searchQuery.toLowerCase().trim()
-    if (!normalized) return allTags
+    const normalized = searchQuery.toLowerCase().trim();
+    if (!normalized) return sanitizedAllTags;
 
-    return allTags.filter((tag) =>
+    return sanitizedAllTags.filter((tag) =>
       tag.name.toLowerCase().includes(normalized)
-    )
-  }, [allTags, searchQuery])
+    );
+  }, [sanitizedAllTags, searchQuery]);
 
   // Detectar se há tag sendo criada (não existe na lista)
   const newTagName = useMemo(() => {
-    const normalized = searchQuery.toLowerCase().trim()
-    if (!normalized) return null
-    if (filteredTags.some((t) => t.name.toLowerCase() === normalized)) {
-      return null
+    const normalized = searchQuery.toLowerCase().trim();
+    if (!normalized) return null;
+    if (isForbiddenContactTag(normalized)) return null;
+    const targetName = normalizeContactTagName(normalized);
+    if (!targetName) return null;
+    if (
+      filteredTags.some(
+        (t) => t.name.toLowerCase() === targetName.toLowerCase()
+      )
+    ) {
+      return null;
     }
-    return normalized
-  }, [searchQuery, filteredTags])
+    return targetName;
+  }, [searchQuery, filteredTags]);
 
   const toggleTag = useCallback(
     async (tagId: string, tagName: string) => {
-      const isActive = localActiveTags.includes(tagId)
+      const isActive = localActiveTags.includes(tagId);
 
       // Optimistic update
       setLocalActiveTags((prev) =>
         isActive ? prev.filter((id) => id !== tagId) : [...prev, tagId]
-      )
+      );
 
       try {
         if (isActive) {
@@ -76,84 +93,119 @@ export function TagManager({
             .from('contact_tags')
             .delete()
             .eq('contact_id', contact.id)
-            .eq('tag_id', tagId)
+            .eq('tag_id', tagId);
         } else {
           // Adicionar tag
           await supabase.from('contact_tags').insert({
             contact_id: contact.id,
             tag_id: tagId,
-          })
+          });
         }
 
-        const action = isActive ? 'removida' : 'adicionada'
-        toast.success(`Tag "${tagName}" ${action}`)
-        onTagsUpdated?.()
+        const action = isActive ? 'removida' : 'adicionada';
+        toast.success(`Tag "${tagName}" ${action}`);
+        onTagsUpdated?.();
       } catch (err) {
         // Reverter optimistic update em caso de erro
         setLocalActiveTags((prev) =>
           isActive ? [...prev, tagId] : prev.filter((id) => id !== tagId)
-        )
+        );
         const message =
-          err instanceof Error ? err.message : 'Erro ao atualizar tag'
-        toast.error(message)
+          err instanceof Error ? err.message : 'Erro ao atualizar tag';
+        toast.error(message);
       }
     },
     [contact.id, localActiveTags, supabase, onTagsUpdated]
-  )
+  );
 
   const createAndApplyTag = useCallback(
     async (tagName: string) => {
-      if (!tagName.trim()) {
-        toast.error('Nome da tag não pode estar vazio')
-        return
+      const trimmed = tagName.trim();
+      if (!trimmed) {
+        toast.error('Nome da tag não pode estar vazio');
+        return;
       }
 
-      setIsLoading(true)
+      if (isForbiddenContactTag(trimmed)) {
+        toast.error(
+          'Esta tag é reservada para controle interno ou etapa do Kanban.'
+        );
+        return;
+      }
+
+      const targetTagName = normalizeContactTagName(trimmed) || trimmed;
+
+      // Se já existe com este nome padronizado, reaproveita
+      const existing = allTags.find(
+        (t) => t.name.toLowerCase() === targetTagName.toLowerCase()
+      );
+      if (existing) {
+        await toggleTag(existing.id, existing.name);
+        setSearchQuery('');
+        return;
+      }
+
+      setIsLoading(true);
       try {
         // 1. Criar a tag
+        const tagPayload: Record<string, unknown> = {
+          name: targetTagName,
+          color: '#3b82f6',
+        };
+        if (accountId) tagPayload.account_id = accountId;
+        if (user?.id) tagPayload.user_id = user.id;
+
         const { data: newTag, error: createErr } = await supabase
           .from('tags')
-          .insert({ name: tagName, color: '#3b82f6' })
+          .insert(tagPayload)
           .select('id, name, color')
-          .single()
+          .single();
 
         if (createErr || !newTag) {
-          throw new Error(createErr?.message || 'Erro ao criar tag')
+          throw new Error(createErr?.message || 'Erro ao criar tag');
         }
 
         // 2. Aplicar ao contato
         await supabase.from('contact_tags').insert({
           contact_id: contact.id,
           tag_id: newTag.id,
-        })
+        });
 
         // Atualizar estado local
-        setLocalActiveTags((prev) => [...prev, newTag.id])
-        setSearchQuery('')
-        toast.success(`Tag "${tagName}" criada e aplicada!`)
-        onTagsUpdated?.()
+        setLocalActiveTags((prev) => [...prev, newTag.id]);
+        setSearchQuery('');
+        toast.success(`Tag "${targetTagName}" criada e aplicada!`);
+        onTagsUpdated?.();
       } catch (err) {
         const message =
-          err instanceof Error ? err.message : 'Erro ao criar tag'
-        toast.error(message)
+          err instanceof Error ? err.message : 'Erro ao criar tag';
+        toast.error(message);
       } finally {
-        setIsLoading(false)
+        setIsLoading(false);
       }
     },
-    [contact.id, supabase, onTagsUpdated]
-  )
+    [
+      contact.id,
+      supabase,
+      onTagsUpdated,
+      accountId,
+      allTags,
+      toggleTag,
+      user?.id,
+    ]
+  );
 
   const removeTagQuick = useCallback(
     (tagId: string, tagName: string) => {
-      toggleTag(tagId, tagName)
+      toggleTag(tagId, tagName);
     },
     [toggleTag]
-  )
+  );
 
   const activeTagsObjects = useMemo(
     () => allTags.filter((t) => localActiveTags.includes(t.id)),
     [allTags, localActiveTags]
-  )
+  );
 
   return (
     <Popover open={isOpen} onOpenChange={setIsOpen}>
@@ -161,7 +213,7 @@ export function TagManager({
         <Button
           size="sm"
           variant="ghost"
-          className="h-6 w-6 p-0 hover:bg-primary/10"
+          className="hover:bg-primary/10 h-6 w-6 p-0"
           title="Gerenciar tags"
         >
           <Plus className="h-4 w-4" />
@@ -172,7 +224,7 @@ export function TagManager({
         <div className="space-y-3">
           {/* Header */}
           <div className="flex items-center gap-2">
-            <Search className="h-4 w-4 text-muted-foreground" />
+            <Search className="text-muted-foreground h-4 w-4" />
             <Input
               placeholder="Buscar ou criar tag..."
               value={searchQuery}
@@ -185,7 +237,7 @@ export function TagManager({
 
           {/* Tags ativas (badges com X) */}
           {activeTagsObjects.length > 0 && (
-            <div className="flex flex-wrap gap-2 pt-2 border-t">
+            <div className="flex flex-wrap gap-2 border-t pt-2">
               {activeTagsObjects.map((tag) => (
                 <div
                   key={tag.id}
@@ -198,7 +250,7 @@ export function TagManager({
                   {tag.name}
                   <button
                     onClick={() => removeTagQuick(tag.id, tag.name)}
-                    className="ml-1 hover:opacity-70 transition-opacity"
+                    className="ml-1 transition-opacity hover:opacity-70"
                     title="Remover tag"
                   >
                     <X className="h-3 w-3" />
@@ -209,21 +261,23 @@ export function TagManager({
           )}
 
           {/* Lista de tags disponíveis */}
-          <div className="space-y-1 max-h-48 overflow-y-auto">
+          <div className="max-h-48 space-y-1 overflow-y-auto">
             {filteredTags.length > 0 ? (
               filteredTags.map((tag) => {
-                const isActive = localActiveTags.includes(tag.id)
+                const isActive = localActiveTags.includes(tag.id);
                 return (
                   <button
                     key={tag.id}
                     onClick={() => toggleTag(tag.id, tag.name)}
                     disabled={isLoading}
-                    className="w-full text-left px-3 py-2 rounded-md text-sm transition-colors hover:bg-muted disabled:opacity-50"
+                    className="hover:bg-muted w-full rounded-md px-3 py-2 text-left text-sm transition-colors disabled:opacity-50"
                   >
                     <div className="flex items-center gap-2">
                       <div
                         className={`h-3 w-3 rounded-full border-2 ${
-                          isActive ? 'border-primary bg-primary' : 'border-muted'
+                          isActive
+                            ? 'border-primary bg-primary'
+                            : 'border-muted'
                         }`}
                       />
                       <span className={isActive ? 'font-semibold' : ''}>
@@ -231,10 +285,10 @@ export function TagManager({
                       </span>
                     </div>
                   </button>
-                )
+                );
               })
             ) : (
-              <p className="text-xs text-muted-foreground px-3 py-2">
+              <p className="text-muted-foreground px-3 py-2 text-xs">
                 Nenhuma tag encontrada
               </p>
             )}
@@ -246,19 +300,19 @@ export function TagManager({
               <button
                 onClick={() => createAndApplyTag(newTagName)}
                 disabled={isLoading}
-                className="w-full text-left px-3 py-2 rounded-md text-sm bg-primary/10 hover:bg-primary/20 transition-colors disabled:opacity-50 flex items-center gap-2 text-primary font-medium"
+                className="bg-primary/10 hover:bg-primary/20 text-primary flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm font-medium transition-colors disabled:opacity-50"
               >
                 {isLoading ? (
                   <Loader2 className="h-3 w-3 animate-spin" />
                 ) : (
                   <Plus className="h-3 w-3" />
                 )}
-                Criar e aplicar "{newTagName}"
+                Criar e aplicar &quot;{newTagName}&quot;
               </button>
             </div>
           )}
         </div>
       </PopoverContent>
     </Popover>
-  )
+  );
 }

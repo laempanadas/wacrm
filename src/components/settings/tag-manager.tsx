@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
-import { Loader2, Plus, Tag as TagIcon, X } from 'lucide-react';
+import { Loader2, Plus, Sparkles, Tag as TagIcon, X } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/hooks/use-auth';
 import { Button } from '@/components/ui/button';
@@ -23,6 +23,10 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
+import {
+  isForbiddenContactTag,
+  normalizeContactTagName,
+} from '@/lib/orders/create-order';
 import type { Tag } from '@/types';
 
 const PRESET_COLORS = [
@@ -51,6 +55,7 @@ export function TagManager() {
   const [tagToDelete, setTagToDelete] = useState<Tag | null>(null);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [sanitizing, setSanitizing] = useState(false);
   const [newTagName, setNewTagName] = useState('');
   const [selectedColor, setSelectedColor] = useState(PRESET_COLORS[3].value);
 
@@ -62,16 +67,20 @@ export function TagManager() {
     }
     fetchTags(user.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authLoading, user?.id]);
+  }, [authLoading, user?.id, accountId]);
 
   async function fetchTags(userId: string) {
     try {
       setLoading(true);
-      const { data, error } = await supabase
-        .from('tags')
-        .select('*')
-        .eq('user_id', userId)
-        .order('created_at', { ascending: true });
+      let query = supabase.from('tags').select('*');
+      if (accountId) {
+        query = query.eq('account_id', accountId);
+      } else {
+        query = query.eq('user_id', userId);
+      }
+      const { data, error } = await query.order('created_at', {
+        ascending: true,
+      });
 
       if (error) throw error;
       setTags(data || []);
@@ -84,8 +93,25 @@ export function TagManager() {
   }
 
   async function handleCreate() {
-    if (!newTagName.trim()) {
+    const trimmed = newTagName.trim();
+    if (!trimmed) {
       toast.error('Tag name is required');
+      return;
+    }
+
+    if (isForbiddenContactTag(trimmed)) {
+      toast.error(
+        'Esta tag é reservada para controle interno ou etapa do Kanban.'
+      );
+      return;
+    }
+
+    const targetTagName = normalizeContactTagName(trimmed) || trimmed;
+
+    if (
+      tags.some((t) => t.name.toLowerCase() === targetTagName.toLowerCase())
+    ) {
+      toast.error(`A tag "${targetTagName}" já existe.`);
       return;
     }
 
@@ -101,7 +127,7 @@ export function TagManager() {
       const { error } = await supabase.from('tags').insert({
         user_id: user.id,
         account_id: accountId,
-        name: newTagName.trim(),
+        name: targetTagName,
         color: selectedColor,
       });
 
@@ -116,6 +142,28 @@ export function TagManager() {
       toast.error('Failed to create tag');
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleSanitize() {
+    try {
+      setSanitizing(true);
+      const res = await fetch('/api/admin/sanitize-tags', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Falha ao higienizar tags');
+      }
+      toast.success(
+        `Higienização concluída: ${data.stats.mergedAguardando} mescladas, ${data.stats.removedForbiddenTags} removidas, ${data.stats.createdCustomFields} campos criados.`
+      );
+      if (user) await fetchTags(user.id);
+    } catch (err) {
+      console.error('Sanitize error:', err);
+      toast.error(
+        err instanceof Error ? err.message : 'Falha ao higienizar tags'
+      );
+    } finally {
+      setSanitizing(false);
     }
   }
 
@@ -150,19 +198,35 @@ export function TagManager() {
 
   return (
     <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-foreground">
-          <TagIcon className="size-4 text-primary" />
-          Tags
-        </CardTitle>
-        <CardDescription className="text-muted-foreground">
-          Colour-coded labels for grouping and filtering contacts.
-        </CardDescription>
+      <CardHeader className="flex flex-row items-start justify-between space-y-0">
+        <div>
+          <CardTitle className="text-foreground flex items-center gap-2">
+            <TagIcon className="text-primary size-4" />
+            Tags
+          </CardTitle>
+          <CardDescription className="text-muted-foreground mt-1.5">
+            Colour-coded labels for grouping and filtering contacts.
+          </CardDescription>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleSanitize}
+          disabled={sanitizing}
+          className="gap-1.5 text-xs"
+        >
+          {sanitizing ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <Sparkles className="size-3.5 text-amber-500" />
+          )}
+          Higienizar Tags
+        </Button>
       </CardHeader>
       <CardContent className="space-y-4">
         {loading ? (
           <div className="flex items-center justify-center py-8">
-            <Loader2 className="size-6 animate-spin text-primary" />
+            <Loader2 className="text-primary size-6 animate-spin" />
           </div>
         ) : (
           <>
@@ -195,7 +259,7 @@ export function TagManager() {
                 ))}
               </div>
             ) : (
-              <p className="text-sm text-muted-foreground">
+              <p className="text-muted-foreground text-sm">
                 No tags yet — create your first one below.
               </p>
             )}
@@ -224,7 +288,7 @@ export function TagManager() {
                     className={cn(
                       'size-6 rounded-md transition-transform hover:scale-110',
                       selectedColor === color.value &&
-                        'outline outline-2 outline-offset-2 outline-primary',
+                        'outline-primary outline outline-2 outline-offset-2'
                     )}
                     style={{ backgroundColor: color.value }}
                     title={color.name}

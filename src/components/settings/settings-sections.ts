@@ -48,20 +48,73 @@ export interface SectionMeta {
 }
 
 export const SECTION_META: Record<SettingsSection, SectionMeta> = {
-  overview: { id: 'overview', label: 'Visão geral', icon: LayoutGrid, group: 'top' },
+  overview: {
+    id: 'overview',
+    label: 'Visão geral',
+    icon: LayoutGrid,
+    group: 'top',
+  },
   profile: { id: 'profile', label: 'Seu perfil', icon: User, group: 'account' },
-  security: { id: 'security', label: 'Login e segurança', icon: Shield, group: 'account' },
-  appearance: { id: 'appearance', label: 'Aparência', icon: Palette, group: 'account' },
-  whatsapp: { id: 'whatsapp', label: 'WhatsApp', icon: PlugZap, group: 'workspace' },
-  templates: { id: 'templates', label: 'Templates', icon: FileText, group: 'workspace' },
-  messages: { id: 'messages', label: 'Mensagens Prontas', icon: MessageSquareText, group: 'workspace' },
-  fields: { id: 'fields', label: 'Campos e etiquetas', icon: Tags, group: 'workspace' },
-  deals: { id: 'deals', label: 'Pedidos e moeda', icon: Coins, group: 'workspace' },
-  members: { id: 'members', label: 'Equipe', icon: UsersRound, group: 'workspace' },
-  api: { id: 'api', label: 'Chaves de API', icon: KeyRound, group: 'workspace' },
+  security: {
+    id: 'security',
+    label: 'Login e segurança',
+    icon: Shield,
+    group: 'account',
+  },
+  appearance: {
+    id: 'appearance',
+    label: 'Aparência',
+    icon: Palette,
+    group: 'account',
+  },
+  whatsapp: {
+    id: 'whatsapp',
+    label: 'WhatsApp',
+    icon: PlugZap,
+    group: 'workspace',
+  },
+  templates: {
+    id: 'templates',
+    label: 'Templates',
+    icon: FileText,
+    group: 'workspace',
+  },
+  messages: {
+    id: 'messages',
+    label: 'Mensagens Prontas',
+    icon: MessageSquareText,
+    group: 'workspace',
+  },
+  fields: {
+    id: 'fields',
+    label: 'Campos e etiquetas',
+    icon: Tags,
+    group: 'workspace',
+  },
+  deals: {
+    id: 'deals',
+    label: 'Pedidos e moeda',
+    icon: Coins,
+    group: 'workspace',
+  },
+  members: {
+    id: 'members',
+    label: 'Equipe',
+    icon: UsersRound,
+    group: 'workspace',
+  },
+  api: {
+    id: 'api',
+    label: 'Chaves de API',
+    icon: KeyRound,
+    group: 'workspace',
+  },
 };
 
-export const RAIL_GROUPS: { label: string | null; group: SectionMeta['group'] }[] = [
+export const RAIL_GROUPS: {
+  label: string | null;
+  group: SectionMeta['group'];
+}[] = [
   { label: null, group: 'top' },
   { label: 'Conta', group: 'account' },
   { label: 'Espaço de trabalho', group: 'workspace' },

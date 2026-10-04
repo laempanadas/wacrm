@@ -1,22 +1,22 @@
-import { supabaseAdmin } from './admin-client'
-import { loadAiConfig } from './config'
-import { buildConversationContext } from './context'
-import { retrieveKnowledge } from './knowledge'
-import { generateReply } from './generate'
-import { buildSystemPrompt } from './defaults'
-import { latestUserMessage } from './query'
-import { engineSendText } from '@/lib/flows/meta-send'
-import { checkZeroTokenMatch } from './fast-path'
-import { TEMPLATE_LIMIT_REACHED } from '@/lib/orders/delivery-templates'
+import { supabaseAdmin } from './admin-client';
+import { loadAiConfig } from './config';
+import { buildConversationContext } from './context';
+import { retrieveKnowledge } from './knowledge';
+import { generateReply } from './generate';
+import { buildSystemPrompt } from './defaults';
+import { latestUserMessage } from './query';
+import { engineSendText } from '@/lib/flows/meta-send';
+import { checkZeroTokenMatch } from './fast-path';
+import { TEMPLATE_LIMIT_REACHED } from '@/lib/orders/delivery-templates';
 
 interface DispatchArgs {
   /** Tenancy key — drives config, contact, and whatsapp_config lookups. */
-  accountId: string
-  conversationId: string
-  contactId: string
+  accountId: string;
+  conversationId: string;
+  contactId: string;
   /** The account's WhatsApp config owner, used for the outbound send's
    *  audit columns (mirrors how the flow runner passes it through). */
-  configOwnerUserId: string
+  configOwnerUserId: string;
 }
 
 /**
@@ -40,25 +40,28 @@ interface DispatchArgs {
  * window check is needed.
  */
 export async function dispatchInboundToAiReply(
-  args: DispatchArgs,
+  args: DispatchArgs
 ): Promise<void> {
-  const { accountId, conversationId, contactId, configOwnerUserId } = args
+  const { accountId, conversationId, contactId, configOwnerUserId } = args;
 
   try {
-    const db = supabaseAdmin()
+    const db = supabaseAdmin();
 
-    const AGENT_INACTIVITY_THRESHOLD_MS = 30 * 60 * 1000 // 30 minutos
-    const CUSTOMER_INACTIVITY_THRESHOLD_MS = 4 * 60 * 60 * 1000 // 4 horas
+    const AGENT_INACTIVITY_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutos
+    const CUSTOMER_INACTIVITY_THRESHOLD_MS = 4 * 60 * 60 * 1000; // 4 horas
 
-    const config = await loadAiConfig(db, accountId)
+    const config = await loadAiConfig(db, accountId);
     if (!config || !config.autoReplyEnabled) {
-      console.log('[ai auto-reply] blocked: config missing or auto-reply disabled', {
-        accountId,
-        conversationId,
-        hasConfig: !!config,
-        autoReplyEnabled: config?.autoReplyEnabled ?? false,
-      })
-      return
+      console.log(
+        '[ai auto-reply] blocked: config missing or auto-reply disabled',
+        {
+          accountId,
+          conversationId,
+          hasConfig: !!config,
+          autoReplyEnabled: config?.autoReplyEnabled ?? false,
+        }
+      );
+      return;
     }
 
     // Deterministic, user-configured responders win over the LLM — the
@@ -75,45 +78,47 @@ export async function dispatchInboundToAiReply(
       .eq('account_id', accountId)
       .eq('is_active', true)
       .in('trigger_type', ['new_message_received', 'keyword_match'])
-      .limit(1)
+      .limit(1);
     if (autoResponders && autoResponders.length > 0) {
       console.log('[ai auto-reply] blocked: active message automation', {
         accountId,
         conversationId,
         autoResponderCount: autoResponders.length,
-      })
-      return
+      });
+      return;
     }
 
     const { data: conv, error: convErr } = await db
       .from('conversations')
-      .select('status, assigned_agent_id, ai_autoreply_disabled, ai_reply_count, last_agent_message_at')
+      .select(
+        'status, assigned_agent_id, ai_autoreply_disabled, ai_reply_count, last_agent_message_at'
+      )
       .eq('id', conversationId)
-      .maybeSingle()
+      .maybeSingle();
     if (convErr || !conv) {
       console.log('[ai auto-reply] blocked: conversation missing', {
         accountId,
         conversationId,
         convErr: convErr?.message,
-      })
-      return
+      });
+      return;
     }
 
     // FEATURE: Reset automático de handoff após 2 horas de inatividade do agente
     // Se ai_autoreply_disabled=true mas passaram 2h desde a última mensagem do agente,
     // a conversa é reaberta para a IA responder novamente (clientes recorrentes).
-    const HANDOFF_RESET_THRESHOLD_MS = 2 * 60 * 60 * 1000 // 2 horas
+    const HANDOFF_RESET_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 horas
     if (conv.ai_autoreply_disabled && conv.last_agent_message_at) {
-      const lastAgentAt = new Date(conv.last_agent_message_at)
-      const now = new Date()
-      const timeSinceLastAgent = now.getTime() - lastAgentAt.getTime()
+      const lastAgentAt = new Date(conv.last_agent_message_at);
+      const now = new Date();
+      const timeSinceLastAgent = now.getTime() - lastAgentAt.getTime();
 
       if (timeSinceLastAgent > HANDOFF_RESET_THRESHOLD_MS) {
         console.log('[ai auto-reply] resetting handoff after 2h inactivity', {
           accountId,
           conversationId,
           timeSinceLastAgentMs: timeSinceLastAgent,
-        })
+        });
         // Reativa a IA e zera o contador de respostas
         await db
           .from('conversations')
@@ -121,10 +126,10 @@ export async function dispatchInboundToAiReply(
             ai_autoreply_disabled: false,
             ai_reply_count: 0,
           })
-          .eq('id', conversationId)
+          .eq('id', conversationId);
         // Usa os valores resetados para o resto da lógica
-        conv.ai_autoreply_disabled = false
-        conv.ai_reply_count = 0
+        conv.ai_autoreply_disabled = false;
+        conv.ai_reply_count = 0;
       }
     }
 
@@ -135,33 +140,41 @@ export async function dispatchInboundToAiReply(
         accountId,
         conversationId,
         status: conv.status,
-      })
-      return
+      });
+      return;
     }
 
-    const now = new Date()
-    const lastAgentMessageAt = conv.last_agent_message_at ? new Date(conv.last_agent_message_at) : null
-    const agentInactive = !lastAgentMessageAt || now.getTime() - lastAgentMessageAt.getTime() > AGENT_INACTIVITY_THRESHOLD_MS
+    const now = new Date();
+    const lastAgentMessageAt = conv.last_agent_message_at
+      ? new Date(conv.last_agent_message_at)
+      : null;
+    const agentInactive =
+      !lastAgentMessageAt ||
+      now.getTime() - lastAgentMessageAt.getTime() >
+        AGENT_INACTIVITY_THRESHOLD_MS;
 
     if (conv.assigned_agent_id && !agentInactive) {
       console.log('[ai auto-reply] blocked: human assigned and active', {
         accountId,
         conversationId,
         assigned_agent_id: conv.assigned_agent_id,
-      })
-      return
+      });
+      return;
     }
     if (conv.ai_autoreply_disabled && !agentInactive) {
-      console.log('[ai auto-reply] blocked: auto-reply disabled for conversation while agent is active', {
-        accountId,
-        conversationId,
-      })
-      return
+      console.log(
+        '[ai auto-reply] blocked: auto-reply disabled for conversation while agent is active',
+        {
+          accountId,
+          conversationId,
+        }
+      );
+      return;
     }
 
     // If the agent is active but the customer has been quiet for a long time,
     // we can re-engage the thread even with a human assignment still present.
-    let customerInactive = false
+    let customerInactive = false;
     if (conv.assigned_agent_id && !agentInactive) {
       const { data: lastCustomerMsg } = await db
         .from('messages')
@@ -170,32 +183,39 @@ export async function dispatchInboundToAiReply(
         .eq('sender_type', 'customer')
         .order('created_at', { ascending: false })
         .limit(1)
-        .maybeSingle()
+        .maybeSingle();
 
       if (lastCustomerMsg?.created_at) {
-        const lastCustomerAt = new Date(lastCustomerMsg.created_at)
-        const customerInactiveMs = now.getTime() - lastCustomerAt.getTime()
-        customerInactive = customerInactiveMs > CUSTOMER_INACTIVITY_THRESHOLD_MS
+        const lastCustomerAt = new Date(lastCustomerMsg.created_at);
+        const customerInactiveMs = now.getTime() - lastCustomerAt.getTime();
+        customerInactive =
+          customerInactiveMs > CUSTOMER_INACTIVITY_THRESHOLD_MS;
       } else {
-        customerInactive = true
+        customerInactive = true;
       }
     }
 
-    const shouldReengage = customerInactive
+    const shouldReengage = customerInactive;
     if (conv.assigned_agent_id && !agentInactive && !shouldReengage) {
-      console.log('[ai auto-reply] blocked: human assigned and customer is active', {
-        accountId,
-        conversationId,
-        assigned_agent_id: conv.assigned_agent_id,
-      })
-      return
+      console.log(
+        '[ai auto-reply] blocked: human assigned and customer is active',
+        {
+          accountId,
+          conversationId,
+          assigned_agent_id: conv.assigned_agent_id,
+        }
+      );
+      return;
     }
     if (conv.ai_autoreply_disabled && !agentInactive && !shouldReengage) {
-      console.log('[ai auto-reply] blocked: auto-reply disabled and customer is active', {
-        accountId,
-        conversationId,
-      })
-      return
+      console.log(
+        '[ai auto-reply] blocked: auto-reply disabled and customer is active',
+        {
+          accountId,
+          conversationId,
+        }
+      );
+      return;
     }
 
     // Cheap early-out; the authoritative cap check is the atomic claim
@@ -206,7 +226,7 @@ export async function dispatchInboundToAiReply(
         conversationId,
         ai_reply_count: conv.ai_reply_count,
         max: config.autoReplyMaxPerConversation,
-      })
+      });
 
       // COST-CAP: Envia apenas o link do cardápio sem consumir tokens da LLM
       // Estratégia de custo: última mensagem com CTA clara antes de passar para agente humano
@@ -217,7 +237,7 @@ export async function dispatchInboundToAiReply(
           .select('id')
           .eq('id', conversationId)
           .eq('ai_autoreply_disabled', true)
-          .maybeSingle()
+          .maybeSingle();
 
         if (!limitSent) {
           // Primeira vez que o limite é atingido — envia template de fallback
@@ -227,54 +247,63 @@ export async function dispatchInboundToAiReply(
             conversationId,
             contactId,
             text: TEMPLATE_LIMIT_REACHED,
-          })
+          });
 
           // Desativa auto-reply para forçar handoff humano
           await db
             .from('conversations')
             .update({ ai_autoreply_disabled: true })
-            .eq('id', conversationId)
+            .eq('id', conversationId);
 
-          console.log('[ai auto-reply] cost-cap: sent fallback template and disabled auto-reply', {
-            accountId,
-            conversationId,
-          })
+          console.log(
+            '[ai auto-reply] cost-cap: sent fallback template and disabled auto-reply',
+            {
+              accountId,
+              conversationId,
+            }
+          );
         }
       } catch (err) {
-        console.warn('[ai auto-reply] cost-cap: failed to send fallback template:', err)
+        console.warn(
+          '[ai auto-reply] cost-cap: failed to send fallback template:',
+          err
+        );
       }
 
-      return
+      return;
     }
 
-    const messages = await buildConversationContext(db, conversationId)
+    const messages = await buildConversationContext(db, conversationId);
     if (messages.length === 0) {
-      console.log('[ai auto-reply] blocked: empty conversation context', { accountId, conversationId })
-      return
+      console.log('[ai auto-reply] blocked: empty conversation context', {
+        accountId,
+        conversationId,
+      });
+      return;
     }
 
-    const latestText = latestUserMessage(messages)
+    const latestText = latestUserMessage(messages);
 
     // FEATURE: Camada zero-token (Fast Path)
     // Antes de chamar a LLM, tenta combinar perguntas frequentes (cardápio, horário, pix)
     // Economiza tokens e reduz latência em ~90% para respostas determinísticas.
-    const fastPathResult = checkZeroTokenMatch(latestText)
+    const fastPathResult = checkZeroTokenMatch(latestText);
     if (fastPathResult.matched && fastPathResult.response) {
       console.log('[ai auto-reply] zero-token match', {
         accountId,
         conversationId,
         pattern: latestText.substring(0, 50),
-      })
+      });
 
       // Resposta determinística — não gasta tokens da LLM
-      const text = fastPathResult.response
+      const text = fastPathResult.response;
       await engineSendText({
         accountId,
         userId: configOwnerUserId,
         conversationId,
         contactId,
         text,
-      })
+      });
       // Incrementa o contador de respostas da IA mesmo para fast-path
       // (resposta automática é resposta automática)
       const { data: claimed, error: claimErr } = await db.rpc(
@@ -282,12 +311,15 @@ export async function dispatchInboundToAiReply(
         {
           conversation_id: conversationId,
           max_replies: config.autoReplyMaxPerConversation,
-        },
-      )
+        }
+      );
       if (claimErr || claimed !== true) {
-        console.log('[ai auto-reply] failed to claim reply slot for zero-token match', { claimErr })
+        console.log(
+          '[ai auto-reply] failed to claim reply slot for zero-token match',
+          { claimErr }
+        );
       }
-      return
+      return;
     }
 
     // Ground the reply in the account's knowledge base (best-effort).
@@ -295,20 +327,20 @@ export async function dispatchInboundToAiReply(
       db,
       accountId,
       config,
-      latestText,
-    )
+      latestText
+    );
 
     const systemPrompt = buildSystemPrompt({
       userPrompt: config.systemPrompt,
       mode: 'auto_reply',
       knowledge,
-    })
+    });
 
     const { text, handoff } = await generateReply({
       config,
       systemPrompt,
       messages,
-    })
+    });
 
     if (handoff || !text) {
       // The model can't (or shouldn't) answer — stop auto-replying on
@@ -317,8 +349,8 @@ export async function dispatchInboundToAiReply(
       await db
         .from('conversations')
         .update({ ai_autoreply_disabled: true })
-        .eq('id', conversationId)
-      return
+        .eq('id', conversationId);
+      return;
     }
 
     // Atomically claim a reply slot: the cap check + increment happen in
@@ -331,9 +363,9 @@ export async function dispatchInboundToAiReply(
       {
         conversation_id: conversationId,
         max_replies: config.autoReplyMaxPerConversation,
-      },
-    )
-    if (claimErr || claimed !== true) return
+      }
+    );
+    if (claimErr || claimed !== true) return;
 
     await engineSendText({
       accountId,
@@ -341,8 +373,8 @@ export async function dispatchInboundToAiReply(
       conversationId,
       contactId,
       text,
-    })
+    });
   } catch (err) {
-    console.error('[ai auto-reply] dispatch failed:', err)
+    console.error('[ai auto-reply] dispatch failed:', err);
   }
 }

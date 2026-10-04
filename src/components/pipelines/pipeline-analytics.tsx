@@ -1,7 +1,7 @@
-"use client";
+'use client';
 
-import { useMemo } from "react";
-import type { Deal, PipelineStage } from "@/types";
+import { useMemo } from 'react';
+import type { Deal, PipelineStage } from '@/types';
 import {
   DollarSign,
   TrendingUp,
@@ -10,15 +10,15 @@ import {
   Trophy,
   XCircle,
   Info,
-} from "lucide-react";
+} from 'lucide-react';
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
-} from "@/components/ui/tooltip";
-import { useAuth } from "@/hooks/use-auth";
-import { formatCurrency } from "@/lib/currency";
+} from '@/components/ui/tooltip';
+import { useAuth } from '@/hooks/use-auth';
+import { formatCurrency } from '@/lib/currency';
 
 interface PipelineAnalyticsProps {
   stages: PipelineStage[];
@@ -32,7 +32,7 @@ interface PipelineAnalyticsProps {
  */
 function computeStageProbability(
   stage: PipelineStage,
-  sortedStages: PipelineStage[],
+  sortedStages: PipelineStage[]
 ): number {
   const n = sortedStages.length;
   if (n <= 1) return 1;
@@ -49,15 +49,18 @@ export function PipelineAnalytics({ stages, deals }: PipelineAnalyticsProps) {
   const { defaultCurrency } = useAuth();
   const sortedStages = useMemo(
     () => [...stages].sort((a, b) => a.position - b.position),
-    [stages],
+    [stages]
   );
 
   const stats = useMemo(() => {
-    const active = deals.filter((d) => d.status !== "lost");
-    const openDeals = active.filter((d) => d.status !== "won");
+    const active = deals.filter((d) => d.status !== 'lost');
+    const openDeals = active.filter((d) => d.status !== 'won');
 
     const totalCount = openDeals.length;
-    const totalValue = openDeals.reduce((sum, d) => sum + Number(d.value || 0), 0);
+    const totalValue = openDeals.reduce(
+      (sum, d) => sum + Number(d.value || 0),
+      0
+    );
     const avgValue = totalCount > 0 ? totalValue / totalCount : 0;
 
     const stageById = new Map(sortedStages.map((s) => [s.id, s]));
@@ -75,11 +78,14 @@ export function PipelineAnalytics({ stages, deals }: PipelineAnalyticsProps) {
       return ts ? new Date(ts) >= monthStart : false;
     };
     const wonThisMonth = deals.filter(
-      (d) => d.status === "won" && thisMonth(d),
+      (d) => d.status === 'won' && thisMonth(d)
     );
-    const wonThisMonthValue = wonThisMonth.reduce((sum, d) => sum + Number(d.value || 0), 0);
+    const wonThisMonthValue = wonThisMonth.reduce(
+      (sum, d) => sum + Number(d.value || 0),
+      0
+    );
     const lostThisMonth = deals.filter(
-      (d) => d.status === "lost" && thisMonth(d),
+      (d) => d.status === 'lost' && thisMonth(d)
     ).length;
 
     return {
@@ -95,15 +101,15 @@ export function PipelineAnalytics({ stages, deals }: PipelineAnalyticsProps) {
 
   return (
     <TooltipProvider>
-      <div className="grid grid-cols-2 gap-3 rounded-xl border border-border bg-card/60 p-4 sm:grid-cols-3 xl:grid-cols-6">
+      <div className="border-border bg-card/60 grid grid-cols-2 gap-3 rounded-xl border p-4 sm:grid-cols-3 xl:grid-cols-6">
         <Metric
-          icon={<BarChart3 className="h-4 w-4 text-muted-foreground" />}
+          icon={<BarChart3 className="text-muted-foreground h-4 w-4" />}
           label="Total de Pedidos"
           value={String(stats.totalCount)}
           tooltip="Contagem de todos os pedidos abertos neste funil que não estão marcados como Cancelado ou Entregue."
         />
         <Metric
-          icon={<DollarSign className="h-4 w-4 text-primary" />}
+          icon={<DollarSign className="text-primary h-4 w-4" />}
           label="Valor em Andamento"
           value={formatCurrency(stats.totalValue, defaultCurrency)}
           tooltip="Soma dos valores em R$ de todos os pedidos abertos neste funil, excluindo pedidos Entregues e Cancelados."
@@ -121,7 +127,7 @@ export function PipelineAnalytics({ stages, deals }: PipelineAnalyticsProps) {
           tooltip="Receita esperada: valor de cada pedido aberto × sua probabilidade de stage. Primeiro stage ≈ 10%, stages progridem até 90%, Faturado = 100%. Pedidos cancelados excluídos."
         />
         <Metric
-          icon={<Trophy className="h-4 w-4 text-primary" />}
+          icon={<Trophy className="text-primary h-4 w-4" />}
           label="Faturamento do Mês"
           value={formatCurrency(stats.wonThisMonthValue, defaultCurrency)}
           tooltip="Soma dos valores de todos os pedidos marcados como Faturado desde o primeiro dia do mês atual."
@@ -149,8 +155,8 @@ function Metric({
   tooltip: string;
 }) {
   return (
-    <div className="rounded-lg bg-muted/50 p-3">
-      <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+    <div className="bg-muted/50 rounded-lg p-3">
+      <div className="text-muted-foreground flex items-center gap-1.5 text-[10px] font-medium tracking-wider uppercase">
         {icon}
         <span>{label}</span>
         <Tooltip>
@@ -159,7 +165,7 @@ function Metric({
               <button
                 type="button"
                 aria-label={`How ${label} is calculated`}
-                className="ml-auto text-muted-foreground hover:text-foreground focus:outline-none"
+                className="text-muted-foreground hover:text-foreground ml-auto focus:outline-none"
               />
             }
           >
@@ -170,7 +176,7 @@ function Metric({
           </TooltipContent>
         </Tooltip>
       </div>
-      <p className="mt-1 text-base font-semibold text-foreground">{value}</p>
+      <p className="text-foreground mt-1 text-base font-semibold">{value}</p>
     </div>
   );
 }

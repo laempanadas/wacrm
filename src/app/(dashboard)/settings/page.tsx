@@ -48,7 +48,7 @@ export default function SettingsPage() {
       appearance: mode.charAt(0).toUpperCase() + mode.slice(1),
       deals: defaultCurrency,
     }),
-    [mode, defaultCurrency],
+    [mode, defaultCurrency]
   );
 
   const panel: Record<SettingsSection, ReactNode> = {
@@ -68,12 +68,12 @@ export default function SettingsPage() {
   return (
     <div>
       <div>
-        <h1 className="text-2xl font-bold tracking-tight text-foreground">
+        <h1 className="text-foreground text-2xl font-bold tracking-tight">
           Configurações
         </h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Tudo em um só lugar — sua conta e seu espaço de trabalho. Escolha
-          uma seção para gerenciar.
+        <p className="text-muted-foreground mt-1 text-sm">
+          Tudo em um só lugar — sua conta e seu espaço de trabalho. Escolha uma
+          seção para gerenciar.
         </p>
       </div>
 

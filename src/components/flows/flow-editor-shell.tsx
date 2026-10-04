@@ -1,4 +1,4 @@
-"use client";
+'use client';
 
 /**
  * View-switcher + chrome for the flow editor.
@@ -24,17 +24,17 @@
  * feedback was that the list shape made flows "hard to understand".
  */
 
-import { useEffect, useState } from "react";
-import { GitFork, List } from "lucide-react";
+import { useEffect, useState } from 'react';
+import { GitFork, List } from 'lucide-react';
 
-import { FlowBuilder } from "./flow-builder";
-import { FlowCanvas } from "./flow-canvas";
-import { FlowEditorProvider } from "./flow-editor-state";
-import { EditorHeader } from "./header";
-import { ValidationPanel } from "./validation-panel";
-import { NODE_META, nodeColors, type NodeType } from "./shared";
-import { cn } from "@/lib/utils";
-import type { FlowRow, FlowNodeRow } from "@/lib/flows/types";
+import { FlowBuilder } from './flow-builder';
+import { FlowCanvas } from './flow-canvas';
+import { FlowEditorProvider } from './flow-editor-state';
+import { EditorHeader } from './header';
+import { ValidationPanel } from './validation-panel';
+import { NODE_META, nodeColors, type NodeType } from './shared';
+import { cn } from '@/lib/utils';
+import type { FlowRow, FlowNodeRow } from '@/lib/flows/types';
 
 /**
  * Below this viewport width we force list view and hide the toggle.
@@ -42,11 +42,11 @@ import type { FlowRow, FlowNodeRow } from "@/lib/flows/types";
  * ~10px and live finger drags from one node to another aren't a
  * practical workflow. Matches Tailwind's `md` breakpoint.
  */
-const MOBILE_BREAKPOINT = "(max-width: 767px)";
+const MOBILE_BREAKPOINT = '(max-width: 767px)';
 
-type View = "canvas" | "list";
+type View = 'canvas' | 'list';
 
-const STORAGE_KEY = "wacrm.flowEditor.view";
+const STORAGE_KEY = 'wacrm.flowEditor.view';
 
 // Legend covers every node type, derived from NODE_META so a new type
 // can't silently go undocumented. NODE_META's key order already reads
@@ -67,11 +67,11 @@ export function FlowEditorShell({ initialFlow, initialNodes }: Props) {
   const [view, setView] = useState<View>(() => {
     try {
       const saved = window.localStorage.getItem(STORAGE_KEY);
-      if (saved === "canvas" || saved === "list") return saved;
+      if (saved === 'canvas' || saved === 'list') return saved;
     } catch {
       // Private browsing / disabled storage — fall through to default.
     }
-    return "canvas";
+    return 'canvas';
   });
 
   // Live mobile detection. We don't render canvas under the
@@ -79,7 +79,7 @@ export function FlowEditorShell({ initialFlow, initialNodes }: Props) {
   // intact so the user's preference comes back when they widen
   // again (e.g. rotating a tablet, resizing a window).
   const isMobile = useMatchMedia(MOBILE_BREAKPOINT);
-  const effectiveView: View = isMobile ? "list" : view;
+  const effectiveView: View = isMobile ? 'list' : view;
 
   const choose = (next: View) => {
     setView(next);
@@ -104,17 +104,17 @@ export function FlowEditorShell({ initialFlow, initialNodes }: Props) {
             <div
               role="group"
               aria-label="Editor view"
-              className="inline-flex gap-0.5 rounded-lg border border-border bg-muted p-0.5"
+              className="border-border bg-muted inline-flex gap-0.5 rounded-lg border p-0.5"
             >
               <SegButton
-                active={effectiveView === "canvas"}
-                onClick={() => choose("canvas")}
+                active={effectiveView === 'canvas'}
+                onClick={() => choose('canvas')}
                 icon={<GitFork className="h-3.5 w-3.5" />}
                 label="Canvas"
               />
               <SegButton
-                active={effectiveView === "list"}
-                onClick={() => choose("list")}
+                active={effectiveView === 'list'}
+                onClick={() => choose('list')}
                 icon={<List className="h-3.5 w-3.5" />}
                 label="List"
               />
@@ -123,7 +123,7 @@ export function FlowEditorShell({ initialFlow, initialNodes }: Props) {
               {LEGEND_TYPES.map((t) => (
                 <span
                   key={t}
-                  className="inline-flex items-center gap-1.5 text-[11.5px] text-muted-foreground"
+                  className="text-muted-foreground inline-flex items-center gap-1.5 text-[11.5px]"
                 >
                   <span
                     className="h-2.5 w-2.5 rounded-full"
@@ -137,8 +137,8 @@ export function FlowEditorShell({ initialFlow, initialNodes }: Props) {
         )}
 
         {/* ---- stage: the active view, owning its own overflow ---- */}
-        <div className="relative mx-6 min-h-0 flex-1 overflow-hidden rounded-xl border border-border bg-card-2">
-          {effectiveView === "canvas" ? (
+        <div className="border-border bg-card-2 relative mx-6 min-h-0 flex-1 overflow-hidden rounded-xl border">
+          {effectiveView === 'canvas' ? (
             <FlowCanvas />
           ) : (
             <div className="absolute inset-0 overflow-y-auto">
@@ -148,7 +148,7 @@ export function FlowEditorShell({ initialFlow, initialNodes }: Props) {
         </div>
 
         {/* ---- validation / activate-readiness bar ---- */}
-        <div className="px-6 pb-5 pt-3">
+        <div className="px-6 pt-3 pb-5">
           <ValidationPanel />
         </div>
       </div>
@@ -163,17 +163,17 @@ export function FlowEditorShell({ initialFlow, initialNodes }: Props) {
  */
 function useMatchMedia(query: string): boolean {
   const [matches, setMatches] = useState<boolean>(() => {
-    if (typeof window === "undefined") return false;
+    if (typeof window === 'undefined') return false;
     return window.matchMedia(query).matches;
   });
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (typeof window === 'undefined') return;
     const mql = window.matchMedia(query);
     const handler = (e: MediaQueryListEvent) => setMatches(e.matches);
     // Safari < 14 still uses addListener; addEventListener is the
     // modern path. Both fire identically.
-    mql.addEventListener("change", handler);
-    return () => mql.removeEventListener("change", handler);
+    mql.addEventListener('change', handler);
+    return () => mql.removeEventListener('change', handler);
   }, [query]);
   return matches;
 }
@@ -195,10 +195,10 @@ function SegButton({
       onClick={onClick}
       aria-pressed={active}
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12.5px] font-medium transition-colors",
+        'inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12.5px] font-medium transition-colors',
         active
-          ? "bg-card text-foreground shadow-sm"
-          : "text-muted-foreground hover:text-foreground",
+          ? 'bg-card text-foreground shadow-sm'
+          : 'text-muted-foreground hover:text-foreground'
       )}
     >
       {icon}

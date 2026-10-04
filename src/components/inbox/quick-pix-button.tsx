@@ -49,9 +49,10 @@ export function QuickPixButton({
 
       // Tenta achar total em formato brasileiro (ex: Total: R$ 140,00 ou R$ 140,00 ou 140,00)
       if (!amount) {
-        const totalMatch = text.match(/Total:\s*(?:R\$\s*)?([\d]+(?:[.,]\d{2})?)/i) ||
-                           text.match(/R\$\s*([\d]+(?:[.,]\d{2})?)/i) ||
-                           text.match(/\b([\d]{2,4}[.,]\d{2})\b/);
+        const totalMatch =
+          text.match(/Total:\s*(?:R\$\s*)?([\d]+(?:[.,]\d{2})?)/i) ||
+          text.match(/R\$\s*([\d]+(?:[.,]\d{2})?)/i) ||
+          text.match(/\b([\d]{2,4}[.,]\d{2})\b/);
         if (totalMatch && totalMatch[1]) {
           amount = totalMatch[1].replace('.', ',');
         }
@@ -71,7 +72,9 @@ export function QuickPixButton({
 
       // Tenta extrair endereço mencionado
       if (!address) {
-        const addrMatch = text.match(/(?:Entrega|Endereço|rua|av\.|alameda):\s*([^\n\r]+)/i);
+        const addrMatch = text.match(
+          /(?:Entrega|Endereço|rua|av\.|alameda):\s*([^\n\r]+)/i
+        );
         if (addrMatch && addrMatch[1] && addrMatch[1].trim().length > 5) {
           address = addrMatch[1].trim();
         }
@@ -82,14 +85,19 @@ export function QuickPixButton({
   }, [messages]);
 
   const [amountStr, setAmountStr] = useState(detected.amount || '');
-  const [description, setDescription] = useState(detected.itemsText || 'Pedido La Empanadas');
+  const [description, setDescription] = useState(
+    detected.itemsText || 'Pedido La Empanadas'
+  );
   const [addressStr, setAddressStr] = useState(detected.address || '');
 
   // Sincroniza se o modal abrir e os valores iniciais estiverem vazios
   function handleOpenChange(newOpen: boolean) {
     if (newOpen) {
       if (!amountStr && detected.amount) setAmountStr(detected.amount);
-      if (description === 'Pedido La Empanadas' && detected.itemsText !== 'Pedido La Empanadas') {
+      if (
+        description === 'Pedido La Empanadas' &&
+        detected.itemsText !== 'Pedido La Empanadas'
+      ) {
         setDescription(detected.itemsText);
       }
       if (!addressStr && detected.address) setAddressStr(detected.address);
@@ -98,7 +106,10 @@ export function QuickPixButton({
   }
 
   const parsedAmount = useMemo(() => {
-    const clean = amountStr.replace(/\s+/g, '').replace('R$', '').replace(',', '.');
+    const clean = amountStr
+      .replace(/\s+/g, '')
+      .replace('R$', '')
+      .replace(',', '.');
     const num = parseFloat(clean);
     return isNaN(num) ? 0 : num;
   }, [amountStr]);
@@ -121,7 +132,8 @@ export function QuickPixButton({
         body: JSON.stringify({
           items: [
             {
-              title: title.length > 120 ? title.substring(0, 117) + '...' : title,
+              title:
+                title.length > 120 ? title.substring(0, 117) + '...' : title,
               quantity: 1,
               unitPrice: parsedAmount,
             },
@@ -142,7 +154,8 @@ export function QuickPixButton({
 
       if (!res.ok || !data?.paymentUrl) {
         toast.error(
-          data?.error ?? 'Não foi possível gerar o link do Mercado Pago. Verifique a integração.'
+          data?.error ??
+            'Não foi possível gerar o link do Mercado Pago. Verifique a integração.'
         );
         return;
       }
@@ -155,7 +168,9 @@ export function QuickPixButton({
           currency: 'BRL',
         });
 
-        const addressLine = addressStr.trim() ? `📍 *Entrega:* ${addressStr.trim()}\n\n` : '';
+        const addressLine = addressStr.trim()
+          ? `📍 *Entrega:* ${addressStr.trim()}\n\n`
+          : '';
         const itemsBlock = description.trim() ? `${description.trim()}\n` : '';
 
         const chatMessage =
@@ -198,7 +213,7 @@ export function QuickPixButton({
       <PopoverTrigger
         disabled={disabled || readOnly}
         title="Gerar link de pagamento Pix / Mercado Pago"
-        className="inline-flex items-center justify-center rounded-md font-semibold transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border shadow-xs h-9 gap-1.5 px-2.5 text-xs border-emerald-500/40 text-emerald-700 dark:text-emerald-300 bg-emerald-50 hover:bg-emerald-100/80 dark:bg-emerald-950/40 dark:hover:bg-emerald-900/60 shrink-0 cursor-pointer"
+        className="focus-visible:ring-ring inline-flex h-9 shrink-0 cursor-pointer items-center justify-center gap-1.5 rounded-md border border-emerald-500/40 bg-emerald-50 px-2.5 text-xs font-semibold text-emerald-700 shadow-xs transition-colors hover:bg-emerald-100/80 focus-visible:ring-1 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-900/60"
       >
         <CreditCard className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
         <span className="hidden sm:inline">💳 Gerar Link Pix</span>
@@ -208,16 +223,16 @@ export function QuickPixButton({
       <PopoverContent
         align="start"
         side="top"
-        className="w-84 p-4 shadow-lg border-border bg-popover"
+        className="border-border bg-popover w-84 p-4 shadow-lg"
       >
         <div className="space-y-3.5">
-          <div className="flex items-center justify-between pb-1 border-b border-border/60">
-            <div className="flex items-center gap-1.5 font-semibold text-sm text-foreground">
+          <div className="border-border/60 flex items-center justify-between border-b pb-1">
+            <div className="text-foreground flex items-center gap-1.5 text-sm font-semibold">
               <CreditCard className="h-4 w-4 text-emerald-500" />
               <span>Gerar Link Mercado Pago</span>
             </div>
             {parsedAmount > 0 && (
-              <span className="text-xs font-mono font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded">
+              <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 font-mono text-xs font-medium text-emerald-600 dark:text-emerald-400">
                 R$ {parsedAmount.toFixed(2).replace('.', ',')}
               </span>
             )}
@@ -229,7 +244,7 @@ export function QuickPixButton({
                 Valor Total (R$) <span className="text-destructive">*</span>
               </Label>
               <div className="relative mt-1">
-                <span className="absolute left-2.5 top-2 text-xs font-medium text-muted-foreground">
+                <span className="text-muted-foreground absolute top-2 left-2.5 text-xs font-medium">
                   R$
                 </span>
                 <Input
@@ -237,7 +252,7 @@ export function QuickPixButton({
                   placeholder="140,00"
                   value={amountStr}
                   onChange={(e) => setAmountStr(e.target.value)}
-                  className="pl-8 text-sm h-8 font-medium"
+                  className="h-8 pl-8 text-sm font-medium"
                 />
               </div>
             </div>
@@ -251,7 +266,7 @@ export function QuickPixButton({
                 placeholder="Ex: 4x Carne Suave, 2x Queijo..."
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-                className="mt-1 text-xs h-8"
+                className="mt-1 h-8 text-xs"
               />
             </div>
 
@@ -264,17 +279,17 @@ export function QuickPixButton({
                 placeholder="Rua, número e bairro"
                 value={addressStr}
                 onChange={(e) => setAddressStr(e.target.value)}
-                className="mt-1 text-xs h-8"
+                className="mt-1 h-8 text-xs"
               />
             </div>
           </div>
 
           {generatedUrl && (
-            <div className="space-y-1.5 rounded-md bg-muted/60 p-2 text-xs border border-border/80">
-              <span className="text-[10px] uppercase font-semibold text-muted-foreground tracking-wider">
+            <div className="bg-muted/60 border-border/80 space-y-1.5 rounded-md border p-2 text-xs">
+              <span className="text-muted-foreground text-[10px] font-semibold tracking-wider uppercase">
                 Link Gerado:
               </span>
-              <p className="font-mono text-[11px] text-foreground truncate break-all">
+              <p className="text-foreground truncate font-mono text-[11px] break-all">
                 {generatedUrl}
               </p>
               <div className="flex gap-2 pt-1">
@@ -283,16 +298,16 @@ export function QuickPixButton({
                   variant="outline"
                   size="sm"
                   onClick={handleCopy}
-                  className="h-6 text-[11px] px-2 flex-1"
+                  className="h-6 flex-1 px-2 text-[11px]"
                 >
                   {copied ? (
                     <>
-                      <Check className="h-3 w-3 mr-1 text-emerald-500" />
+                      <Check className="mr-1 h-3 w-3 text-emerald-500" />
                       Copiado!
                     </>
                   ) : (
                     <>
-                      <Copy className="h-3 w-3 mr-1" />
+                      <Copy className="mr-1 h-3 w-3" />
                       Copiar Link
                     </>
                   )}
@@ -303,9 +318,9 @@ export function QuickPixButton({
                   size="sm"
                   onClick={() => handleGenerate(true)}
                   disabled={loading}
-                  className="h-6 text-[11px] px-2 flex-1 bg-emerald-600 hover:bg-emerald-700 text-white"
+                  className="h-6 flex-1 bg-emerald-600 px-2 text-[11px] text-white hover:bg-emerald-700"
                 >
-                  <Send className="h-3 w-3 mr-1" />
+                  <Send className="mr-1 h-3 w-3" />
                   Reenviar
                 </Button>
               </div>
@@ -317,7 +332,7 @@ export function QuickPixButton({
               type="button"
               onClick={() => handleGenerate(true)}
               disabled={loading || parsedAmount <= 0}
-              className="w-full h-8 text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white gap-1.5 shadow-sm"
+              className="h-8 w-full gap-1.5 bg-emerald-600 text-xs font-semibold text-white shadow-sm hover:bg-emerald-700"
             >
               {loading ? (
                 <>
@@ -326,8 +341,7 @@ export function QuickPixButton({
                 </>
               ) : (
                 <>
-                  <Send className="h-3.5 w-3.5" />
-                  ⚡ Gerar e Enviar no WhatsApp
+                  <Send className="h-3.5 w-3.5" />⚡ Gerar e Enviar no WhatsApp
                 </>
               )}
             </Button>

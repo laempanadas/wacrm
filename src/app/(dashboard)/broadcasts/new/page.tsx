@@ -23,7 +23,8 @@ const steps = [
 export default function NewBroadcastPage() {
   const router = useRouter();
   const { accountId } = useAuth();
-  const { createAndSendBroadcast, isProcessing, progress } = useBroadcastSending();
+  const { createAndSendBroadcast, isProcessing, progress } =
+    useBroadcastSending();
 
   const [currentStep, setCurrentStep] = useState(0);
   const [template, setTemplate] = useState<MessageTemplate | null>(null);
@@ -131,8 +132,8 @@ export default function NewBroadcastPage() {
     <div className="mx-auto max-w-3xl space-y-8">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-foreground">New Broadcast</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
+        <h1 className="text-foreground text-2xl font-bold">New Broadcast</h1>
+        <p className="text-muted-foreground mt-1 text-sm">
           Create and send a broadcast message to your contacts.
         </p>
       </div>
@@ -151,15 +152,19 @@ export default function NewBroadcastPage() {
                     isCompleted
                       ? 'bg-primary text-primary-foreground'
                       : isActive
-                        ? 'border-2 border-primary bg-primary/10 text-primary'
-                        : 'border border-border bg-muted text-muted-foreground'
+                        ? 'border-primary bg-primary/10 text-primary border-2'
+                        : 'border-border bg-muted text-muted-foreground border'
                   }`}
                 >
                   {isCompleted ? <Check className="h-4 w-4" /> : index + 1}
                 </div>
                 <span
                   className={`hidden text-sm font-medium sm:block ${
-                    isActive ? 'text-foreground' : isCompleted ? 'text-primary' : 'text-muted-foreground'
+                    isActive
+                      ? 'text-foreground'
+                      : isCompleted
+                        ? 'text-primary'
+                        : 'text-muted-foreground'
                   }`}
                 >
                   {step.label}

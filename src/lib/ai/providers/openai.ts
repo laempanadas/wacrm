@@ -1,16 +1,16 @@
-import { AiError } from '../types'
-import { MAX_OUTPUT_TOKENS } from '../defaults'
+import { AiError } from '../types';
+import { MAX_OUTPUT_TOKENS } from '../defaults';
 import {
   mergeConsecutive,
   providerHttpError,
   toNetworkError,
   type ProviderArgs,
-} from './shared'
+} from './shared';
 
-const OPENAI_URL = 'https://api.openai.com/v1/chat/completions'
+const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
 
 interface OpenAiResponse {
-  choices?: { message?: { content?: string } }[]
+  choices?: { message?: { content?: string } }[];
 }
 
 /**
@@ -19,9 +19,9 @@ interface OpenAiResponse {
  * `generateReply`).
  */
 export async function generateOpenAi(args: ProviderArgs): Promise<string> {
-  const { apiKey, model, systemPrompt, messages, timeoutMs } = args
+  const { apiKey, model, systemPrompt, messages, timeoutMs } = args;
 
-  let res: Response
+  let res: Response;
   try {
     res = await fetch(OPENAI_URL, {
       method: 'POST',
@@ -38,21 +38,21 @@ export async function generateOpenAi(args: ProviderArgs): Promise<string> {
         max_completion_tokens: MAX_OUTPUT_TOKENS,
       }),
       signal: AbortSignal.timeout(timeoutMs),
-    })
+    });
   } catch (err) {
-    throw toNetworkError(err)
+    throw toNetworkError(err);
   }
 
   if (!res.ok) {
-    throw await providerHttpError('OpenAI', res)
+    throw await providerHttpError('OpenAI', res);
   }
 
-  const data = (await res.json().catch(() => null)) as OpenAiResponse | null
-  const text = data?.choices?.[0]?.message?.content
+  const data = (await res.json().catch(() => null)) as OpenAiResponse | null;
+  const text = data?.choices?.[0]?.message?.content;
   if (!text || typeof text !== 'string' || !text.trim()) {
     throw new AiError('OpenAI returned an empty response.', {
       code: 'empty_response',
-    })
+    });
   }
-  return text
+  return text;
 }

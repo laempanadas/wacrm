@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient as createAdminClient, SupabaseClient } from '@supabase/supabase-js';
+import {
+  createClient as createAdminClient,
+  SupabaseClient,
+} from '@supabase/supabase-js';
 import { sendPaymentConfirmationWhatsApp } from '@/lib/whatsapp/send-message';
 import { engineSendText } from '@/lib/flows/meta-send';
 import { getPaymentById } from '@/lib/payments/mercado-pago';
-import { markDealPaid } from '@/lib/orders/mark-deal-paid';
 import { markContactPaymentConfirmed } from '@/lib/orders/create-order';
+import { saveContactOrderFields } from '@/lib/orders/custom-fields';
 import { moveDealToStage, PIPELINE_STAGES } from '@/lib/orders/pipeline-stages';
 import { updateDealWithPayment } from '@/lib/deals/auto-deal-lifecycle';
 import {
@@ -27,74 +30,6 @@ function supabaseAdmin(): SupabaseClient {
     );
   }
   return _mpAdminClient;
-}
-
-/**
- * Preenche/atualiza os campos personalizados do contato após o pagamento.
- * Best-effort: qualquer falha é apenas logada e não interrompe o webhook.
- * Os nomes dos campos são exatamente os exibidos na UI: 'Itens_pedido',
- * 'Endereco_entrega', 'Forma_pagamento', 'Nome_cliente'.
- */
-async function saveOrderCustomFields(
-  supabase: SupabaseClient,
-  accountId: string,
-  contactId: string,
-  fields: {
-    itens?: string;
-    endereco?: string;
-    formaPagamento?: string;
-    nomeCliente?: string;
-  }
-): Promise<void> {
-  try {
-    const byName: Record<string, string> = {};
-    if (fields.itens && fields.itens.trim()) byName['Itens_pedido'] = fields.itens.trim();
-    if (fields.endereco && fields.endereco.trim()) byName['Endereco_entrega'] = fields.endereco.trim();
-    if (fields.formaPagamento && fields.formaPagamento.trim())
-      byName['Forma_pagamento'] = fields.formaPagamento.trim();
-    if (fields.nomeCliente && fields.nomeCliente.trim())
-      byName['Nome_cliente'] = fields.nomeCliente.trim();
-
-    const names = Object.keys(byName);
-    if (names.length === 0) return;
-
-    const { data: defs, error: defsErr } = await supabase
-      .from('custom_fields')
-      .select('id, field_name')
-      .eq('account_id', accountId)
-      .in('field_name', names);
-
-    if (defsErr) {
-      console.error('[mp-webhook][custom-fields] Erro ao buscar definições:', defsErr);
-      return;
-    }
-    if (!defs || defs.length === 0) {
-      console.warn('[mp-webhook][custom-fields] Nenhum campo encontrado para:', names.join(', '));
-      return;
-    }
-
-    const rows = defs
-      .filter((d: { id: string; field_name: string }) => byName[d.field_name] !== undefined)
-      .map((d: { id: string; field_name: string }) => ({
-        contact_id: contactId,
-        custom_field_id: d.id,
-        value: byName[d.field_name],
-      }));
-
-    if (rows.length === 0) return;
-
-    const { error: upsertErr } = await supabase
-      .from('contact_custom_values')
-      .upsert(rows, { onConflict: 'contact_id,custom_field_id' });
-
-    if (upsertErr) {
-      console.error('[mp-webhook][custom-fields] Erro ao gravar valores:', upsertErr);
-      return;
-    }
-    console.log(`[mp-webhook][custom-fields] Campos atualizados para contato ${contactId}`);
-  } catch (err) {
-    console.error('[mp-webhook][custom-fields] Falha inesperada:', err);
-  }
 }
 
 const formatBRL = (v: number) => `R$ ${v.toFixed(2).replace('.', ',')}`;
@@ -164,7 +99,10 @@ async function notifyCustomer(order: {
       order.amount
     );
   } catch (err) {
-    console.error('[mp-webhook] Não foi possível confirmar o pagamento ao cliente:', err);
+    console.error(
+      '[mp-webhook] Não foi possível confirmar o pagamento ao cliente:',
+      err
+    );
   }
 }
 
@@ -186,14 +124,23 @@ async function moveDealToCookingStage(
       .maybeSingle();
     const dealId = (data as { deal_id?: string | null } | null)?.deal_id;
     if (error || !dealId) {
-      console.warn(`[mp-webhook] Pedido ${orderId} sem deal vinculado — card não movido`, error?.message ?? '');
+      console.warn(
+        `[mp-webhook] Pedido ${orderId} sem deal vinculado — card não movido`,
+        error?.message ?? ''
+      );
       return;
     }
-    const result = await moveDealToStage(db, { accountId, dealId, targetStage: PIPELINE_STAGES.COOKING });
+    const result = await moveDealToStage(db, {
+      accountId,
+      dealId,
+      targetStage: PIPELINE_STAGES.COOKING,
+    });
     if (result.moved) {
       console.log(`[mp-webhook] Card ${dealId} movido para "Na Cozinha"`);
     } else {
-      console.warn(`[mp-webhook] Card do pedido ${orderId} não movido: ${result.reason}`);
+      console.warn(
+        `[mp-webhook] Card do pedido ${orderId} não movido: ${result.reason}`
+      );
     }
   } catch (err) {
     console.error('[mp-webhook] Erro ao mover card para "Na Cozinha":', err);
@@ -251,29 +198,44 @@ export async function POST(req: NextRequest) {
         secret,
       });
       if (!valid) {
-        console.warn('[mp-webhook] Assinatura inválida rejeitada', { paymentId });
-        return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
+        console.warn('[mp-webhook] Assinatura inválida rejeitada', {
+          paymentId,
+        });
+        return NextResponse.json(
+          { error: 'Invalid signature' },
+          { status: 401 }
+        );
       }
     } else {
-      console.warn('[mp-webhook] MERCADO_PAGO_WEBHOOK_SECRET não configurado — assinatura não validada');
+      console.warn(
+        '[mp-webhook] MERCADO_PAGO_WEBHOOK_SECRET não configurado — assinatura não validada'
+      );
     }
 
     const payment = await getPaymentById(paymentId);
     if (!payment.ok) {
       // 500 faz o Mercado Pago reenviar a notificação mais tarde.
-      return NextResponse.json({ error: 'Could not fetch payment' }, { status: 500 });
+      return NextResponse.json(
+        { error: 'Could not fetch payment' },
+        { status: 500 }
+      );
     }
 
     const externalReference = payment.externalReference;
     if (!externalReference) {
-      console.warn('[mp-webhook] external_reference ausente no pagamento', paymentId);
+      console.warn(
+        '[mp-webhook] external_reference ausente no pagamento',
+        paymentId
+      );
       return new Response('OK', { status: 200 });
     }
 
     const db = supabaseAdmin();
     const { data: order, error: orderError } = await db
       .from('orders')
-      .select('id, total, status, contact_id, account_id, items, delivery_address, payer_name')
+      .select(
+        'id, total, status, contact_id, account_id, items, delivery_address, payer_name'
+      )
       .eq('external_reference', externalReference)
       .order('created_at', { ascending: false })
       .limit(1)
@@ -284,7 +246,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Database error' }, { status: 500 });
     }
     if (!order) {
-      console.warn('[mp-webhook] Pedido não encontrado para external_reference:', externalReference);
+      console.warn(
+        '[mp-webhook] Pedido não encontrado para external_reference:',
+        externalReference
+      );
       return new Response('OK', { status: 200 });
     }
 
@@ -301,7 +266,9 @@ export async function POST(req: NextRequest) {
           .eq('id', order.id)
           .neq('status', ORDER_STATUS_PAID);
       }
-      console.log(`[mp-webhook] Pedido ${order.id}: pagamento ${payment.rawStatus}`);
+      console.log(
+        `[mp-webhook] Pedido ${order.id}: pagamento ${payment.rawStatus}`
+      );
       return new Response('OK', { status: 200 });
     }
 
@@ -324,8 +291,14 @@ export async function POST(req: NextRequest) {
       .select('id');
 
     if (updateError) {
-      console.error('[mp-webhook] Erro ao atualizar status do pedido:', updateError);
-      return NextResponse.json({ error: 'Database update error' }, { status: 500 });
+      console.error(
+        '[mp-webhook] Erro ao atualizar status do pedido:',
+        updateError
+      );
+      return NextResponse.json(
+        { error: 'Database update error' },
+        { status: 500 }
+      );
     }
     if (!transitioned?.length) {
       return new Response('OK', { status: 200 });
@@ -343,7 +316,8 @@ export async function POST(req: NextRequest) {
           .select('deal_id')
           .eq('id', order.id)
           .maybeSingle();
-        const dealId = (dealIdRow as { deal_id?: string | null } | null)?.deal_id;
+        const dealId = (dealIdRow as { deal_id?: string | null } | null)
+          ?.deal_id;
         if (dealId) {
           await updateDealWithPayment(db, {
             accountId: order.account_id,
@@ -352,7 +326,10 @@ export async function POST(req: NextRequest) {
           });
         }
       } catch (err) {
-        console.warn('[mp-webhook] failed to update deal with payment (non-blocking):', err);
+        console.warn(
+          '[mp-webhook] failed to update deal with payment (non-blocking):',
+          err
+        );
       }
     }
 
@@ -372,25 +349,33 @@ export async function POST(req: NextRequest) {
       let itensPedido: string | undefined;
       try {
         const rawItems = order.items;
-        const parsedItems = typeof rawItems === 'string' ? JSON.parse(rawItems) : rawItems;
+        const parsedItems =
+          typeof rawItems === 'string' ? JSON.parse(rawItems) : rawItems;
         if (Array.isArray(parsedItems) && parsedItems.length > 0) {
           itensPedido = parsedItems
-            .map((it: { quantity?: number; qty?: number; title?: string; name?: string }) => {
-              const qty = it.quantity ?? it.qty ?? 1;
-              const title = it.title ?? it.name ?? 'Item';
-              return `${qty}x ${title}`;
-            })
+            .map(
+              (it: {
+                quantity?: number;
+                qty?: number;
+                title?: string;
+                name?: string;
+              }) => {
+                const qty = it.quantity ?? it.qty ?? 1;
+                const title = it.title ?? it.name ?? 'Item';
+                return `${qty}x ${title}`;
+              }
+            )
             .join(', ');
         }
       } catch {
         itensPedido = undefined;
       }
 
-      await saveOrderCustomFields(db, order.account_id, order.contact_id, {
+      await saveContactOrderFields(db, order.account_id, order.contact_id, {
         formaPagamento: 'Pago ✅ Mercado Pago',
-        endereco: order.delivery_address ?? undefined,
+        enderecoCompleto: order.delivery_address ?? undefined,
         nomeCliente: order.payer_name ?? undefined,
-        itens: itensPedido,
+        itensUltimoPedido: itensPedido,
       });
 
       // Pedido pago = atendimento concluído: fecha a conversa do cliente.
@@ -403,13 +388,19 @@ export async function POST(req: NextRequest) {
         .eq('account_id', order.account_id)
         .eq('contact_id', order.contact_id);
       if (closeError) {
-        console.error('[mp-webhook] Erro ao fechar conversa após pagamento:', closeError);
+        console.error(
+          '[mp-webhook] Erro ao fechar conversa após pagamento:',
+          closeError
+        );
       }
     }
 
     return new Response('OK', { status: 200 });
   } catch (error) {
     console.error('[mp-webhook] Erro interno:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    return NextResponse.json(
+      { error: 'Internal server error' },
+      { status: 500 }
+    );
   }
 }

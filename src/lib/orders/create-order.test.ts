@@ -4,6 +4,9 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   TAG_AGUARDANDO,
   TAG_CONFIRMADO,
+  TAG_HUMANO,
+  isForbiddenContactTag,
+  normalizeContactTagName,
   buildOrderNotes,
   createDealForOrder,
   createOrderDeal,
@@ -34,6 +37,54 @@ describe('selectStatusTagName', () => {
   });
 });
 
+describe('isForbiddenContactTag and normalizeContactTagName', () => {
+  it('detecta tags de controle interno proibidas', () => {
+    expect(isForbiddenContactTag('aguardando_tipo')).toBe(true);
+    expect(isForbiddenContactTag('aguardando nome')).toBe(true);
+    expect(isForbiddenContactTag('aguardando_catalogo')).toBe(true);
+    expect(isForbiddenContactTag('aguardando_endereco')).toBe(true);
+    expect(isForbiddenContactTag('aguardando_itens')).toBe(true);
+  });
+
+  it('detecta etapas de kanban proibidas como tags de contato', () => {
+    expect(isForbiddenContactTag('em_preparo')).toBe(true);
+    expect(isForbiddenContactTag('em preparo')).toBe(true);
+    expect(isForbiddenContactTag('saiu_para_entrega')).toBe(true);
+    expect(isForbiddenContactTag('entregue')).toBe(true);
+    expect(isForbiddenContactTag('novo_pedido')).toBe(true);
+    expect(isForbiddenContactTag('na_cozinha')).toBe(true);
+    expect(isForbiddenContactTag('pronto_para_entrega')).toBe(true);
+    expect(isForbiddenContactTag('pago')).toBe(true);
+  });
+
+  it('permite tags legítimas de contato', () => {
+    expect(isForbiddenContactTag('VIP')).toBe(false);
+    expect(isForbiddenContactTag('Cliente Frequente')).toBe(false);
+    expect(isForbiddenContactTag(TAG_CONFIRMADO)).toBe(false);
+    expect(isForbiddenContactTag(TAG_AGUARDANDO)).toBe(false);
+    expect(isForbiddenContactTag(TAG_HUMANO)).toBe(false);
+  });
+
+  it('normaliza variações para constantes oficiais', () => {
+    expect(normalizeContactTagName('aguardando_pagamento')).toBe(
+      TAG_AGUARDANDO
+    );
+    expect(normalizeContactTagName('aguardando pagamento')).toBe(
+      TAG_AGUARDANDO
+    );
+    expect(normalizeContactTagName('confirmado')).toBe(TAG_CONFIRMADO);
+    expect(normalizeContactTagName('precisa de atendente')).toBe(TAG_HUMANO);
+    expect(normalizeContactTagName('humano')).toBe(TAG_HUMANO);
+    expect(normalizeContactTagName('VIP')).toBe('VIP');
+  });
+
+  it('retorna null para tags proibidas ao normalizar', () => {
+    expect(normalizeContactTagName('aguardando_tipo')).toBeNull();
+    expect(normalizeContactTagName('em_preparo')).toBeNull();
+    expect(normalizeContactTagName('entregue')).toBeNull();
+  });
+});
+
 describe('paymentMethodLabel / deliveryKindLabel', () => {
   it('traduz as formas de pagamento', () => {
     expect(paymentMethodLabel('pix')).toBe('Pix');
@@ -41,7 +92,9 @@ describe('paymentMethodLabel / deliveryKindLabel', () => {
     expect(paymentMethodLabel('mercado_pago')).toBe(
       'Mercado Pago (link online)'
     );
-    expect(paymentMethodLabel('na_retirada')).toBe('Na retirada (pagar na loja)');
+    expect(paymentMethodLabel('na_retirada')).toBe(
+      'Na retirada (pagar na loja)'
+    );
   });
 
   it('traduz o tipo de recebimento', () => {
@@ -100,14 +153,21 @@ function fakeDb(tables: Record<string, Row[]>) {
         return [row];
       }
       if (op === 'upsert') {
-        const key = table === 'orders' ? ['external_reference'] : ['contact_id', 'tag_id'];
-        const existing = rows().find((r) => key.every((k) => r[k] === payload[k]));
+        const key =
+          table === 'orders'
+            ? ['external_reference']
+            : ['contact_id', 'tag_id'];
+        const existing = rows().find((r) =>
+          key.every((k) => r[k] === payload[k])
+        );
         if (existing) return [Object.assign(existing, payload)];
         const row = { id: `${table}-${++seq}`, ...payload };
         rows().push(row);
         return [row];
       }
-      const matched = rows().filter((r) => filters.every(([k, v]) => r[k] === v));
+      const matched = rows().filter((r) =>
+        filters.every(([k, v]) => r[k] === v)
+      );
       if (op === 'update') matched.forEach((r) => Object.assign(r, payload));
       return matched;
     };
@@ -155,7 +215,11 @@ describe('createOrderDeal', () => {
     const tables = seededTables();
     const res = await createOrderDeal(fakeDb(tables), ctx, input);
 
-    expect(res).toMatchObject({ pipelineId: 'pipe', stageId: 'novo', tagName: TAG_AGUARDANDO });
+    expect(res).toMatchObject({
+      pipelineId: 'pipe',
+      stageId: 'novo',
+      tagName: TAG_AGUARDANDO,
+    });
     expect(tables.deals).toHaveLength(1);
     expect(tables.deals[0]).toMatchObject({
       account_id: 'acc',
@@ -165,7 +229,10 @@ describe('createOrderDeal', () => {
       value: 33.5,
     });
     expect(tables.orders).toHaveLength(1);
-    expect(tables.orders[0]).toMatchObject({ external_reference: 'PED-1', deal_id: res.dealId });
+    expect(tables.orders[0]).toMatchObject({
+      external_reference: 'PED-1',
+      deal_id: res.dealId,
+    });
     expect(tables.tags.map((t) => t.name)).toEqual([TAG_AGUARDANDO]);
   });
 
@@ -174,14 +241,20 @@ describe('createOrderDeal', () => {
     const first = await createOrderDeal(fakeDb(tables), ctx, input);
     const second = await createOrderDeal(fakeDb(tables), ctx, input);
 
-    expect(second).toMatchObject({ dealId: first.dealId, orderAlreadyExisted: true });
+    expect(second).toMatchObject({
+      dealId: first.dealId,
+      orderAlreadyExisted: true,
+    });
     expect(tables.deals).toHaveLength(1);
     expect(tables.orders).toHaveLength(1);
   });
 
   it('com skipOrderRecord cria só o card e a tag', async () => {
     const tables = seededTables();
-    const res = await createOrderDeal(fakeDb(tables), ctx, { ...input, skipOrderRecord: true });
+    const res = await createOrderDeal(fakeDb(tables), ctx, {
+      ...input,
+      skipOrderRecord: true,
+    });
 
     expect(res.dealId).toBeTruthy();
     expect(tables.deals).toHaveLength(1);
@@ -224,8 +297,14 @@ describe('createOrderDeal', () => {
 
   it('é idempotente mesmo com skipOrderRecord=true (como no Flow custom_action)', async () => {
     const tables = seededTables();
-    const first = await createOrderDeal(fakeDb(tables), ctx, { ...input, skipOrderRecord: true });
-    const second = await createOrderDeal(fakeDb(tables), ctx, { ...input, skipOrderRecord: true });
+    const first = await createOrderDeal(fakeDb(tables), ctx, {
+      ...input,
+      skipOrderRecord: true,
+    });
+    const second = await createOrderDeal(fakeDb(tables), ctx, {
+      ...input,
+      skipOrderRecord: true,
+    });
 
     expect(second.dealId).toBe(first.dealId);
     expect(tables.deals).toHaveLength(1);
@@ -243,7 +322,9 @@ describe('createOrderDeal', () => {
 describe('createDealForOrder', () => {
   it('cria o card sem gravar outro pedido e vincula o deal ao pedido existente', async () => {
     const tables = seededTables();
-    tables.orders = [{ id: 'order-site', external_reference: 'SITE-1', status: 'pending' }];
+    tables.orders = [
+      { id: 'order-site', external_reference: 'SITE-1', status: 'pending' },
+    ];
 
     const res = await createDealForOrder(fakeDb(tables), ctx, 'order-site', {
       ...input,
@@ -259,7 +340,9 @@ describe('createDealForOrder', () => {
   it('não lança erro quando o pipeline não existe', async () => {
     const tables = seededTables();
     tables.pipelines = [];
-    await expect(createDealForOrder(fakeDb(tables), ctx, null, input)).resolves.toBeNull();
+    await expect(
+      createDealForOrder(fakeDb(tables), ctx, null, input)
+    ).resolves.toBeNull();
     expect(tables.deals).toHaveLength(0);
   });
 });

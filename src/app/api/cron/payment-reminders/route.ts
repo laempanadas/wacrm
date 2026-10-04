@@ -22,8 +22,12 @@ export async function GET(request: Request) {
     const customMinutes = parseInt(searchParams.get('minutes') || '15', 10);
 
     const minutesToWait = forceTest ? 0 : customMinutes;
-    const targetDate = new Date(Date.now() - minutesToWait * 60 * 1000).toISOString();
-    const maxWindowDate = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const targetDate = new Date(
+      Date.now() - minutesToWait * 60 * 1000
+    ).toISOString();
+    const maxWindowDate = new Date(
+      Date.now() - 24 * 60 * 60 * 1000
+    ).toISOString();
 
     let query = supabaseAdmin()
       .from('orders')
@@ -41,7 +45,10 @@ export async function GET(request: Request) {
 
     if (ordersError) {
       console.error('[Cron Reminder] Erro ao consultar orders:', ordersError);
-      return NextResponse.json({ error: 'Erro ao consultar tabela orders', details: ordersError }, { status: 500 });
+      return NextResponse.json(
+        { error: 'Erro ao consultar tabela orders', details: ordersError },
+        { status: 500 }
+      );
     }
 
     if (!pendingOrders || pendingOrders.length === 0) {
@@ -63,9 +70,13 @@ export async function GET(request: Request) {
       .limit(5);
 
     if (!allConfigs || allConfigs.length === 0) {
-      return NextResponse.json({
-        error: 'Nenhuma conta do WhatsApp encontrada na tabela whatsapp_config.',
-      }, { status: 500 });
+      return NextResponse.json(
+        {
+          error:
+            'Nenhuma conta do WhatsApp encontrada na tabela whatsapp_config.',
+        },
+        { status: 500 }
+      );
     }
 
     // Garante que só envia para cada número de telefone 1 única vez por rodada (o pedido mais recente)
@@ -87,7 +98,11 @@ export async function GET(request: Request) {
 
     for (const order of uniqueOrders) {
       if (!order.payer_phone || !order.payment_url) {
-        results.push({ orderId: order.id, phone: order.payer_phone, status: 'skipped_no_phone_or_url' });
+        results.push({
+          orderId: order.id,
+          phone: order.payer_phone,
+          status: 'skipped_no_phone_or_url',
+        });
         continue;
       }
 
@@ -103,7 +118,9 @@ export async function GET(request: Request) {
         rawPhone = '55' + rawPhone;
       }
 
-      const valorFormatado = Number(order.total || 0).toFixed(2).replace('.', ',');
+      const valorFormatado = Number(order.total || 0)
+        .toFixed(2)
+        .replace('.', ',');
       const nomeCliente = order.payer_name || 'Cliente';
 
       // Mensagem limpa: sem a URL no meio do texto, com o botão interativo direto
@@ -158,7 +175,10 @@ export async function GET(request: Request) {
 
         // 2. Se o botão falhar por restrição da Meta, usa o fallback de texto
         if (!resData?.messages?.[0]?.id) {
-          console.warn('[Cron Reminder] Botão CTA falhou, enviando fallback de texto:', resData);
+          console.warn(
+            '[Cron Reminder] Botão CTA falhou, enviando fallback de texto:',
+            resData
+          );
           const fallbackText =
             `${bodyText}\n\n` +
             `👉 *Link para pagamento:*\n${order.payment_url}\n\n` +
@@ -225,6 +245,9 @@ export async function GET(request: Request) {
     });
   } catch (error: any) {
     console.error('[Cron Reminder Fatal Error]:', error);
-    return NextResponse.json({ error: 'Internal Error', message: error?.message }, { status: 500 });
+    return NextResponse.json(
+      { error: 'Internal Error', message: error?.message },
+      { status: 500 }
+    );
   }
 }

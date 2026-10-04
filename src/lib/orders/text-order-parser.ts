@@ -9,20 +9,20 @@
  */
 
 export interface ParsedOrderItem {
-  id: string
-  title: string
-  quantity: number
-  unitPrice: number
-  totalPrice: number
+  id: string;
+  title: string;
+  quantity: number;
+  unitPrice: number;
+  totalPrice: number;
 }
 
 export interface ParsedOrderResult {
-  hasItems: boolean
-  items: ParsedOrderItem[]
-  total: number
-  totalFormatted: string
-  deliveryAddress?: string
-  rawText: string
+  hasItems: boolean;
+  items: ParsedOrderItem[];
+  total: number;
+  totalFormatted: string;
+  deliveryAddress?: string;
+  rawText: string;
 }
 
 function normalize(text: string): string {
@@ -30,7 +30,7 @@ function normalize(text: string): string {
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
-    .trim()
+    .trim();
 }
 
 /** Mapa de palavras de números para dígitos numéricos */
@@ -51,13 +51,13 @@ const WORD_TO_NUMBER: Record<string, number> = {
   doze: 12,
   'meia duzia': 6,
   'uma duzia': 12,
-}
+};
 
 interface ProductCatalogEntry {
-  id: string
-  nome: string
-  preco: number
-  aliases: string[]
+  id: string;
+  nome: string;
+  preco: number;
+  aliases: string[];
 }
 
 const CATALOG_PRODUCTS: ProductCatalogEntry[] = [
@@ -108,7 +108,12 @@ const CATALOG_PRODUCTS: ProductCatalogEntry[] = [
     id: 'combo_quatro',
     nome: 'Combo 4 Empanadas',
     preco: 52.9,
-    aliases: ['combo 4 empanadas', 'combo quatro empanadas', 'combo 4', 'combo quatro'],
+    aliases: [
+      'combo 4 empanadas',
+      'combo quatro empanadas',
+      'combo 4',
+      'combo quatro',
+    ],
   },
 
   // Bebidas
@@ -215,13 +220,24 @@ const CATALOG_PRODUCTS: ProductCatalogEntry[] = [
     id: 'vin_san_telmo',
     nome: 'Vinho Tinto Argentino San Telmo Malbec 750ml',
     preco: 79.9,
-    aliases: ['vinho san telmo malbec', 'vinho san telmo', 'san telmo malbec', 'san telmo', 'vinho malbec'],
+    aliases: [
+      'vinho san telmo malbec',
+      'vinho san telmo',
+      'san telmo malbec',
+      'san telmo',
+      'vinho malbec',
+    ],
   },
   {
     id: 'vin_la_plata',
     nome: 'Vinho La Plata Branco Argentino 750ml',
     preco: 55.9,
-    aliases: ['vinho la plata branco', 'vinho la plata', 'la plata branco', 'la plata'],
+    aliases: [
+      'vinho la plata branco',
+      'vinho la plata',
+      'la plata branco',
+      'la plata',
+    ],
   },
   {
     id: 'vin_cavic',
@@ -308,7 +324,12 @@ const CATALOG_PRODUCTS: ProductCatalogEntry[] = [
     id: 'emp_Escarola com Queijo',
     nome: 'Empanada de Escarola com Queijo',
     preco: 14.0,
-    aliases: ['escarola com queijo', 'escarola e queijo', 'escarola queijo', 'escarola'],
+    aliases: [
+      'escarola com queijo',
+      'escarola e queijo',
+      'escarola queijo',
+      'escarola',
+    ],
   },
   {
     id: 'emp_Bacon Cheeseburger',
@@ -373,21 +394,21 @@ const CATALOG_PRODUCTS: ProductCatalogEntry[] = [
       'goiabada',
     ],
   },
-]
+];
 
 // Lista achatada de todos os aliases ordenados por comprimento decrescente (mais específicos primeiro)
 interface FlatAlias {
-  alias: string
-  product: ProductCatalogEntry
+  alias: string;
+  product: ProductCatalogEntry;
 }
 
-const FLAT_ALIASES: FlatAlias[] = []
+const FLAT_ALIASES: FlatAlias[] = [];
 for (const prod of CATALOG_PRODUCTS) {
   for (const alias of prod.aliases) {
-    FLAT_ALIASES.push({ alias, product: prod })
+    FLAT_ALIASES.push({ alias, product: prod });
   }
 }
-FLAT_ALIASES.sort((a, b) => b.alias.length - a.alias.length)
+FLAT_ALIASES.sort((a, b) => b.alias.length - a.alias.length);
 
 // Palavras-chave que indicam intenção de pedir
 const ORDER_VERB_PATTERNS = [
@@ -409,16 +430,16 @@ const ORDER_VERB_PATTERNS = [
   'anota',
   'traz',
   'trazer',
-]
+];
 
 /**
  * 1. Pré-checagem: detecta se a mensagem possui indicativos de pedido.
  * Utilizado pelo Fast-Path para NÃO disparar saudações ou cardápio estático.
  */
 export function hasOrderIntent(text: string): boolean {
-  if (!text || text.trim().length === 0) return false
+  if (!text || text.trim().length === 0) return false;
 
-  const normalized = normalize(text)
+  const normalized = normalize(text);
 
   // Perguntas puramente informativas sobre cardápio/horário sem números nem sabores específicos
   const isPureFaq =
@@ -428,18 +449,20 @@ export function hasOrderIntent(text: string): boolean {
       normalized.includes('qual o pix') ||
       normalized.includes('chave pix')) &&
     !/\d/.test(normalized) &&
-    !Object.keys(WORD_TO_NUMBER).some((w) => new RegExp(`\\b${w}\\b`).test(normalized))
+    !Object.keys(WORD_TO_NUMBER).some((w) =>
+      new RegExp(`\\b${w}\\b`).test(normalized)
+    );
 
-  if (isPureFaq) return false
+  if (isPureFaq) return false;
 
   // Se o parser determinístico já consegue extrair itens válidos do cardápio, tem intenção de pedido garantida!
-  const parsed = parseTextOrder(text)
+  const parsed = parseTextOrder(text);
   if (parsed.hasItems) {
-    return true
+    return true;
   }
 
   // Verifica se há verbos de pedido combinados com termos de cardápio
-  const hasVerb = ORDER_VERB_PATTERNS.some((v) => normalized.includes(v))
+  const hasVerb = ORDER_VERB_PATTERNS.some((v) => normalized.includes(v));
   const hasFoodTerm = [
     'empanada',
     'empanadas',
@@ -451,28 +474,29 @@ export function hasOrderIntent(text: string): boolean {
     'coca',
     'refrigerante',
     'combo',
-  ].some((t) => normalized.includes(t))
+  ].some((t) => normalized.includes(t));
 
   if (hasVerb && hasFoodTerm) {
-    return true
+    return true;
   }
 
   // Verifica padrão de quantidade + qualquer sabor (ex: "2 carne", "1 calabresa", "3 de queijo")
-  const quantityNumberMatch = /\b(?:\d+|um|uma|dois|duas|tres|quatro|cinco|seis)\s*(?:x\s*)?(?:de\s*)?(?:empanadas?\s*(?:de\s*)?)?[a-z]+/i.test(
-    normalized
-  )
+  const quantityNumberMatch =
+    /\b(?:\d+|um|uma|dois|duas|tres|quatro|cinco|seis)\s*(?:x\s*)?(?:de\s*)?(?:empanadas?\s*(?:de\s*)?)?[a-z]+/i.test(
+      normalized
+    );
   if (quantityNumberMatch && hasFoodTerm) {
-    return true
+    return true;
   }
 
-  return false
+  return false;
 }
 
 function rangesOverlap(
   r1: { start: number; end: number },
   r2: { start: number; end: number }
 ): boolean {
-  return r1.start < r2.end && r2.start < r1.end
+  return r1.start < r2.end && r2.start < r1.end;
 }
 
 /**
@@ -481,43 +505,51 @@ function rangesOverlap(
  */
 export function parseTextOrder(text: string): ParsedOrderResult {
   if (!text || text.trim().length === 0) {
-    return { hasItems: false, items: [], total: 0, totalFormatted: 'R$ 0,00', rawText: text }
+    return {
+      hasItems: false,
+      items: [],
+      total: 0,
+      totalFormatted: 'R$ 0,00',
+      rawText: text,
+    };
   }
 
-  const normalized = normalize(text)
-  const itemsFound: Map<string, ParsedOrderItem> = new Map()
-  const matchedRanges: Array<{ start: number; end: number }> = []
+  const normalized = normalize(text);
+  const itemsFound: Map<string, ParsedOrderItem> = new Map();
+  const matchedRanges: Array<{ start: number; end: number }> = [];
 
   const numPattern =
-    '(?:\\d+|um|uma|dois|duas|tres|quatro|cinco|seis|sete|oito|nove|dez|meia\\s*duzia|uma\\s*duzia)'
+    '(?:\\d+|um|uma|dois|duas|tres|quatro|cinco|seis|sete|oito|nove|dez|meia\\s*duzia|uma\\s*duzia)';
 
   // Passada 1: busca padrão de quantidade explícita antes do alias (ex: "2 carne", "1 coca zero lata")
   for (const { alias, product } of FLAT_ALIASES) {
-    const escapedAlias = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const escapedAlias = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const regex = new RegExp(
       `\\b(${numPattern})\\s*(?:x\\s*)?(?:de\\s*)?(?:empanadas?\\s*(?:de\\s*)?)?${escapedAlias}\\b`,
       'gi'
-    )
+    );
 
-    let match: RegExpExecArray | null
+    let match: RegExpExecArray | null;
     while ((match = regex.exec(normalized)) !== null) {
-      const start = match.index
-      const end = match.index + match[0].length
+      const start = match.index;
+      const end = match.index + match[0].length;
 
       // Ignora se sobrepõe com match mais longo já registrado
       if (matchedRanges.some((r) => rangesOverlap(r, { start, end }))) {
-        continue
+        continue;
       }
 
-      const rawQty = match[1].toLowerCase().trim()
-      const qty = (WORD_TO_NUMBER[rawQty] ?? parseInt(rawQty, 10)) || 1
+      const rawQty = match[1].toLowerCase().trim();
+      const qty = (WORD_TO_NUMBER[rawQty] ?? parseInt(rawQty, 10)) || 1;
 
-      matchedRanges.push({ start, end })
+      matchedRanges.push({ start, end });
 
-      const existing = itemsFound.get(product.id)
+      const existing = itemsFound.get(product.id);
       if (existing) {
-        existing.quantity += qty
-        existing.totalPrice = Number((existing.quantity * existing.unitPrice).toFixed(2))
+        existing.quantity += qty;
+        existing.totalPrice = Number(
+          (existing.quantity * existing.unitPrice).toFixed(2)
+        );
       } else {
         itemsFound.set(product.id, {
           id: product.id,
@@ -525,7 +557,7 @@ export function parseTextOrder(text: string): ParsedOrderResult {
           quantity: qty,
           unitPrice: product.preco,
           totalPrice: Number((qty * product.preco).toFixed(2)),
-        })
+        });
       }
     }
   }
@@ -533,38 +565,40 @@ export function parseTextOrder(text: string): ParsedOrderResult {
   // Passada 2: Fallback sem quantidade explícita (ex: "quero carne", "manda calabresa")
   if (itemsFound.size === 0) {
     for (const { alias, product } of FLAT_ALIASES) {
-      if (['coca', 'queijo', 'bacon', 'frango'].includes(alias)) continue
-      if (alias.length < 5) continue
+      if (['coca', 'queijo', 'bacon', 'frango'].includes(alias)) continue;
+      if (alias.length < 5) continue;
 
-      const escapedAlias = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const escapedAlias = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const singleRegex = new RegExp(
         `\\b(?:quero|manda|envia|me ve|vou querer)?\\s*(?:uma?\\s+)?${escapedAlias}\\b`,
         'i'
-      )
-      const match = singleRegex.exec(normalized)
+      );
+      const match = singleRegex.exec(normalized);
       if (match) {
-        const start = match.index
-        const end = match.index + match[0].length
+        const start = match.index;
+        const end = match.index + match[0].length;
         if (matchedRanges.some((r) => rangesOverlap(r, { start, end }))) {
-          continue
+          continue;
         }
-        matchedRanges.push({ start, end })
+        matchedRanges.push({ start, end });
         itemsFound.set(product.id, {
           id: product.id,
           title: product.nome,
           quantity: 1,
           unitPrice: product.preco,
           totalPrice: product.preco,
-        })
+        });
       }
     }
   }
 
-  const items = Array.from(itemsFound.values())
-  const total = Number(items.reduce((acc, it) => acc + it.totalPrice, 0).toFixed(2))
-  const totalFormatted = `R$ ${total.toFixed(2).replace('.', ',')}`
+  const items = Array.from(itemsFound.values());
+  const total = Number(
+    items.reduce((acc, it) => acc + it.totalPrice, 0).toFixed(2)
+  );
+  const totalFormatted = `R$ ${total.toFixed(2).replace('.', ',')}`;
 
-  const deliveryAddress = extractAddressFromText(text) || undefined
+  const deliveryAddress = extractAddressFromText(text) || undefined;
 
   return {
     hasItems: items.length > 0,
@@ -573,49 +607,51 @@ export function parseTextOrder(text: string): ParsedOrderResult {
     totalFormatted,
     deliveryAddress,
     rawText: text,
-  }
+  };
 }
 
 /**
  * 3. Identifica se a mensagem contém um endereço de entrega.
  */
 export function extractAddressFromText(text: string): string | null {
-  if (!text) return null
-  const trimmed = text.trim()
-  const lower = normalize(trimmed)
+  if (!text) return null;
+  const trimmed = text.trim();
+  const lower = normalize(trimmed);
 
   // Prefixos comuns de endereço no Brasil
   const addressPrefixMatch = trimmed.match(
     /(?:entregar\s+(?:na|no|em)|endereco(?:\s+de\s+entrega)?(?:\s+e)?:\s*|manda\s+(?:na|no|em)\s+)?((?:rua|r\.|r|av\.|av|avenida|alameda|al\.|al|travessa|tv\.|tv|rodovia|rod\.|rod|estrada|quadra|qd\.|condominio|bairro)\s+[^,\n]+(?:,\s*\d+)?(?:[^.\n]*))/i
-  )
+  );
 
   if (addressPrefixMatch && addressPrefixMatch[1]) {
-    const candidate = addressPrefixMatch[1].trim()
+    const candidate = addressPrefixMatch[1].trim();
     if (candidate.length >= 8) {
-      return candidate
+      return candidate;
     }
   }
 
   // Padrão estruturado "Nome da Rua, Número, Bairro/Cidade"
   // Ex: "Rua das Palmeiras, 150, Centro" ou "Av Paulista, 1000"
-  const streetPattern = /\b(?:rua|r\.?|avenida|av\.?|alameda|al\.?|travessa|tv\.?)\s+[a-z0-9À-ÿ\s.'-]+,\s*\d+/i
+  const streetPattern =
+    /\b(?:rua|r\.?|avenida|av\.?|alameda|al\.?|travessa|tv\.?)\s+[a-z0-9À-ÿ\s.'-]+,\s*\d+/i;
   if (streetPattern.test(trimmed)) {
-    return trimmed
+    return trimmed;
   }
 
   // Se o cliente respondeu diretamente com tipo de logradouro + nome + número
   // Ex: "Rua dos Pinheiros 123" ou "Av Brasil 450 apto 12"
-  const directAddressPattern = /^(?:rua|r\.?|avenida|av\.?|alameda|travessa|estrada)\s+[a-z0-9À-ÿ\s.'-]+\s+\d+/i
+  const directAddressPattern =
+    /^(?:rua|r\.?|avenida|av\.?|alameda|travessa|estrada)\s+[a-z0-9À-ÿ\s.'-]+\s+\d+/i;
   if (directAddressPattern.test(trimmed)) {
-    return trimmed
+    return trimmed;
   }
 
   // CEP (ex: 01310-100 ou 01310100)
   if (/\b\d{5}-?\d{3}\b/.test(lower) && trimmed.length > 15) {
-    return trimmed
+    return trimmed;
   }
 
-  return null
+  return null;
 }
 
 /**
@@ -623,8 +659,8 @@ export function extractAddressFromText(text: string): string | null {
  * Ex: "sim", "no mesmo", "pode ser", "isso", "pode entregar aí", "confirmo"
  */
 export function isAddressConfirmation(text: string): boolean {
-  if (!text) return false
-  const normalized = normalize(text)
+  if (!text) return false;
+  const normalized = normalize(text);
 
   const confirmationPatterns = [
     'sim',
@@ -640,9 +676,12 @@ export function isAddressConfirmation(text: string): boolean {
     'pode entregar nesse',
     'pode mandar nesse',
     'o mesmo',
-  ]
+  ];
 
   return confirmationPatterns.some(
-    (pattern) => normalized === pattern || normalized.startsWith(`${pattern} `) || normalized.endsWith(` ${pattern}`)
-  )
+    (pattern) =>
+      normalized === pattern ||
+      normalized.startsWith(`${pattern} `) ||
+      normalized.endsWith(` ${pattern}`)
+  );
 }

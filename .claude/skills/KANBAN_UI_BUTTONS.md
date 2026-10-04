@@ -9,24 +9,27 @@ Implementação de menu de ações (⋯) nos cards de pedidos do Kanban, permiti
 ## Components Criados
 
 ### 1. `src/hooks/use-deal-stage-movement.ts`
+
 **Hook customizado** para gerenciar o movimento de deals.
 
 ```typescript
-const { moveDealToStage, isLoading, error } = useDealStageMovement()
+const { moveDealToStage, isLoading, error } = useDealStageMovement();
 
-await moveDealToStage('deal-id', 'Na Cozinha')
+await moveDealToStage('deal-id', 'Na Cozinha');
 // → POST /api/deals/[id]/move-stage
 // → Toast de sucesso/erro
 // → Re-fetch automático (callback)
 ```
 
 **Características:**
+
 - ✅ Integração com API `/api/deals/[id]/move-stage`
 - ✅ Toast de feedback via `sonner`
 - ✅ Loading state durante requisição
 - ✅ Error handling com mensagens customizadas
 
 ### 2. `src/components/pipelines/deal-card-actions.tsx`
+
 **Componente dropdown** com menu de ações para mover deals.
 
 ```tsx
@@ -39,6 +42,7 @@ await moveDealToStage('deal-id', 'Na Cozinha')
 ```
 
 **Features:**
+
 - 🎯 Exibe apenas os próximos stages (fluxo para frente)
 - 🔄 Loading spinner durante movimento
 - 🎨 Ícone ChevronRight para indicar "próximo"
@@ -50,12 +54,14 @@ await moveDealToStage('deal-id', 'Na Cozinha')
 ## Components Modificados
 
 ### `src/components/pipelines/deal-card.tsx`
+
 - ✅ Adicionado `allStages?: PipelineStage[]`
 - ✅ Adicionado `onDealUpdated?: () => void`
 - ✅ Menu de ações renderizado ao lado do title
 - ✅ Oculto em overlay (drag preview)
 
 ### `src/components/pipelines/pipeline-board.tsx`
+
 - ✅ Adicionado `onDealsRefresh?: () => void` prop
 - ✅ `allStages` propagado para `StageColumn`
 - ✅ `onDealUpdated` callback ao mover deals
@@ -199,16 +205,16 @@ No changes to existing tests — all passing ✅
 ## Usage Example
 
 ```tsx
-import { PipelineBoard } from '@/components/pipelines/pipeline-board'
+import { PipelineBoard } from '@/components/pipelines/pipeline-board';
 
 export function PipelineView() {
-  const [deals, setDeals] = useState<Deal[]>([])
-  const stages = usePipelineStages()
+  const [deals, setDeals] = useState<Deal[]>([]);
+  const stages = usePipelineStages();
 
   const handleDealsRefresh = () => {
     // Re-fetch deals quando um foi movido
-    refetchDeals()
-  }
+    refetchDeals();
+  };
 
   return (
     <PipelineBoard
@@ -219,7 +225,7 @@ export function PipelineView() {
       onEditDeal={handleEdit}
       onAddDeal={handleAdd}
     />
-  )
+  );
 }
 ```
 
@@ -228,11 +234,13 @@ export function PipelineView() {
 ## Migration Notes
 
 ✅ **Backward Compatible:**
+
 - `allStages` é optional
 - `onDealUpdated` é optional
 - Se não fornecidos, menu de ações não aparece
 
 ✅ **No Breaking Changes:**
+
 - DealCard continua funcionando sem novos props
 - PipelineBoard mantém assinatura anterior
 

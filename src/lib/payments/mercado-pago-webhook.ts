@@ -26,7 +26,8 @@ export function extractPaymentId(
 
   const topic = b.type ?? b.topic ?? query.get('type') ?? query.get('topic');
   const isPayment =
-    topic === 'payment' || (typeof b.action === 'string' && b.action.startsWith('payment.'));
+    topic === 'payment' ||
+    (typeof b.action === 'string' && b.action.startsWith('payment.'));
   if (!isPayment) return null;
 
   const id = b.data?.id ?? query.get('data.id') ?? query.get('id');
@@ -65,7 +66,10 @@ export function isValidMercadoPagoSignature(args: {
   if (args.xRequestId) manifest += `request-id:${args.xRequestId};`;
   manifest += `ts:${ts};`;
 
-  const expected = crypto.createHmac('sha256', args.secret).update(manifest).digest('hex');
+  const expected = crypto
+    .createHmac('sha256', args.secret)
+    .update(manifest)
+    .digest('hex');
 
   const a = Buffer.from(expected, 'hex');
   const b = Buffer.from(v1, 'hex');
@@ -76,5 +80,7 @@ export function isValidMercadoPagoSignature(args: {
 export const ORDER_STATUS_PAID = 'paid';
 
 export function isOrderPaid(status: unknown): boolean {
-  return typeof status === 'string' && status.toLowerCase() === ORDER_STATUS_PAID;
+  return (
+    typeof status === 'string' && status.toLowerCase() === ORDER_STATUS_PAID
+  );
 }

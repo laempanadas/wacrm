@@ -15,9 +15,11 @@ Implementação do MVP de pipeline expandido para o sistema de "Pedidos Delivery
 ## Arquivos Criados
 
 ### 1. `/src/lib/orders/pipeline-stages.ts` (204 linhas)
+
 **Módulo central** que gerencia o ciclo de vida dos estágios.
 
 **Exportações principais:**
+
 ```typescript
 // Constantes dos stages
 PIPELINE_STAGES = {
@@ -26,31 +28,33 @@ PIPELINE_STAGES = {
   READY: 'Pronto para Entrega',
   DELIVERED: 'Entregue',
   PAID: 'Pago',
-}
+};
 
 // Mapeamento stage → order.status
 STAGE_TO_ORDER_STATUS = {
   'Novo Pedido': 'pending',
   'Na Cozinha': 'payment_approved',
   'Pronto para Entrega': 'ready',
-  'Entregue': 'delivered',
-  'Pago': 'paid',
-}
+  Entregue: 'delivered',
+  Pago: 'paid',
+};
 
 // Funções
-resolvePipeline()           // Cria/retorna pipeline
-resolveStage()              // Cria/retorna stage
-moveDealToStage()           // Move deal + sincroniza order.status
-getDealCurrentStage()       // Retorna stage atual
+resolvePipeline(); // Cria/retorna pipeline
+resolveStage(); // Cria/retorna stage
+moveDealToStage(); // Move deal + sincroniza order.status
+getDealCurrentStage(); // Retorna stage atual
 ```
 
 **Características:**
+
 - ✅ Idempotente — stages criados sob demanda
 - ✅ Sincroniza automaticamente order.status
 - ✅ Best-effort: falhas em order.status não interrompem movimento do deal
 - ✅ Cores personalizadas por stage (Amarelo → Azul → Roxo → Verde)
 
 ### 2. `/src/app/api/deals/[id]/move-stage/route.ts` (48 linhas)
+
 **Nova API route** para agentes moverem cards manualmente.
 
 ```bash
@@ -70,11 +74,13 @@ Response:
 ```
 
 **Validações:**
+
 - Requer role ≥ 'agent'
 - Stage deve ser valor válido de PIPELINE_STAGES
 - Retorna erro 400 se stage inválido
 
 ### 3. `/src/lib/orders/pipeline-stages.test.ts` (59 linhas)
+
 **Testes** para constantes e mapeamentos de stage.
 
 ```
@@ -91,22 +97,25 @@ Response:
 ### 1. `/src/app/api/payments/mercado-pago/webhook/route.ts`
 
 **Antes:**
+
 ```typescript
 // Movia direto para "Pago" quando pagamento era aprovado
-await markDealPaid(db, { accountId, dealId })
+await markDealPaid(db, { accountId, dealId });
 ```
 
 **Depois:**
+
 ```typescript
 // Move para "Na Cozinha" quando pagamento é aprovado
 await moveDealToStage(db, {
   accountId,
   dealId,
-  targetStage: PIPELINE_STAGES.COOKING
-})
+  targetStage: PIPELINE_STAGES.COOKING,
+});
 ```
 
 **Impacto:** Quando Mercado Pago webhook confirma pagamento:
+
 - Deal move para "Na Cozinha" (payment_approved)
 - Order status → `payment_approved`
 - Cliente recebe notificação "Seu pedido já foi para a cozinha 🔥"
@@ -158,20 +167,22 @@ await moveDealToStage(db, {
 ## Mudanças no Schema (Supabase)
 
 **Tabela `orders` — novo status suportado:**
+
 ```typescript
-status: 'pending'
-     | 'payment_approved'  // NEW: após Mercado Pago aprova
-     | 'ready'             // NEW: pronto na cozinha
-     | 'dispatched'        // NEW: saiu para entrega
-     | 'delivered'         // NEW: entregue
-     | 'paid'              // LEGACY: fechado
-     | 'rejected'          // LEGACY: pagto rejeitado
-     | 'in_process'        // LEGACY: analisando
+status: 'pending' |
+  'payment_approved' | // NEW: após Mercado Pago aprova
+  'ready' | // NEW: pronto na cozinha
+  'dispatched' | // NEW: saiu para entrega
+  'delivered' | // NEW: entregue
+  'paid' | // LEGACY: fechado
+  'rejected' | // LEGACY: pagto rejeitado
+  'in_process'; // LEGACY: analisando
 ```
 
 **Tabela `pipeline_stages` — 5 stages criados automaticamente:**
+
 ```sql
-SELECT * FROM pipeline_stages 
+SELECT * FROM pipeline_stages
 WHERE pipeline_id = (
   SELECT id FROM pipelines WHERE name = 'Pedidos Delivery'
 );
@@ -191,12 +202,14 @@ WHERE pipeline_id = (
 ## Compatibilidade Retroativa
 
 ✅ **Preserva funções existentes:**
+
 - `createOrderDeal()` continua funcionando (cria em "Novo Pedido")
 - `markDealPaid()` continua disponível (compatibilidade legacy)
 - `markContactPaymentConfirmed()` funciona com novos stages
 - Mercado Pago webhook mantém assinatura
 
 ✅ **Sem breaking changes:**
+
 - Antigos deals em "Pago" continuam funcionando
 - Order status 'paid' mapeado para stage "Pago"
 - Código existente que query deals por status=open continua válido

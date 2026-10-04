@@ -1,24 +1,24 @@
-'use client'
+'use client';
 
-import { useState } from 'react'
+import { useState } from 'react';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuTrigger,
   DropdownMenuItem,
-} from '@/components/ui/dropdown-menu'
-import { Button } from '@/components/ui/button'
-import { ChevronRight, Loader2 } from 'lucide-react'
-import { toast } from 'sonner'
-import { useDealStageMovement } from '@/hooks/use-deal-stage-movement'
-import { PIPELINE_STAGES } from '@/lib/orders/pipeline-stages'
-import type { Deal, PipelineStage } from '@/types'
+} from '@/components/ui/dropdown-menu';
+import { Button } from '@/components/ui/button';
+import { ChevronRight, Loader2 } from 'lucide-react';
+import { toast } from 'sonner';
+import { useDealStageMovement } from '@/hooks/use-deal-stage-movement';
+import { PIPELINE_STAGES } from '@/lib/orders/pipeline-stages';
+import type { Deal, PipelineStage } from '@/types';
 
 interface DealQuickActionsProps {
-  deal: Deal
-  currentStage: PipelineStage | null
-  allStages: PipelineStage[]
-  onDealUpdated?: () => void
+  deal: Deal;
+  currentStage: PipelineStage | null;
+  allStages: PipelineStage[];
+  onDealUpdated?: () => void;
 }
 
 /**
@@ -31,26 +31,26 @@ export function DealQuickActions({
   allStages,
   onDealUpdated,
 }: DealQuickActionsProps) {
-  const [isOpen, setIsOpen] = useState(false)
-  const { moveDealToStage, isLoading } = useDealStageMovement()
+  const [isOpen, setIsOpen] = useState(false);
+  const { moveDealToStage, isLoading } = useDealStageMovement();
 
   const nextStages = allStages.filter(
     (s) => currentStage && s.position > currentStage.position
-  )
+  );
 
   if (!nextStages.length || !currentStage) {
-    return null
+    return null;
   }
 
   const handleMoveToStage = async (stageName: string) => {
     try {
-      await moveDealToStage(deal.id, stageName)
-      setIsOpen(false)
-      onDealUpdated?.()
+      await moveDealToStage(deal.id, stageName);
+      setIsOpen(false);
+      onDealUpdated?.();
     } catch {
       // Erro já tratado no hook
     }
-  }
+  };
 
   return (
     <DropdownMenu open={isOpen} onOpenChange={setIsOpen}>
@@ -58,12 +58,12 @@ export function DealQuickActions({
         <Button
           size="sm"
           variant="ghost"
-          className="h-5 w-5 p-0 hover:bg-primary/10"
+          className="hover:bg-primary/10 h-5 w-5 p-0"
           onClick={(e) => e.stopPropagation()}
           title="Ações rápidas"
         >
           {isLoading ? (
-            <Loader2 className="h-3 w-3 animate-spin text-primary" />
+            <Loader2 className="text-primary h-3 w-3 animate-spin" />
           ) : (
             <ChevronRight className="h-3 w-3" />
           )}
@@ -83,5 +83,5 @@ export function DealQuickActions({
         ))}
       </DropdownMenuContent>
     </DropdownMenu>
-  )
+  );
 }

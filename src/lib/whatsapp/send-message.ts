@@ -138,7 +138,12 @@ export async function sendMessageToConversation(
     );
   }
 
-  validateSendMessageParams({ messageType, contentText, mediaUrl, templateName });
+  validateSendMessageParams({
+    messageType,
+    contentText,
+    mediaUrl,
+    templateName,
+  });
 
   const isMediaKind = (MEDIA_KINDS as readonly string[]).includes(messageType);
 
@@ -400,8 +405,16 @@ export async function sendPaymentConfirmationWhatsApp(
     .single();
 
   if (configError || !config) {
-    console.error('Failed to retrieve WhatsApp config for account:', accountId, configError);
-    throw new SendMessageError('whatsapp_not_configured', 'WhatsApp not configured for this account.', 400);
+    console.error(
+      'Failed to retrieve WhatsApp config for account:',
+      accountId,
+      configError
+    );
+    throw new SendMessageError(
+      'whatsapp_not_configured',
+      'WhatsApp not configured for this account.',
+      400
+    );
   }
 
   const accessToken = decrypt(config.access_token);
@@ -415,5 +428,7 @@ export async function sendPaymentConfirmationWhatsApp(
     language: 'pt_BR',
     params: [orderId, paymentAmount.toFixed(2)],
   });
-  console.log(`[sendPaymentConfirmationWhatsApp] Confirmation template sent to ${contactPhone} for order ${orderId}`);
+  console.log(
+    `[sendPaymentConfirmationWhatsApp] Confirmation template sent to ${contactPhone} for order ${orderId}`
+  );
 }

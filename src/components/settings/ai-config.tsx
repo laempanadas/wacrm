@@ -2,7 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { Loader2, Sparkles, CheckCircle2, Trash2, Eye, EyeOff } from 'lucide-react';
+import {
+  Loader2,
+  Sparkles,
+  CheckCircle2,
+  Trash2,
+  Eye,
+  EyeOff,
+} from 'lucide-react';
 import { useAuth } from '@/hooks/use-auth';
 import { canEditSettings } from '@/lib/auth/roles';
 import { Button } from '@/components/ui/button';
@@ -214,7 +221,7 @@ export function AiConfig() {
 
   if (loading || profileLoading) {
     return (
-      <div className="flex items-center justify-center py-16 text-muted-foreground">
+      <div className="text-muted-foreground flex items-center justify-center py-16">
         <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading…
       </div>
     );
@@ -230,7 +237,7 @@ export function AiConfig() {
       />
 
       {!canEdit && (
-        <p className="mb-4 rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+        <p className="border-border bg-muted/40 text-muted-foreground mb-4 rounded-md border px-3 py-2 text-sm">
           Only admins and owners can change the AI configuration.
         </p>
       )}
@@ -239,7 +246,7 @@ export function AiConfig() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
-              <Sparkles className="h-4 w-4 text-primary" /> Provider & key
+              <Sparkles className="text-primary h-4 w-4" /> Provider & key
             </CardTitle>
             <CardDescription>
               Your key is encrypted at rest (AES-256-GCM) and never shown again
@@ -259,7 +266,9 @@ export function AiConfig() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="openai">{PROVIDER_LABEL.openai}</SelectItem>
+                    <SelectItem value="openai">
+                      {PROVIDER_LABEL.openai}
+                    </SelectItem>
                     <SelectItem value="anthropic">
                       {PROVIDER_LABEL.anthropic}
                     </SelectItem>
@@ -304,7 +313,7 @@ export function AiConfig() {
                   <button
                     type="button"
                     onClick={() => setShowKey((s) => !s)}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    className="text-muted-foreground hover:text-foreground absolute top-1/2 right-2 -translate-y-1/2"
                     tabIndex={-1}
                   >
                     {showKey ? (
@@ -332,7 +341,7 @@ export function AiConfig() {
             <div className="space-y-2">
               <Label htmlFor="ai-embeddings-key">
                 Embeddings key{' '}
-                <span className="font-normal text-muted-foreground">
+                <span className="text-muted-foreground font-normal">
                   (optional — enables semantic knowledge-base search)
                 </span>
               </Label>
@@ -354,11 +363,11 @@ export function AiConfig() {
                 disabled={disabled}
                 autoComplete="off"
               />
-              <p className="text-xs text-muted-foreground">
+              <p className="text-muted-foreground text-xs">
                 An OpenAI key used only to embed your knowledge base
                 (text-embedding-3-small)
-                {provider === 'openai' ? ' — can be the same key as above' : ''}.
-                Leave blank to use keyword search instead. Clear it to turn
+                {provider === 'openai' ? ' — can be the same key as above' : ''}
+                . Leave blank to use keyword search instead. Clear it to turn
                 semantic search off.
               </p>
             </div>
@@ -387,12 +396,12 @@ export function AiConfig() {
               />
             </div>
 
-            <div className="flex items-center justify-between gap-4 rounded-md border border-border p-3">
+            <div className="border-border flex items-center justify-between gap-4 rounded-md border p-3">
               <div>
-                <p className="text-sm font-medium text-foreground">
+                <p className="text-foreground text-sm font-medium">
                   Enable AI assistant
                 </p>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-muted-foreground text-xs">
                   Master switch. Turns on the “Draft with AI” button in the
                   inbox.
                 </p>
@@ -404,12 +413,12 @@ export function AiConfig() {
               />
             </div>
 
-            <div className="flex items-center justify-between gap-4 rounded-md border border-border p-3">
+            <div className="border-border flex items-center justify-between gap-4 rounded-md border p-3">
               <div>
-                <p className="text-sm font-medium text-foreground">
+                <p className="text-foreground text-sm font-medium">
                   Auto-reply to inbound messages
                 </p>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-muted-foreground text-xs">
                   The bot answers new inbound messages automatically (only when
                   no flow handles them and no agent is assigned). Hands off to a
                   human when it can’t help.
@@ -424,8 +433,10 @@ export function AiConfig() {
 
             <div className="flex items-center justify-between gap-4">
               <div>
-                <Label htmlFor="ai-max">Max auto-replies per conversation</Label>
-                <p className="text-xs text-muted-foreground">
+                <Label htmlFor="ai-max">
+                  Max auto-replies per conversation
+                </Label>
+                <p className="text-muted-foreground text-xs">
                   After this many bot replies in one thread, the bot goes quiet.
                 </p>
               </div>
@@ -437,7 +448,7 @@ export function AiConfig() {
                 value={maxPerConversation}
                 onChange={(e) =>
                   setMaxPerConversation(
-                    Math.min(20, Math.max(1, Number(e.target.value) || 1)),
+                    Math.min(20, Math.max(1, Number(e.target.value) || 1))
                   )
                 }
                 disabled={disabled || !autoReplyEnabled}

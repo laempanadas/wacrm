@@ -19,6 +19,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createClient } from '@supabase/supabase-js';
+import { saveContactOrderFields } from './custom-fields';
 
 export const ORDERS_PIPELINE_NAME = 'Pedidos Delivery';
 export const ORDERS_INITIAL_STAGE_NAME = 'Novo Pedido';
@@ -26,9 +27,89 @@ export const ORDERS_PAID_STAGE_NAME = 'Pago';
 
 export const TAG_CONFIRMADO = 'Confirmado';
 export const TAG_AGUARDANDO = 'Aguardando Pagamento';
+export const TAG_HUMANO = 'Precisa de Atendente';
+
+/**
+ * Variáveis internas do fluxo (flow_runs.vars) e etapas do Kanban (pipeline_stages)
+ * que NUNCA devem ser salvas como tags de contato.
+ */
+export const FORBIDDEN_CONTACT_TAGS = new Set([
+  // Variáveis internas de controle do flow
+  'aguardando_tipo',
+  'aguardando_nome',
+  'aguardando_catalogo',
+  'aguardando_catálogo',
+  'aguardando_endereco',
+  'aguardando_endereço',
+  'aguardando_itens',
+  'aguardando_telefone',
+  'aguardando_pedido',
+  'aguardando tipo',
+  'aguardando nome',
+  'aguardando catalogo',
+  'aguardando catálogo',
+  'aguardando endereco',
+  'aguardando endereço',
+  // Etapas de Kanban (pertencem à tabela pipeline_stages, não tags de contato)
+  'em_preparo',
+  'em preparo',
+  'saiu_para_entrega',
+  'saiu para entrega',
+  'entregue',
+  'novo_pedido',
+  'novo pedido',
+  'na_cozinha',
+  'na cozinha',
+  'pronto_para_entrega',
+  'pronto para entrega',
+  'pago',
+]);
+
+/**
+ * Verifica se a tag informada é uma variável de controle ou etapa de kanban proibida.
+ */
+export function isForbiddenContactTag(tagName: string): boolean {
+  if (!tagName) return false;
+  const normalized = tagName.trim().toLowerCase();
+  const underscore = normalized.replace(/[\s-]+/g, '_');
+  return (
+    FORBIDDEN_CONTACT_TAGS.has(normalized) ||
+    FORBIDDEN_CONTACT_TAGS.has(underscore)
+  );
+}
+
+/**
+ * Normaliza o nome da tag para a constante oficial ou retorna null se for proibida.
+ */
+export function normalizeContactTagName(tagName: string): string | null {
+  const trimmed = tagName.trim();
+  const lower = trimmed.toLowerCase();
+
+  // Redireciona variações de aguardando pagamento para a constante oficial
+  if (lower === 'aguardando_pagamento' || lower === 'aguardando pagamento') {
+    return TAG_AGUARDANDO;
+  }
+  if (lower === 'confirmado') {
+    return TAG_CONFIRMADO;
+  }
+  if (
+    lower === 'precisa de atendente' ||
+    lower === 'precisa_de_atendente' ||
+    lower === 'humano'
+  ) {
+    return TAG_HUMANO;
+  }
+
+  if (isForbiddenContactTag(trimmed)) {
+    return null;
+  }
+
+  return trimmed;
+}
 
 export type OrderDeliveryKind = 'delivery' | 'retirada';
-export type OrderPaymentMethod = 'pix' | 'cartao' | 'dinheiro' | 'mercado_pago' | 'na_retirada';
+export type OrderPaymentMethod =
+  'pix' | 'cartao' | 'dinheiro' | 'mercado_pago' | 'na_retirada';
 
 export interface CreateOrderInput {
   contactId: string;
@@ -40,6 +121,7 @@ export interface CreateOrderInput {
   paidOnline?: boolean;
   conversationId?: string;
   external_reference?: string | null;
+  items?: string | Array<{ title?: string; name?: string; quantity?: number }>;
   /**
    * Only create the deal + tag. For callers that write their own `orders`
    * row (the catalog order flow), so the order isn't recorded twice.
@@ -75,7 +157,7 @@ export function buildOrderTitle(customerName: string): string {
 }
 
 export function paymentMethodLabel(method?: OrderPaymentMethod): string {
-  return method ? PAYMENT_LABELS[method] ?? method : '(não informado)';
+  return method ? (PAYMENT_LABELS[method] ?? method) : '(não informado)';
 }
 
 export function deliveryKindLabel(kind: OrderDeliveryKind): string {
@@ -146,7 +228,9 @@ export async function createOrderDeal(
     .maybeSingle();
   if (pipelineErr) throw pipelineErr;
   if (!pipeline) {
-    throw new Error(`Pipeline "${ORDERS_PIPELINE_NAME}" not found for account ${ctx.accountId}`);
+    throw new Error(
+      `Pipeline "${ORDERS_PIPELINE_NAME}" not found for account ${ctx.accountId}`
+    );
   }
 
   // 2) Resolve initial stage
@@ -158,7 +242,9 @@ export async function createOrderDeal(
     .maybeSingle();
   if (stageErr) throw stageErr;
   if (!stage) {
-    throw new Error(`Stage "${ORDERS_INITIAL_STAGE_NAME}" not found in pipeline ${pipeline.id}`);
+    throw new Error(
+      `Stage "${ORDERS_INITIAL_STAGE_NAME}" not found in pipeline ${pipeline.id}`
+    );
   }
 
   // 3) If externalReference provided — try to find existing order to be idempotent
@@ -179,7 +265,10 @@ export async function createOrderDeal(
         try {
           await applyContactTag(supabase, ctx, input.contactId, tagName);
         } catch (tErr) {
-          console.warn('applyContactTag failed while returning existing order', tErr);
+          console.warn(
+            'applyContactTag failed while returning existing order',
+            tErr
+          );
         }
 
         return {
@@ -192,7 +281,10 @@ export async function createOrderDeal(
         };
       }
     } catch (e) {
-      console.warn('Failed to lookup existing order by external_reference — continuing to create', e);
+      console.warn(
+        'Failed to lookup existing order by external_reference — continuing to create',
+        e
+      );
     }
   }
 
@@ -209,16 +301,22 @@ export async function createOrderDeal(
       .eq('status', 'open');
 
     if (input.conversationId) {
-      existingDealQuery = existingDealQuery.eq('conversation_id', input.conversationId);
+      existingDealQuery = existingDealQuery.eq(
+        'conversation_id',
+        input.conversationId
+      );
     }
 
-    const { data: existingDeal } = await existingDealQuery.limit(1).maybeSingle();
+    const { data: existingDeal } = await existingDealQuery
+      .limit(1)
+      .maybeSingle();
 
     if (existingDeal?.id) {
       // Reutiliza e atualiza o deal existente (ex.: deal criado no webhook com valor 0 ou deal anterior aberto)
       const updatePayload: Record<string, unknown> = {
         title: buildOrderTitle(input.customerName),
-        value: Number.isFinite(input.total) && input.total > 0 ? input.total : 0,
+        value:
+          Number.isFinite(input.total) && input.total > 0 ? input.total : 0,
         notes: buildOrderNotes({
           deliveryKind: input.deliveryKind,
           paymentMethod: input.paymentMethod,
@@ -236,13 +334,19 @@ export async function createOrderDeal(
         .eq('id', existingDeal.id);
 
       if (updateErr) {
-        console.warn('[createOrderDeal] update existing deal failed, falling back to insert:', updateErr);
+        console.warn(
+          '[createOrderDeal] update existing deal failed, falling back to insert:',
+          updateErr
+        );
       } else {
         dealId = existingDeal.id as string;
       }
     }
   } catch (findDealErr) {
-    console.warn('[createOrderDeal] failed to check existing deal:', findDealErr);
+    console.warn(
+      '[createOrderDeal] failed to check existing deal:',
+      findDealErr
+    );
   }
 
   if (!dealId) {
@@ -345,12 +449,40 @@ export async function createOrderDeal(
   const tagName = selectStatusTagName(Boolean(input.paidOnline));
   await applyContactTag(supabase, ctx, input.contactId, tagName);
 
+  // 8) Salva campos personalizados padronizados do contato (delivery CRM)
+  if (input.contactId && ctx.accountId) {
+    try {
+      await saveContactOrderFields(supabase, ctx.accountId, input.contactId, {
+        enderecoCompleto: input.deliveryAddress,
+        formaPagamento: input.paymentMethod
+          ? paymentMethodLabel(input.paymentMethod)
+          : undefined,
+        itensUltimoPedido:
+          typeof input.items === 'string'
+            ? input.items
+            : Array.isArray(input.items)
+              ? input.items
+                  .map(
+                    (it) =>
+                      `${it.quantity ?? 1}x ${it.title ?? it.name ?? 'Item'}`
+                  )
+                  .join(', ')
+              : undefined,
+      });
+    } catch (cfErr) {
+      console.warn(
+        '[createOrderDeal] Falha não bloqueante ao salvar campos customizados:',
+        cfErr
+      );
+    }
+  }
+
   return {
     dealId,
     pipelineId: pipeline.id,
     stageId: stage.id,
     tagName,
-    orderId: (orderRecord?.id as string | undefined),
+    orderId: orderRecord?.id as string | undefined,
     orderAlreadyExisted: false,
   };
 }
@@ -370,13 +502,17 @@ export async function createDealForOrder(
   input: Omit<CreateOrderInput, 'skipOrderRecord'>
 ): Promise<CreateOrderResult | null> {
   try {
-    const result = await createOrderDeal(supabase, ctx, { ...input, skipOrderRecord: true });
+    const result = await createOrderDeal(supabase, ctx, {
+      ...input,
+      skipOrderRecord: true,
+    });
     if (orderId) {
       const { error } = await supabase
         .from('orders')
         .update({ deal_id: result.dealId })
         .eq('id', orderId);
-      if (error) console.error('[createDealForOrder] link deal_id failed:', error);
+      if (error)
+        console.error('[createDealForOrder] link deal_id failed:', error);
     }
     return result;
   } catch (err) {
@@ -396,50 +532,84 @@ export async function markContactPaymentConfirmed(
 ): Promise<void> {
   await applyContactTag(supabase, ctx, contactId, TAG_CONFIRMADO);
 
+  // Remove a tag oficial TAG_AGUARDANDO
   const { data: waiting } = await supabase
     .from('tags')
     .select('id')
     .eq('account_id', ctx.accountId)
     .eq('name', TAG_AGUARDANDO)
     .maybeSingle();
-  if (!waiting?.id) return;
+  if (waiting?.id) {
+    const { error } = await supabase
+      .from('contact_tags')
+      .delete()
+      .eq('contact_id', contactId)
+      .eq('tag_id', waiting.id);
+    if (error) {
+      console.warn('Failed to remove waiting-payment tag', error);
+    }
+  }
 
-  const { error } = await supabase
-    .from('contact_tags')
-    .delete()
-    .eq('contact_id', contactId)
-    .eq('tag_id', waiting.id);
-  if (error) {
-    console.warn('Failed to remove waiting-payment tag', error);
+  // Remove também a tag legada 'aguardando_pagamento' se ainda existir
+  const { data: legacyWaiting } = await supabase
+    .from('tags')
+    .select('id')
+    .eq('account_id', ctx.accountId)
+    .eq('name', 'aguardando_pagamento')
+    .maybeSingle();
+  if (legacyWaiting?.id) {
+    const { error } = await supabase
+      .from('contact_tags')
+      .delete()
+      .eq('contact_id', contactId)
+      .eq('tag_id', legacyWaiting.id);
+    if (error) {
+      console.warn('Failed to remove legacy waiting-payment tag', error);
+    }
   }
 }
 
 /**
  * Ensures tag existence and associates to contact idempotently.
+ * Enforces hygiene: normalizes TAG_AGUARDANDO, TAG_CONFIRMADO, TAG_HUMANO
+ * and blocks internal flow vars and kanban stages.
  */
-async function applyContactTag(
+export async function applyContactTag(
   supabase: SupabaseClient,
   ctx: { accountId: string; userId: string },
   contactId: string,
   tagName: string
 ): Promise<void> {
+  const targetTagName = normalizeContactTagName(tagName);
+  if (!targetTagName) {
+    console.warn(
+      `[applyContactTag] Ignorando tag de controle interno ou etapa de kanban: "${tagName}"`
+    );
+    return;
+  }
+
   const { data: existing } = await supabase
     .from('tags')
     .select('id')
     .eq('account_id', ctx.accountId)
-    .eq('name', tagName)
+    .eq('name', targetTagName)
     .maybeSingle();
 
   let tagId = existing?.id as string | undefined;
 
   if (!tagId) {
-    const color = tagName === TAG_CONFIRMADO ? '#22c55e' : '#f59e0b';
+    const color =
+      targetTagName === TAG_CONFIRMADO
+        ? '#22c55e'
+        : targetTagName === TAG_HUMANO
+          ? '#ef4444'
+          : '#f59e0b';
     const { data: created, error: createErr } = await supabase
       .from('tags')
       .insert({
         account_id: ctx.accountId,
         user_id: ctx.userId,
-        name: tagName,
+        name: targetTagName,
         color,
       })
       .select('id')
@@ -452,7 +622,10 @@ async function applyContactTag(
 
   const { error: assocErr } = await supabase
     .from('contact_tags')
-    .upsert({ contact_id: contactId, tag_id: tagId }, { onConflict: 'contact_id,tag_id' });
+    .upsert(
+      { contact_id: contactId, tag_id: tagId },
+      { onConflict: 'contact_id,tag_id' }
+    );
 
   if (assocErr) {
     console.warn('Failed to upsert contact_tags', assocErr);

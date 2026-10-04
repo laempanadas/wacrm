@@ -38,11 +38,7 @@ export interface PaymentLinkResult {
 }
 
 export type PaymentStatus =
-  | 'pending'
-  | 'in_process'
-  | 'approved'
-  | 'rejected'
-  | 'unknown';
+  'pending' | 'in_process' | 'approved' | 'rejected' | 'unknown';
 
 export interface PaymentStatusResult {
   ok: boolean;
@@ -94,7 +90,10 @@ export function normalizePaymentStatus(
 /**
  * Separa o nome completo em Primeiro Nome e Sobrenome para auditoria do Mercado Pago
  */
-function splitFullName(fullName?: string): { firstName: string; lastName: string } {
+function splitFullName(fullName?: string): {
+  firstName: string;
+  lastName: string;
+} {
   const clean = (fullName || 'Cliente La Empanadas').trim();
   const parts = clean.split(/\s+/);
   if (parts.length === 1) {
@@ -121,7 +120,9 @@ export async function createPaymentLink(
     .map((item, index) => ({
       id: `item-${index + 1}`,
       title: item.title.trim().substring(0, 250),
-      description: item.description?.trim() || `${item.title.trim()} — Artesanal La Empanadas`,
+      description:
+        item.description?.trim() ||
+        `${item.title.trim()} — Artesanal La Empanadas`,
       category_id: 'food_and_drink',
       quantity: Number(item.quantity),
       unit_price: Number(item.unitPrice),
@@ -147,7 +148,8 @@ export async function createPaymentLink(
   };
 
   const appBaseUrl =
-    process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, '') || 'https://wacrm-eta-ten.vercel.app';
+    process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, '') ||
+    'https://wacrm-eta-ten.vercel.app';
 
   const extRef =
     params.externalReference?.trim() ||
@@ -215,8 +217,17 @@ export async function getPaymentById(
       externalReference: result.external_reference ?? null,
     };
   } catch (error) {
-    console.error('[MercadoPago Error] Falha ao consultar payment ID:', paymentId, error);
-    return { ok: false, status: 'unknown', rawStatus: null, paymentId: String(paymentId) };
+    console.error(
+      '[MercadoPago Error] Falha ao consultar payment ID:',
+      paymentId,
+      error
+    );
+    return {
+      ok: false,
+      status: 'unknown',
+      rawStatus: null,
+      paymentId: String(paymentId),
+    };
   }
 }
 
@@ -255,7 +266,11 @@ export async function getPaymentStatusByExternalReference(
       paidAmount: latest.transaction_amount,
     };
   } catch (error) {
-    console.error('[MercadoPago Error] Falha ao buscar external_reference:', externalReference, error);
+    console.error(
+      '[MercadoPago Error] Falha ao buscar external_reference:',
+      externalReference,
+      error
+    );
     return { ok: false, status: 'unknown', rawStatus: null, paymentId: null };
   }
 }

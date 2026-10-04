@@ -25,10 +25,10 @@ cliente pelo WhatsApp.
 
 Dentro da aplicação criada, vá em **Credenciais**. Você verá dois conjuntos:
 
-| Ambiente | Uso |
-| --- | --- |
+| Ambiente                           | Uso                               |
+| ---------------------------------- | --------------------------------- |
 | **Credenciais de teste** (sandbox) | Para testar sem cobrar de verdade |
-| **Credenciais de produção** | Para cobrar clientes reais |
+| **Credenciais de produção**        | Para cobrar clientes reais        |
 
 De cada ambiente, copie:
 

@@ -20,6 +20,8 @@ const NAMES = new Map<string, string>(
   ])
 );
 
-export function productNameFromCardapio(retailerId: string): string | undefined {
+export function productNameFromCardapio(
+  retailerId: string
+): string | undefined {
   return NAMES.get(normalize(retailerId));
 }

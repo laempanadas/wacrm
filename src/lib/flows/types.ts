@@ -75,7 +75,7 @@ export interface SendListNodeConfig {
  * URL Meta fetches at send time.
  */
 export interface SendMediaNodeConfig {
-  media_type: "image" | "video" | "document";
+  media_type: 'image' | 'video' | 'document';
   /** Public URL Meta will fetch. Uploaded via the builder's file picker. */
   media_url: string;
   /** Optional caption shown under the media (Meta caps at 1024 chars). */
@@ -114,20 +114,16 @@ export interface CollectInputNodeConfig {
   /**
    * Reserved for validation (accepts 'any' | 'email' | 'phone' | 'regex').
    */
-  validation?: "any" | "email" | "phone" | "regex";
+  validation?: 'any' | 'email' | 'phone' | 'regex';
   /** Used only when `validation === 'regex'`. */
   regex?: string;
   /** Node to advance to after capture. */
   next_node_key: string;
 }
 
-export type ConditionOperator =
-  | "equals"
-  | "contains"
-  | "present"
-  | "absent";
+export type ConditionOperator = 'equals' | 'contains' | 'present' | 'absent';
 
-export type ConditionSubject = "var" | "tag" | "contact_field";
+export type ConditionSubject = 'var' | 'tag' | 'contact_field';
 
 /**
  * Routes the run based on a predicate over the contact's tags,
@@ -151,7 +147,7 @@ export interface ConditionNodeConfig {
 }
 
 export interface SetTagNodeConfig {
-  mode: "add" | "remove";
+  mode: 'add' | 'remove';
   /** Tag UUID. */
   tag_id: string;
   next_node_key: string;
@@ -171,7 +167,7 @@ export interface SetVarNodeConfig {
  * and auto-advances.
  */
 export interface CustomActionNodeConfig {
-  action: "create_order_deal";
+  action: 'create_order_deal';
   next_node_key: string;
 }
 
@@ -182,20 +178,20 @@ export type EndNodeConfig = Record<string, never>;
  * Total union — every concrete node_type the engine understands.
  */
 export type FlowNodeConfig =
-  | { node_type: "start"; config: StartNodeConfig }
-  | { node_type: "send_message"; config: SendMessageNodeConfig }
-  | { node_type: "send_buttons"; config: SendButtonsNodeConfig }
-  | { node_type: "send_list"; config: SendListNodeConfig }
-  | { node_type: "send_media"; config: SendMediaNodeConfig }
-  | { node_type: "collect_input"; config: CollectInputNodeConfig }
-  | { node_type: "condition"; config: ConditionNodeConfig }
-  | { node_type: "set_tag"; config: SetTagNodeConfig }
-  | { node_type: "set_var"; config: SetVarNodeConfig }
-  | { node_type: "custom_action"; config: CustomActionNodeConfig }
-  | { node_type: "handoff"; config: HandoffNodeConfig }
-  | { node_type: "end"; config: EndNodeConfig };
+  | { node_type: 'start'; config: StartNodeConfig }
+  | { node_type: 'send_message'; config: SendMessageNodeConfig }
+  | { node_type: 'send_buttons'; config: SendButtonsNodeConfig }
+  | { node_type: 'send_list'; config: SendListNodeConfig }
+  | { node_type: 'send_media'; config: SendMediaNodeConfig }
+  | { node_type: 'collect_input'; config: CollectInputNodeConfig }
+  | { node_type: 'condition'; config: ConditionNodeConfig }
+  | { node_type: 'set_tag'; config: SetTagNodeConfig }
+  | { node_type: 'set_var'; config: SetVarNodeConfig }
+  | { node_type: 'custom_action'; config: CustomActionNodeConfig }
+  | { node_type: 'handoff'; config: HandoffNodeConfig }
+  | { node_type: 'end'; config: EndNodeConfig };
 
-export type FlowNodeType = FlowNodeConfig["node_type"];
+export type FlowNodeType = FlowNodeConfig['node_type'];
 
 /** Alias para os templates estáticos consumidos pelos fluxos */
 export type FlowTemplateNodeType = FlowNodeType;
@@ -206,17 +202,17 @@ export type FlowTemplateNodeType = FlowNodeType;
 
 export interface KeywordTriggerConfig {
   keywords: string[];
-  match_type?: "exact" | "contains";
+  match_type?: 'exact' | 'contains';
   case_sensitive?: boolean;
 }
 
 export type FirstInboundTriggerConfig = Record<string, never>;
 
 export type FlowTriggerConfig =
-  | { trigger_type: "keyword"; config: KeywordTriggerConfig }
-  | { trigger_type: "first_inbound_message"; config: FirstInboundTriggerConfig }
-  | { trigger_type: "catalog_order"; config: Record<string, never> }
-  | { trigger_type: "manual"; config: Record<string, never> };
+  | { trigger_type: 'keyword'; config: KeywordTriggerConfig }
+  | { trigger_type: 'first_inbound_message'; config: FirstInboundTriggerConfig }
+  | { trigger_type: 'catalog_order'; config: Record<string, never> }
+  | { trigger_type: 'manual'; config: Record<string, never> };
 
 // ============================================================
 // DB-row shapes (read by the engine via supabaseAdmin)
@@ -228,9 +224,11 @@ export interface FlowRow {
   user_id: string;
   name: string;
   description: string | null;
-  status: "draft" | "active" | "archived";
-  trigger_type: "keyword" | "first_inbound_message" | "catalog_order" | "manual";
-  trigger_config: KeywordTriggerConfig | FirstInboundTriggerConfig | Record<string, unknown>;
+  status: 'draft' | 'active' | 'archived';
+  trigger_type:
+    'keyword' | 'first_inbound_message' | 'catalog_order' | 'manual';
+  trigger_config:
+    KeywordTriggerConfig | FirstInboundTriggerConfig | Record<string, unknown>;
   entry_node_id: string | null;
   fallback_policy: FlowFallbackPolicy;
   execution_count: number;
@@ -258,12 +256,12 @@ export interface FlowRunRow {
   contact_id: string | null;
   conversation_id: string | null;
   status:
-    | "active"
-    | "completed"
-    | "handed_off"
-    | "timed_out"
-    | "paused_by_agent"
-    | "failed";
+    | 'active'
+    | 'completed'
+    | 'handed_off'
+    | 'timed_out'
+    | 'paused_by_agent'
+    | 'failed';
   current_node_key: string | null;
   last_prompt_message_id: string | null;
   vars: Record<string, unknown>;
@@ -279,17 +277,17 @@ export interface FlowRunRow {
 // ============================================================
 
 export interface FlowFallbackPolicy {
-  on_unknown_reply: "reprompt" | "handoff" | "ignore";
+  on_unknown_reply: 'reprompt' | 'handoff' | 'ignore';
   max_reprompts: number;
   on_timeout_hours: number;
-  on_exhaust: "handoff" | "end";
+  on_exhaust: 'handoff' | 'end';
 }
 
 export const DEFAULT_FALLBACK_POLICY: FlowFallbackPolicy = {
-  on_unknown_reply: "reprompt",
+  on_unknown_reply: 'reprompt',
   max_reprompts: 2,
   on_timeout_hours: 24,
-  on_exhaust: "handoff",
+  on_exhaust: 'handoff',
 };
 
 // ============================================================
@@ -298,18 +296,18 @@ export const DEFAULT_FALLBACK_POLICY: FlowFallbackPolicy = {
 
 export type ParsedInbound =
   | {
-      kind: "text";
+      kind: 'text';
       text: string;
       meta_message_id: string;
     }
   | {
-      kind: "interactive_reply";
+      kind: 'interactive_reply';
       reply_id: string;
       reply_title: string;
       meta_message_id: string;
     }
   | {
-      kind: "catalog_order";
+      kind: 'catalog_order';
       text: string;
       total: number;
       items: Array<{
@@ -334,13 +332,13 @@ export interface DispatchInboundResult {
   consumed: boolean;
   flow_run_id?: string;
   outcome?:
-    | "advanced"
-    | "started"
-    | "completed"
-    | "handed_off"
-    | "fallback_fired"
-    | "duplicate_inbound_ignored"
-    | "no_match";
+    | 'advanced'
+    | 'started'
+    | 'completed'
+    | 'handed_off'
+    | 'fallback_fired'
+    | 'duplicate_inbound_ignored'
+    | 'no_match';
 }
 
 // ============================================================

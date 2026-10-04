@@ -1,9 +1,11 @@
 # 🚀 GUIA FINAL CORRIGIDO: Implementar Flow → Pipeline Automático
+
 ## Versão Validada (Sem HTTP, Com validate.ts, Com Imports)
 
 ---
 
 ## ✅ Status Final
+
 - ✅ Banco: Migration 032 com `set_var` + `custom_action` (+ `send_media` preservado)
 - ✅ Tipos: `CustomActionNodeConfig` + `SetVarNodeConfig` com `value: string`
 - ✅ Engine: `executeCustomAction` chamando `createOrderDeal` **direto** (sem HTTP)
@@ -66,6 +68,7 @@ ALTER TABLE flow_nodes
 ### 1.1 Encontre os tipos existentes
 
 Procure por:
+
 ```typescript
 export interface SendMessageNodeConfig {
   text: string;
@@ -83,7 +86,7 @@ export interface SetVarNodeConfig {
    * value supports {{vars.X}} interpolation via interpolateVars().
    */
   var_key: string;
-  value: string;  // Interpolable — e.g., "{{reply_id}}" for button ID
+  value: string; // Interpolable — e.g., "{{reply_id}}" for button ID
   next_node_key: string;
 }
 
@@ -106,21 +109,23 @@ export interface CustomActionNodeConfig {
 ### 2.1 Adicionar Imports (TOP do arquivo)
 
 **Encontre:**
+
 ```typescript
 import {
   type CollectInputNodeConfig,
   type ConditionNodeConfig,
   type DispatchInboundInput,
   // ... outros tipos
-} from "./types";
+} from './types';
 ```
 
 **Mude PARA:**
+
 ```typescript
 import {
   type CollectInputNodeConfig,
   type ConditionNodeConfig,
-  type CustomActionNodeConfig,  // ← ADD
+  type CustomActionNodeConfig, // ← ADD
   type DispatchInboundInput,
   type DispatchInboundResult,
   type FlowNodeRow,
@@ -132,16 +137,20 @@ import {
   type SendMediaNodeConfig,
   type SendMessageNodeConfig,
   type SetTagNodeConfig,
-  type SetVarNodeConfig,         // ← ADD
+  type SetVarNodeConfig, // ← ADD
   type StartNodeConfig,
   type KeywordTriggerConfig,
-} from "./types";
+} from './types';
 ```
 
 **Além disso, adicione APÓS os imports de types:**
 
 ```typescript
-import { createOrderDeal, type OrderDeliveryKind, type OrderPaymentMethod } from "@/lib/orders/create-order";
+import {
+  createOrderDeal,
+  type OrderDeliveryKind,
+  type OrderPaymentMethod,
+} from '@/lib/orders/create-order';
 ```
 
 ### 2.2 Integrar no Loop de Execução
@@ -149,11 +158,12 @@ import { createOrderDeal, type OrderDeliveryKind, type OrderPaymentMethod } from
 **Encontre a função `advanceFromNodeKey` (por volta da linha 580).**
 
 **Procure por este código:**
+
 ```typescript
-if (node.node_type === "set_tag") {
+if (node.node_type === 'set_tag') {
   const cfg = node.config as unknown as SetTagNodeConfig;
   try {
-    if (cfg.mode === "add") {
+    if (cfg.mode === 'add') {
       // ... set_tag logic
     }
   } catch (err) {
@@ -167,27 +177,27 @@ if (node.node_type === "set_tag") {
 **ADICIONE LOGO DEPOIS:**
 
 ```typescript
-if (node.node_type === "set_var") {
+if (node.node_type === 'set_var') {
   const cfg = node.config as unknown as SetVarNodeConfig;
   try {
     if (cfg.var_key) {
       const interpolated = interpolateVars(cfg.value, run.vars);
       const newVars = { ...run.vars, [cfg.var_key]: interpolated };
       const { error } = await db
-        .from("flow_runs")
+        .from('flow_runs')
         .update({ vars: newVars })
-        .eq("id", run.id);
+        .eq('id', run.id);
       if (!error) {
         run.vars = newVars;
-        await logEvent(db, run.id, "node_entered", node.node_key, {
+        await logEvent(db, run.id, 'node_entered', node.node_key, {
           var_key: cfg.var_key,
           var_value: interpolated,
         });
       }
     }
   } catch (err) {
-    await logEvent(db, run.id, "error", node.node_key, {
-      reason: "set_var_failed",
+    await logEvent(db, run.id, 'error', node.node_key, {
+      reason: 'set_var_failed',
       detail: err instanceof Error ? err.message : String(err),
     });
   }
@@ -195,21 +205,18 @@ if (node.node_type === "set_var") {
   continue;
 }
 
-if (node.node_type === "custom_action") {
+if (node.node_type === 'custom_action') {
   const cfg = node.config as unknown as CustomActionNodeConfig;
-  
-  if (cfg.action === "create_order_deal") {
+
+  if (cfg.action === 'create_order_deal') {
     try {
-      const {
-        nome,
-        total,
-        endereco,
-        delivery_type,
-        payment_method,
-      } = run.vars as Record<string, unknown>;
+      const { nome, total, endereco, delivery_type, payment_method } =
+        run.vars as Record<string, unknown>;
 
       if (!nome || total === undefined || !delivery_type) {
-        throw new Error("Missing required order vars: nome, total, delivery_type");
+        throw new Error(
+          'Missing required order vars: nome, total, delivery_type'
+        );
       }
 
       // ✅ CHAMADA DIRETA (sem HTTP)
@@ -220,29 +227,29 @@ if (node.node_type === "custom_action") {
           contactId: run.contact_id!,
           customerName: String(nome),
           deliveryKind: String(delivery_type) as OrderDeliveryKind,
-          paymentMethod: (payment_method || "pix") as OrderPaymentMethod,
+          paymentMethod: (payment_method || 'pix') as OrderPaymentMethod,
           total: Number(total),
           deliveryAddress:
-            delivery_type === "delivery" ? String(endereco) : undefined,
-          paidOnline: payment_method === "mercado_pago",
+            delivery_type === 'delivery' ? String(endereco) : undefined,
+          paidOnline: payment_method === 'mercado_pago',
           conversationId: run.conversation_id,
         }
       );
 
-      await logEvent(db, run.id, "node_entered", node.node_key, {
-        action_type: "create_order_deal",
+      await logEvent(db, run.id, 'node_entered', node.node_key, {
+        action_type: 'create_order_deal',
         deal_id: result.dealId,
         tag: result.tagName,
       });
     } catch (err) {
-      console.error("[flows] create_order_deal error:", err);
-      await logEvent(db, run.id, "error", node.node_key, {
-        reason: "create_order_deal_failed",
+      console.error('[flows] create_order_deal error:', err);
+      await logEvent(db, run.id, 'error', node.node_key, {
+        reason: 'create_order_deal_failed',
         detail: err instanceof Error ? err.message : String(err),
       });
     }
   }
-  
+
   currentKey = cfg.next_node_key;
   continue;
 }
@@ -261,6 +268,7 @@ if (node.node_type === "custom_action") {
 **Encontre a seção `validateNode()` (por volta da linha 674).**
 
 **Procure por:**
+
 ```typescript
 case "set_tag": {
   const cfg = node.config as { tag_id?: string; next_node_key?: string };
@@ -369,6 +377,7 @@ case "custom_action": {
 **Encontre a função `outgoingEdges()` (por volta da linha 750).**
 
 **Procure por:**
+
 ```typescript
 function outgoingEdges(node: NodeInput): string[] {
   switch (node.node_type) {
@@ -384,6 +393,7 @@ function outgoingEdges(node: NodeInput): string[] {
 ```
 
 **MUDE PARA:**
+
 ```typescript
 function outgoingEdges(node: NodeInput): string[] {
   switch (node.node_type) {
@@ -409,6 +419,7 @@ function outgoingEdges(node: NodeInput): string[] {
 ### 4.1 Adicionar Imports
 
 **Encontre:**
+
 ```typescript
 import type {
   CollectInputNodeConfig,
@@ -420,10 +431,11 @@ import type {
 ```
 
 **Mude PARA:**
+
 ```typescript
 import type {
   CollectInputNodeConfig,
-  CustomActionNodeConfig,  // ← ADD
+  CustomActionNodeConfig, // ← ADD
   HandoffNodeConfig,
   SendButtonsNodeConfig,
   SendListNodeConfig,
@@ -434,6 +446,7 @@ import type {
 ### 4.2 Atualizar Nós de Confirmação
 
 **Para CADA nó de confirmação:**
+
 - `confirm_pix`
 - `confirm_cartao_delivery`
 - `confirm_pagamento_retirada`
@@ -442,6 +455,7 @@ import type {
 **MUDE o `next_node_key`:**
 
 Antes:
+
 ```typescript
 {
   node_key: 'confirm_pix',
@@ -454,6 +468,7 @@ Antes:
 ```
 
 Depois:
+
 ```typescript
 {
   node_key: 'confirm_pix',
@@ -496,6 +511,7 @@ Depois:
 ### 4.4 Resultado Esperado
 
 **Fluxo final:**
+
 ```
 confirm_pix → criar_deal_automatico → handoff_pedido
 confirm_cartao_delivery → criar_deal_automatico → handoff_pedido
@@ -510,21 +526,24 @@ confirm_mercado_pago → criar_deal_automatico → handoff_pedido
 ## ⚠️ Banco de Dados
 
 O flow espera:
+
 1. Pipeline com nome: `"Pedidos Delivery"`
 2. Stage com nome: `"Novo Pedido"` dentro do pipeline
 
 **Verificar:**
+
 ```sql
-SELECT id, name FROM pipelines 
-WHERE account_id = 'seu-account-id' 
+SELECT id, name FROM pipelines
+WHERE account_id = 'seu-account-id'
 AND name = 'Pedidos Delivery';
 
-SELECT id, name FROM pipeline_stages 
-WHERE pipeline_id = 'id-do-pipeline-acima' 
+SELECT id, name FROM pipeline_stages
+WHERE pipeline_id = 'id-do-pipeline-acima'
 AND name = 'Novo Pedido';
 ```
 
 **Se não existirem, criar via Dashboard ou SQL:**
+
 ```sql
 -- Criar pipeline
 INSERT INTO pipelines (account_id, user_id, name)
@@ -547,6 +566,7 @@ npm run build
 ```
 
 **Deve compilar sem erros.** Se houver erro, procure por:
+
 - ❌ Type mismatch em `CustomActionNodeConfig` ou `SetVarNodeConfig`
 - ❌ Import missing de `createOrderDeal`
 - ❌ `supabaseAdmin()` não importado em engine.ts
@@ -558,6 +578,7 @@ npm run dev
 ```
 
 **Procure nos logs por:**
+
 ```
 [flows] Order deal created: deal-uuid-xxx
 ```
@@ -584,13 +605,13 @@ npm run dev
 
 # 🐛 Troubleshooting
 
-| Erro | Causa | Solução |
-|------|-------|---------|
-| **Build: "Unknown node type"** | validate.ts não reconhece set_var/custom_action | Verificar seção 3.2 - outgoingEdges() |
-| **Runtime: "Missing required order vars"** | Variáveis do flow vazias | Verificar se nome/total/delivery_type foram capturados |
-| **Deal não aparece** | createOrderDeal lançou erro silenciosamente | Verificar logs: `[flows] create_order_deal error:` |
-| **Pipeline "Pedidos Delivery" não encontrado** | Pipeline não existe | Criar via Dashboard ou SQL |
-| **"contactId required" na API** | run.contact_id é null | Verificar integração WhatsApp |
+| Erro                                           | Causa                                           | Solução                                                |
+| ---------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------ |
+| **Build: "Unknown node type"**                 | validate.ts não reconhece set_var/custom_action | Verificar seção 3.2 - outgoingEdges()                  |
+| **Runtime: "Missing required order vars"**     | Variáveis do flow vazias                        | Verificar se nome/total/delivery_type foram capturados |
+| **Deal não aparece**                           | createOrderDeal lançou erro silenciosamente     | Verificar logs: `[flows] create_order_deal error:`     |
+| **Pipeline "Pedidos Delivery" não encontrado** | Pipeline não existe                             | Criar via Dashboard ou SQL                             |
+| **"contactId required" na API**                | run.contact_id é null                           | Verificar integração WhatsApp                          |
 
 ### Debug: Ver Vars do Flow
 
@@ -606,10 +627,12 @@ console.log('[DEBUG] account_id:', run.account_id);
 # ✅ Checklist Final
 
 ### Tipos TypeScript
+
 - [ ] Adicionei `CustomActionNodeConfig` em `types.ts`
 - [ ] Adicionei `SetVarNodeConfig` com `value: string` em `types.ts`
 
 ### Engine
+
 - [ ] Importei `CustomActionNodeConfig`, `SetVarNodeConfig` em `engine.ts`
 - [ ] Importei `createOrderDeal`, `OrderDeliveryKind`, `OrderPaymentMethod` em `engine.ts`
 - [ ] Adicionei `set_var` case no loop `advanceFromNodeKey()`
@@ -617,21 +640,25 @@ console.log('[DEBUG] account_id:', run.account_id);
 - [ ] `custom_action` chama `createOrderDeal()` **direto** (sem HTTP)
 
 ### validate.ts
+
 - [ ] Adicionei `set_var` case em `validateNode()`
 - [ ] Adicionei `custom_action` case em `validateNode()`
 - [ ] Atualizei `outgoingEdges()` para incluir `set_var` e `custom_action`
 
 ### Flow
+
 - [ ] Importei `CustomActionNodeConfig` em `pedido-empanadas-flow.ts`
 - [ ] Adicionei nó `criar_deal_automatico` com `node_type: 'custom_action'`
 - [ ] Mudei todos os `confirm_*` → `next_node_key: 'criar_deal_automatico'`
 
 ### Banco
+
 - [ ] Pipeline "Pedidos Delivery" existe
 - [ ] Stage "Novo Pedido" existe
 - [ ] Migration 032 foi executada (node_type CHECK tem set_var + custom_action)
 
 ### Testes
+
 - [ ] `npm run build` passa sem erros
 - [ ] Dev server inicia sem erros
 - [ ] Enviei pedido via WhatsApp

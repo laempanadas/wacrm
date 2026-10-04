@@ -48,8 +48,16 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
       config: {
         text: '🫔 *Pedido recebido!* ({{vars.total_formatado}})\n{{vars.itens_lista}}\n\nComo prefere receber?',
         buttons: [
-          { reply_id: 'delivery', title: '🛵 Delivery', next_node_key: 'set_delivery' },
-          { reply_id: 'retirada', title: '🛍️ Retirar na loja', next_node_key: 'set_retirada' },
+          {
+            reply_id: 'delivery',
+            title: '🛵 Delivery',
+            next_node_key: 'set_delivery',
+          },
+          {
+            reply_id: 'retirada',
+            title: '🛍️ Retirar na loja',
+            next_node_key: 'set_retirada',
+          },
         ],
       } as SendButtonsNodeConfig,
     },
@@ -82,8 +90,16 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
       config: {
         text: '📍 Entregar no endereço cadastrado?\n_{{vars.ultimo_endereco}}_',
         buttons: [
-          { reply_id: 'mesmo_endereco', title: '✅ Confirmar', next_node_key: 'usar_ultimo_endereco' },
-          { reply_id: 'outro_endereco', title: '✏️ Outro endereço', next_node_key: 'ask_endereco' },
+          {
+            reply_id: 'mesmo_endereco',
+            title: '✅ Confirmar',
+            next_node_key: 'usar_ultimo_endereco',
+          },
+          {
+            reply_id: 'outro_endereco',
+            title: '✏️ Outro endereço',
+            next_node_key: 'ask_endereco',
+          },
         ],
       } as SendButtonsNodeConfig,
     },
@@ -100,7 +116,8 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
       node_key: 'ask_endereco',
       node_type: 'collect_input' as const,
       config: {
-        prompt_text: '📍 Por favor, digite seu endereço de entrega (Rua, Número e Bairro):',
+        prompt_text:
+          '📍 Por favor, digite seu endereço de entrega (Rua, Número e Bairro):',
         var_key: 'endereco',
         next_node_key: 'gerar_pagamento',
       } as CollectInputNodeConfig,
