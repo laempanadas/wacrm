@@ -45,20 +45,21 @@ export async function getSavedCustomerAddress(
   contactId: string
 ): Promise<string | null> {
   try {
-    // 1. Tenta buscar em contact_custom_values (Endereco_entrega)
+    // 1. Tenta buscar em contact_custom_values (Endereco_entrega ou outros nomes comuns)
     const { data: defs } = await supabase
       .from('custom_fields')
-      .select('id')
+      .select('id, field_name')
       .eq('account_id', accountId)
-      .eq('field_name', 'Endereco_entrega')
-      .maybeSingle()
+      .in('field_name', ['Endereco_entrega', 'endereco', 'Endereço', 'Endereço de entrega', 'Endereco'])
 
-    if (defs?.id) {
+    if (defs && defs.length > 0) {
+      const fieldIds = defs.map((d: { id: string }) => d.id)
       const { data: val } = await supabase
         .from('contact_custom_values')
         .select('value')
         .eq('contact_id', contactId)
-        .eq('custom_field_id', defs.id)
+        .in('custom_field_id', fieldIds)
+        .limit(1)
         .maybeSingle()
 
       if (val?.value && val.value.trim().length > 5) {

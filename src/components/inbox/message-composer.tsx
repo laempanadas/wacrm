@@ -37,6 +37,8 @@ import {
   MEDIA_MAX_BYTES_BY_KIND,
 } from "@/lib/storage/upload-media";
 import { ReplyQuote } from "./reply-quote";
+import { QuickPixButton } from "./quick-pix-button";
+import type { Contact, Message } from "@/types";
 
 /** Media content types an agent can send from the composer. */
 export type ComposerMediaKind = "image" | "video" | "document" | "audio";
@@ -99,6 +101,8 @@ interface MessageComposerProps {
   onOpenTemplates: () => void;
   replyTo?: ReplyDraft | null;
   onClearReply?: () => void;
+  contact?: Contact | null;
+  messages?: Message[];
 }
 
 function formatDuration(seconds: number): string {
@@ -120,6 +124,8 @@ export function MessageComposer({
   onOpenTemplates,
   replyTo,
   onClearReply,
+  contact,
+  messages,
 }: MessageComposerProps) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
@@ -585,6 +591,15 @@ export function MessageComposer({
               <Sparkles className="h-4 w-4" />
             )}
           </GatedButton>
+
+          <QuickPixButton
+            conversationId={conversationId}
+            contact={contact}
+            messages={messages}
+            onSend={(msg) => onSend(msg)}
+            disabled={inputsDisabled || busy}
+            readOnly={readOnly}
+          />
 
           <textarea
             ref={textareaRef}

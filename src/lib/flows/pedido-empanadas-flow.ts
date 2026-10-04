@@ -46,7 +46,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
       node_key: 'pedido_recebido',
       node_type: 'send_buttons' as const,
       config: {
-        text: '🫔 *Pedido recebido!*\n\n{{vars.itens_lista}}\n\n💵 *Total: {{vars.total_formatado}}*\n\nComo prefere receber?',
+        text: '🫔 *Pedido recebido!* ({{vars.total_formatado}})\n{{vars.itens_lista}}\n\nComo prefere receber?',
         buttons: [
           { reply_id: 'delivery', title: '🛵 Delivery', next_node_key: 'set_delivery' },
           { reply_id: 'retirada', title: '🛍️ Retirar na loja', next_node_key: 'set_retirada' },
@@ -80,9 +80,9 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
       node_key: 'ask_mesmo_endereco',
       node_type: 'send_buttons' as const,
       config: {
-        text: '📍 Entregar no mesmo endereço do último pedido?\n\n_{{vars.ultimo_endereco}}_',
+        text: '📍 Entregar no endereço cadastrado?\n_{{vars.ultimo_endereco}}_',
         buttons: [
-          { reply_id: 'mesmo_endereco', title: '✅ Mesmo endereço', next_node_key: 'usar_ultimo_endereco' },
+          { reply_id: 'mesmo_endereco', title: '✅ Confirmar', next_node_key: 'usar_ultimo_endereco' },
           { reply_id: 'outro_endereco', title: '✏️ Outro endereço', next_node_key: 'ask_endereco' },
         ],
       } as SendButtonsNodeConfig,
@@ -100,7 +100,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
       node_key: 'ask_endereco',
       node_type: 'collect_input' as const,
       config: {
-        prompt_text: '📍 Qual o *endereço de entrega*?\n(Rua, número, complemento e bairro)',
+        prompt_text: '📍 Por favor, digite seu endereço de entrega (Rua, Número e Bairro):',
         var_key: 'endereco',
         next_node_key: 'gerar_pagamento',
       } as CollectInputNodeConfig,
@@ -120,7 +120,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
       node_key: 'link_pagamento',
       node_type: 'send_message' as const,
       config: {
-        text: '✅ Anotado! Entrega em: _{{vars.endereco}}_\n\nPague pelo link seguro (*Pix ou Cartão*). Assim que aprovar, seu pedido vai direto para a cozinha 🔥\n\n👉 {{vars.link_mercado_pago}}',
+        text: '🫔 *Pedido Confirmado!*\n{{vars.itens_lista}}\n💵 *Total: {{vars.total_formatado}}*\n📍 *Entrega:* {{vars.endereco}}\n\n💳 *Pague online com Pix ou Cartão pelo link abaixo:*\n{{vars.link_mercado_pago}}\n\nAssim que o pagamento for aprovado, seu pedido entra automaticamente em preparo!',
         next_node_key: 'handoff_delivery',
       } as SendMessageNodeConfig,
     },

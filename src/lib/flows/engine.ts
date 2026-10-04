@@ -8,7 +8,9 @@
 
 import { supabaseAdmin } from "./admin-client";
 import { createOrderDeal, type OrderDeliveryKind, type OrderPaymentMethod } from "@/lib/orders/create-order";
-import { createPaymentLink } from "@/lib/payments/mercado-pago";
+import { createOrderWithMercadoPago } from "@/lib/orders/create-order-with-mercado-pago";
+import { getSavedCustomerAddress, saveContactOrderFields } from "@/lib/orders/text-order-flow";
+import { PEDIDO_EMPANADAS_FLOW } from "./pedido-empanadas-flow";
 import { productNameFromCardapio } from "@/lib/cardapio/product-names";
 import {
   engineSendInteractiveButtons,
@@ -273,11 +275,91 @@ async function isOrderAlreadyStarted(
   return (count ?? 0) > 0;
 }
 
+export async function ensureActiveCatalogFlow(
+  db: AdminClient,
+  accountId: string,
+  userId: string,
+): Promise<FlowRow | null> {
+  try {
+    // 1. Procura se existe flow catalog_order ativo
+    const { data: activeFlow } = await db
+      .from("flows")
+      .select("*")
+      .eq("account_id", accountId)
+      .eq("trigger_type", "catalog_order")
+      .eq("status", "active")
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (activeFlow) return activeFlow as FlowRow;
+
+    // 2. Procura se existe um flow inativo para ativar
+    const { data: existingFlow } = await db
+      .from("flows")
+      .select("*")
+      .eq("account_id", accountId)
+      .eq("trigger_type", "catalog_order")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (existingFlow) {
+      const { data: updated } = await db
+        .from("flows")
+        .update({ status: "active", updated_at: new Date().toISOString() })
+        .eq("id", existingFlow.id)
+        .select("*")
+        .single();
+      return (updated || { ...existingFlow, status: "active" }) as FlowRow;
+    }
+
+    // 3. Se não existe, cria a partir do template PEDIDO_EMPANADAS_FLOW
+    const { data: newFlow, error: flowErr } = await db
+      .from("flows")
+      .insert({
+        account_id: accountId,
+        user_id: userId,
+        name: PEDIDO_EMPANADAS_FLOW.name,
+        description: PEDIDO_EMPANADAS_FLOW.description,
+        status: "active",
+        trigger_type: "catalog_order",
+        trigger_config: PEDIDO_EMPANADAS_FLOW.trigger_config ?? {},
+        entry_node_id: PEDIDO_EMPANADAS_FLOW.entry_node_id,
+      })
+      .select("*")
+      .single();
+
+    if (flowErr || !newFlow) {
+      console.error("[engine] Erro ao provisionar flow catalog_order:", flowErr);
+      return null;
+    }
+
+    const nodeRows = PEDIDO_EMPANADAS_FLOW.nodes.map((n) => ({
+      flow_id: newFlow.id,
+      node_key: n.node_key,
+      node_type: n.node_type,
+      config: n.config,
+    }));
+
+    const { error: nodesErr } = await db.from("flow_nodes").insert(nodeRows);
+    if (nodesErr) {
+      console.error("[engine] Erro ao inserir nós do flow catalog_order:", nodesErr);
+    }
+
+    return newFlow as FlowRow;
+  } catch (err) {
+    console.error("[engine] Falha inesperada ao garantir flow de catálogo:", err);
+    return null;
+  }
+}
+
 async function findEntryFlow(
   db: AdminClient,
   accountId: string,
   message: ParsedInbound,
   isFirstInbound: boolean,
+  userId?: string,
 ): Promise<FlowRow | null> {
   if (message.kind === "interactive_reply") return null;
 
@@ -314,6 +396,13 @@ async function findEntryFlow(
       }
     }
   }
+
+  // Se for pedido de catálogo e nenhum flow estiver ativo na conta, provisiona e ativa automaticamente
+  if (message.kind === "catalog_order" && userId) {
+    const autoFlow = await ensureActiveCatalogFlow(db, accountId, userId);
+    if (autoFlow) return autoFlow;
+  }
+
   return null;
 }
 
@@ -772,121 +861,96 @@ async function advanceFromNodeKey(
             .maybeSingle();
           const payerPhone = (contactRow?.phone as string | undefined) ?? undefined;
 
-          // ⚠️ [CORREÇÃO]: Gera o Link do Mercado Pago automaticamente se houver total (reutiliza se já gerado)
+          // Gera o Link do Mercado Pago e o Deal no CRM via createOrderWithMercadoPago ou createOrderDeal
           let mpUrl = (run.vars.link_mercado_pago as string | undefined) || "";
-          let mpItems: { title: string; quantity: number; unitPrice: number }[] = [];
-          let preferenceId = "";
+          let dealId: string | null = (run.vars.deal_id as string | undefined) ?? null;
+          let orderId: string | null = (run.vars.order_id as string | undefined) ?? null;
+          let tagName: string | undefined = undefined;
+
+          const rawItems = Array.isArray(itens) ? itens : [];
+          const mpItems =
+            rawItems.length > 0
+              ? rawItems.map((it: Record<string, unknown>) => ({
+                  title: String(
+                    it.name ||
+                      (it.retailer_id && productNameFromCardapio(String(it.retailer_id))) ||
+                      it.retailer_id ||
+                      it.title ||
+                      "Empanada",
+                  ),
+                  quantity: Number(it.quantity || 1),
+                  unitPrice: Number(it.unit_price || it.unitPrice || orderTotal / (rawItems.length || 1)),
+                }))
+              : [{ title: "Pedido La Empanadas", quantity: 1, unitPrice: orderTotal }];
+
           if (isDelivery && orderTotal > 0 && !mpUrl) {
             try {
-              const rawItems = Array.isArray(itens) ? itens : [];
-              mpItems =
-                rawItems.length > 0
-                  ? rawItems.map((it: Record<string, unknown>) => ({
-                      title: String(
-                        it.name ||
-                          (it.retailer_id && productNameFromCardapio(String(it.retailer_id))) ||
-                          it.retailer_id ||
-                          it.title ||
-                          "Empanada",
-                      ),
-                      quantity: Number(it.quantity || 1),
-                      unitPrice: Number(it.unit_price || it.unitPrice || orderTotal / (rawItems.length || 1)),
-                    }))
-                  : [{ title: "Pedido La Empanadas", quantity: 1, unitPrice: orderTotal }];
+              const mpRes = await createOrderWithMercadoPago(
+                { accountId: run.account_id, userId: run.user_id },
+                {
+                  contactId: run.contact_id!,
+                  customerName,
+                  deliveryKind: "delivery",
+                  deliveryAddress: orderAddress,
+                  items: mpItems,
+                  conversationId: run.conversation_id ?? undefined,
+                  payerPhone,
+                }
+              );
 
-              const mpRes = await createPaymentLink({
-                items: mpItems,
-                externalReference,
-                payerName: customerName,
-                payerPhone,
-                deliveryKind: validDelivery,
-                deliveryAddress: orderAddress,
-              });
-
-              if (mpRes.paymentUrl) {
-                mpUrl = mpRes.paymentUrl;
-                preferenceId = mpRes.preferenceId;
+              if (mpRes.ok && mpRes.link_mercado_pago) {
+                mpUrl = mpRes.link_mercado_pago;
+                dealId = mpRes.dealId ?? null;
+              } else {
+                console.error("[flows] Falha ao criar link Mercado Pago:", mpRes.error);
+                if (mpRes.dealId) dealId = mpRes.dealId;
+                paymentLinkMissing = true;
               }
             } catch (mpErr) {
-              console.error("[flows] Erro ao criar link do Mercado Pago:", mpErr);
+              console.error("[flows] Erro createOrderWithMercadoPago:", mpErr);
+              paymentLinkMissing = true;
             }
+          } else if (!dealId) {
+            // Criação do card no Pipeline CRM para Retirada (ou fallback)
+            const result = await createOrderDeal(
+              supabaseAdmin(),
+              { accountId: run.account_id, userId: run.user_id },
+              {
+                contactId: run.contact_id!,
+                customerName,
+                deliveryKind: validDelivery,
+                paymentMethod: validPayment,
+                total: orderTotal,
+                deliveryAddress: orderAddress,
+                paidOnline: false,
+                conversationId: run.conversation_id ?? undefined,
+                external_reference: externalReference,
+              }
+            );
+            dealId = result.dealId;
+            tagName = result.tagName;
+            orderId = result.orderId ?? null;
           }
 
           if (isDelivery && !mpUrl) {
             paymentLinkMissing = true;
           }
 
-          // Same columns the site and AI-agent paths write in the WhatsApp
-          // webhook — the shape the MP webhook and reminder cron read.
-          let orderId: string | null = (run.vars.order_id as string | undefined) ?? null;
-          if (mpUrl && !orderId) {
-            const { data: orderRow, error: orderErr } = await db
-              .from("orders")
-              .upsert(
-                {
-                  account_id: run.account_id,
-                  contact_id: run.contact_id,
-                  external_reference: externalReference,
-                  preference_id: preferenceId,
-                  payment_url: mpUrl,
-                  total: orderTotal,
-                  items: mpItems,
-                  delivery_address: orderAddress ?? "",
-                  payer_phone: payerPhone ?? null,
-                  payer_name: customerName,
-                  status: "pending",
-                },
-                { onConflict: "external_reference" }
-              )
-              .select("id")
-              .maybeSingle();
-            if (orderErr) {
-              console.error("[flows] Erro ao gravar pedido na tabela orders:", orderErr);
-              await logEvent(db, run.id, "error", node.node_key, {
-                reason: "order_insert_failed",
-                detail: orderErr.message,
-                external_reference: externalReference,
-              });
-            } else {
-              orderId = (orderRow?.id as string | undefined) ?? null;
-            }
-          }
-
-          // Criação do card no Pipeline CRM (reutiliza deal existente de forma idempotente)
-          const result = await createOrderDeal(
-            supabaseAdmin(),
-            { accountId: run.account_id, userId: run.user_id },
-            {
-              contactId: run.contact_id!,
-              customerName,
-              deliveryKind: validDelivery,
-              paymentMethod: validPayment,
-              total: orderTotal,
-              deliveryAddress: orderAddress,
-              // "Aguardando Pagamento" until paid: the Mercado Pago webhook
-              // switches delivery orders to "Confirmado" on approval.
-              paidOnline: false,
-              conversationId: run.conversation_id ?? undefined,
-              external_reference: externalReference,
-              skipOrderRecord: true,
-            }
-          );
-
-          if (orderId) {
-            const { error: dealLinkErr } = await db
-              .from("orders")
-              .update({ deal_id: result.dealId })
-              .eq("id", orderId);
-            if (dealLinkErr) {
-              console.error("[flows] Erro ao vincular deal ao pedido:", dealLinkErr);
-            }
+          // Salva os campos personalizados do contato (endereço, itens, forma de pagamento)
+          if (run.contact_id) {
+            await saveContactOrderFields(db, run.account_id, run.contact_id, {
+              endereco: orderAddress,
+              itens: typeof run.vars.itens_texto === "string" ? run.vars.itens_texto : mpItems.map(i => `${i.quantity}x ${i.title}`).join(", "),
+              formaPagamento: isDelivery ? "Mercado Pago" : "Na Retirada",
+              nomeCliente: customerName,
+            });
           }
 
           // Persiste as referências de deal e pedido nas variáveis da execução
           const newVars = {
             ...run.vars,
             ...(mpUrl ? { link_mercado_pago: mpUrl } : {}),
-            deal_id: result.dealId,
+            ...(dealId ? { deal_id: dealId } : {}),
             external_reference: externalReference,
             ...(orderId ? { order_id: orderId } : {}),
           };
@@ -895,8 +959,8 @@ async function advanceFromNodeKey(
 
           await logEvent(db, run.id, "node_entered", node.node_key, {
             action_type: "create_order_deal",
-            deal_id: result.dealId,
-            tag: result.tagName,
+            deal_id: dealId,
+            tag: tagName,
             payment_url: mpUrl,
             external_reference: externalReference,
             order_id: orderId,
@@ -1092,6 +1156,7 @@ export async function dispatchInboundToFlows(
       input.accountId,
       input.message,
       input.isFirstInboundMessage,
+      input.userId,
     );
     if (!flow || !flow.entry_node_id) {
       return { consumed: false, outcome: "no_match" };
@@ -1142,6 +1207,27 @@ async function handleReplyForActiveRun(
       currentNode.node_type === "send_list")
   ) {
     matched = matchReplyId(currentNode, message.reply_id);
+  } else if (
+    message.kind === "text" &&
+    currentNode.node_type === "send_buttons"
+  ) {
+    // Permite que o cliente responda em texto simples aos botões (ex: "delivery", "retirar", "confirmar", etc.)
+    const cfg = currentNode.config as unknown as SendButtonsNodeConfig;
+    const norm = message.text.trim().toLowerCase();
+    const hit = cfg.buttons?.find((b) => {
+      const bTitle = b.title.toLowerCase();
+      const bId = b.reply_id.toLowerCase();
+      return (
+        norm === bId ||
+        norm.includes(bId) ||
+        norm === bTitle ||
+        norm.includes(bTitle) ||
+        (bId === "mesmo_endereco" && (norm.includes("confirm") || norm.includes("sim") || norm.includes("mesmo"))) ||
+        (bId === "delivery" && norm.includes("entrega")) ||
+        (bId === "retirada" && (norm.includes("retirar") || norm.includes("loja")))
+      );
+    });
+    if (hit) matched = hit.next_node_key;
   } else if (
     message.kind === "text" &&
     currentNode.node_type === "collect_input"
@@ -1259,19 +1345,13 @@ async function startNewRun(
       .maybeSingle();
     const contactName = String(contact?.name ?? "").trim();
 
-    // Last delivery address, so a returning customer can reuse it with
-    // one tap instead of typing it again.
-    const { data: lastOrder } = await db
-      .from("orders")
-      .select("delivery_address")
-      .eq("account_id", input.accountId)
-      .eq("contact_id", input.contactId)
-      .not("delivery_address", "is", null)
-      .neq("delivery_address", "")
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    const lastAddress = String(lastOrder?.delivery_address ?? "").trim();
+    // Endereço salvo: verifica contact_custom_values, pedidos anteriores e anotações de deals
+    const savedAddress = await getSavedCustomerAddress(
+      db,
+      input.accountId,
+      input.contactId,
+    );
+    const lastAddress = (savedAddress ?? "").trim();
     seedVars = {
       itens_texto: input.message.text,
       // Items only — the message templates show the total themselves.

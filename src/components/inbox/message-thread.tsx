@@ -1074,6 +1074,8 @@ export function MessageThread({
       <MessageComposer
         conversationId={conversation.id}
         sessionExpired={sessionInfo.expired}
+        contact={contact}
+        messages={messages}
         onSend={handleSend}
         onSendMedia={handleSendMedia}
         onOpenTemplates={handleOpenTemplates}

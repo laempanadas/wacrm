@@ -29,12 +29,15 @@ describe("PEDIDO_EMPANADAS_FLOW template", () => {
   const text = (keys: string[]) =>
     keys.map((k) => JSON.stringify(node(k)?.config)).join("\n");
 
-  it("shows the cart and asks delivery vs pickup in a single message", () => {
+  it("shows the cart and asks delivery vs pickup in a single message with exact required text and buttons", () => {
     const cartNode = node("pedido_recebido");
     expect(cartNode?.node_type).toBe("send_buttons");
-    const cfg = JSON.stringify(cartNode!.config);
-    expect(cfg).toContain("{{vars.itens_lista}}");
-    expect(cfg).toContain("{{vars.total_formatado}}");
+    const cfg = cartNode!.config as { text: string; buttons: Array<{ reply_id: string; title: string; next_node_key: string }> };
+    expect(cfg.text).toBe("🫔 *Pedido recebido!* ({{vars.total_formatado}})\n{{vars.itens_lista}}\n\nComo prefere receber?");
+    expect(cfg.buttons).toEqual([
+      { reply_id: "delivery", title: "🛵 Delivery", next_node_key: "set_delivery" },
+      { reply_id: "retirada", title: "🛍️ Retirar na loja", next_node_key: "set_retirada" },
+    ]);
   });
 
   it("does not ask for the name (it comes from the WhatsApp profile)", () => {
@@ -44,26 +47,42 @@ describe("PEDIDO_EMPANADAS_FLOW template", () => {
     expect(collected).toEqual(["endereco"]);
   });
 
-  it("delivery collects the address and sends the Mercado Pago link", () => {
+  it("delivery collects the address and sends the Mercado Pago link with required confirmation message", () => {
     const keys = path("ask_endereco");
     expect(keys).toContain("gerar_pagamento");
     expect(text(keys)).toContain("{{vars.link_mercado_pago}}");
     expect(JSON.stringify(node("set_delivery")!.config)).toContain('"value":"delivery"');
+
+    const paymentMsgNode = node("link_pagamento");
+    const pCfg = paymentMsgNode!.config as { text: string };
+    expect(pCfg.text).toBe(
+      "🫔 *Pedido Confirmado!*\n{{vars.itens_lista}}\n💵 *Total: {{vars.total_formatado}}*\n📍 *Entrega:* {{vars.endereco}}\n\n💳 *Pague online com Pix ou Cartão pelo link abaixo:*\n{{vars.link_mercado_pago}}\n\nAssim que o pagamento for aprovado, seu pedido entra automaticamente em preparo!"
+    );
   });
 
-  it("offers the last address to returning customers, otherwise asks for it", () => {
+  it("offers the last address to returning customers with exact required prompt and buttons", () => {
     const cond = node("tem_endereco_salvo")!.config as Record<string, string>;
     expect(cond.subject_key).toBe("ultimo_endereco");
     expect(cond.operator).toBe("present");
     expect(cond.false_next).toBe("ask_endereco");
 
-    const ask = node(cond.true_next)!.config as {
-      buttons: Array<{ reply_id: string; next_node_key: string }>;
+    const askNode = node(cond.true_next);
+    const ask = askNode!.config as {
+      text: string;
+      buttons: Array<{ reply_id: string; title: string; next_node_key: string }>;
     };
-    const next = Object.fromEntries(ask.buttons.map((b) => [b.reply_id, b.next_node_key]));
-    expect(next.outro_endereco).toBe("ask_endereco");
+    expect(ask.text).toBe("📍 Entregar no endereço cadastrado?\n_{{vars.ultimo_endereco}}_");
+    expect(ask.buttons).toEqual([
+      { reply_id: "mesmo_endereco", title: "✅ Confirmar", next_node_key: "usar_ultimo_endereco" },
+      { reply_id: "outro_endereco", title: "✏️ Outro endereço", next_node_key: "ask_endereco" },
+    ]);
 
-    const reuse = node(next.mesmo_endereco)!.config as Record<string, string>;
+    const askEnderecoNode = node("ask_endereco");
+    const askAddrCfg = askEnderecoNode!.config as { prompt_text: string; var_key: string };
+    expect(askAddrCfg.prompt_text).toBe("📍 Por favor, digite seu endereço de entrega (Rua, Número e Bairro):");
+    expect(askAddrCfg.var_key).toBe("endereco");
+
+    const reuse = node("usar_ultimo_endereco")!.config as Record<string, string>;
     expect(reuse.var_key).toBe("endereco");
     expect(reuse.value).toBe("{{vars.ultimo_endereco}}");
     expect(reuse.next_node_key).toBe("gerar_pagamento");
