@@ -97,10 +97,14 @@ export default function PipelinesPage() {
 
   const loadDeals = useCallback(
     async (pipelineId: string) => {
+      const now = new Date();
+      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+
       const { data } = await supabase
         .from("deals")
         .select("*, contact:contacts(*), assignee:profiles!deals_assigned_to_fkey(*)")
         .eq("pipeline_id", pipelineId)
+        .or(`status.eq.open,updated_at.gte.${monthStart},created_at.gte.${monthStart}`)
         .order("created_at", { ascending: false });
       return (data ?? []) as Deal[];
     },
@@ -417,6 +421,7 @@ export default function PipelinesPage() {
             onDealMoved={handleDealMoved}
             onAddDeal={handleAddDeal}
             onEditDeal={handleEditDeal}
+            onDealsRefresh={refreshDeals}
           />
         </>
       )}

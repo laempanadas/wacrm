@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { MoreHorizontal, Loader2, ChevronRight, Trash2 } from 'lucide-react'
 import { useDealStageMovement } from '@/hooks/use-deal-stage-movement'
+import { createClient } from '@/lib/supabase/client'
 import { toast } from 'sonner'
 import type { Deal, PipelineStage } from '@/types'
 
@@ -24,6 +25,7 @@ export function DealCardActions({
   onDealUpdated,
 }: DealCardActionsProps) {
   const [isOpen, setIsOpen] = useState(false)
+  const [isDeleting, setIsDeleting] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
   const { moveDealToStage, isLoading } = useDealStageMovement()
 
@@ -46,8 +48,8 @@ export function DealCardActions({
     (s) => currentStage && s.position > currentStage.position
   )
 
-  // Se o deal está em "Entregue" (final) ou não há próximos stages, não mostra menu
-  if (!nextStages.length || !currentStage) {
+  // Se não há stage definido, não mostra menu
+  if (!currentStage) {
     return null
   }
 
@@ -61,9 +63,26 @@ export function DealCardActions({
     }
   }
 
-  const handleDelete = () => {
-    toast.info('Deleção de pedido ainda não implementada')
-    setIsOpen(false)
+  const handleDelete = async () => {
+    if (!window.confirm(`Tem certeza que deseja excluir o pedido "${deal.title}"?`)) {
+      return
+    }
+    setIsDeleting(true)
+    try {
+      const supabase = createClient()
+      const { error } = await supabase.from('deals').delete().eq('id', deal.id)
+      if (error) {
+        toast.error('Erro ao excluir pedido')
+        return
+      }
+      toast.success('Pedido excluído com sucesso')
+      setIsOpen(false)
+      onDealUpdated?.()
+    } catch {
+      toast.error('Erro ao excluir pedido')
+    } finally {
+      setIsDeleting(false)
+    }
   }
 
   return (
@@ -76,9 +95,9 @@ export function DealCardActions({
         }}
         className="inline-flex items-center justify-center h-6 w-6 p-0 rounded-md text-muted-foreground hover:bg-primary/10 transition-colors focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
         title="Ações do pedido"
-        disabled={isLoading}
+        disabled={isLoading || isDeleting}
       >
-        {isLoading ? (
+        {isLoading || isDeleting ? (
           <Loader2 className="h-4 w-4 animate-spin text-primary" />
         ) : (
           <MoreHorizontal className="h-4 w-4" />
@@ -93,33 +112,41 @@ export function DealCardActions({
           onClick={(e) => e.stopPropagation()}
         >
           {/* Mover para stages */}
-          <div className="space-y-0.5">
-            {nextStages.map((stage) => (
-              <button
-                key={stage.id}
-                type="button"
-                onClick={() => handleMoveToStage(stage.name)}
-                disabled={isLoading}
-                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-muted rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-left"
-              >
-                <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
-                <span>{stage.name}</span>
-              </button>
-            ))}
-          </div>
+          {nextStages.length > 0 && (
+            <>
+              <div className="space-y-0.5">
+                {nextStages.map((stage) => (
+                  <button
+                    key={stage.id}
+                    type="button"
+                    onClick={() => handleMoveToStage(stage.name)}
+                    disabled={isLoading || isDeleting}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-muted rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-left"
+                  >
+                    <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
+                    <span>{stage.name}</span>
+                  </button>
+                ))}
+              </div>
 
-          {/* Divider */}
-          <div className="h-px bg-border my-1" />
+              {/* Divider */}
+              <div className="h-px bg-border my-1" />
+            </>
+          )}
 
           {/* Delete */}
           <button
             type="button"
             onClick={handleDelete}
-            disabled={isLoading}
+            disabled={isLoading || isDeleting}
             className="w-full flex items-center gap-2 px-3 py-2 text-sm text-destructive hover:bg-destructive/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-left"
           >
-            <Trash2 className="h-4 w-4 shrink-0" />
-            <span>Excluir Pedido</span>
+            {isDeleting ? (
+              <Loader2 className="h-4 w-4 animate-spin shrink-0" />
+            ) : (
+              <Trash2 className="h-4 w-4 shrink-0" />
+            )}
+            <span>{isDeleting ? 'Excluindo...' : 'Excluir Pedido'}</span>
           </button>
         </div>
       )}
