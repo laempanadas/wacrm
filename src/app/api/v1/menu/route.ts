@@ -9,7 +9,7 @@
 
 import { requireApiKey } from '@/lib/auth/api-context';
 import { ok, toApiErrorResponse, fail } from '@/lib/api/v1/respond';
-import { MENU } from '@/lib/cardapio/menu';
+import { MENU, DEFAULT_EMPANADA_IMAGE } from '@/lib/cardapio/menu';
 
 export async function GET(request: Request) {
   try {
@@ -18,7 +18,7 @@ export async function GET(request: Request) {
     const { data: initialData, error: selectError } = await ctx.supabase
       .from('menu_items')
       .select(
-        'id, name, price, category, is_available, description, emoji, created_at, updated_at'
+        'id, name, price, category, is_available, description, image_url, created_at, updated_at'
       )
       .eq('account_id', ctx.accountId)
       .order('category', { ascending: true })
@@ -40,7 +40,7 @@ export async function GET(request: Request) {
           price: item.price,
           category: cat.title,
           description: item.description ?? null,
-          emoji: item.emoji ?? null,
+          image_url: DEFAULT_EMPANADA_IMAGE,
           is_available: true,
         }))
       );
@@ -49,7 +49,7 @@ export async function GET(request: Request) {
         .from('menu_items')
         .insert(seedItems)
         .select(
-          'id, name, price, category, is_available, description, emoji, created_at, updated_at'
+          'id, name, price, category, is_available, description, image_url, created_at, updated_at'
         )
         .order('category', { ascending: true })
         .order('name', { ascending: true });
@@ -66,7 +66,7 @@ export async function GET(request: Request) {
       category: row.category,
       is_available: Boolean(row.is_available),
       description: row.description || null,
-      emoji: row.emoji || null,
+      image_url: row.image_url || DEFAULT_EMPANADA_IMAGE,
       created_at: row.created_at,
       updated_at: row.updated_at,
     }));

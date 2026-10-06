@@ -9,7 +9,7 @@ interface MockMenuItemRow {
   category: string;
   is_available: boolean;
   description: string | null;
-  emoji: string | null;
+  image_url: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -59,7 +59,7 @@ describe('GET /api/v1/menu', () => {
         category: 'Empanadas Clássicas',
         is_available: true,
         description: 'Carne bovina temperada',
-        emoji: '🥩',
+        image_url: 'https://images.unsplash.com/photo-1604382355076-af4b0eb60143?w=500&auto=format&fit=crop&q=60',
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
       },
@@ -71,7 +71,7 @@ describe('GET /api/v1/menu', () => {
         category: 'Empanadas Especiais',
         is_available: false,
         description: null,
-        emoji: '🦐',
+        image_url: 'https://images.unsplash.com/photo-1604382355076-af4b0eb60143?w=500&auto=format&fit=crop&q=60',
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
       },
@@ -111,7 +111,7 @@ describe('GET /api/v1/menu', () => {
                         category: String(it.category),
                         is_available: Boolean(it.is_available),
                         description: (it.description as string | null) ?? null,
-                        emoji: (it.emoji as string | null) ?? null,
+                        image_url: (it.image_url as string | null) ?? null,
                         created_at: new Date().toISOString(),
                         updated_at: new Date().toISOString(),
                       })),
@@ -156,7 +156,7 @@ describe('GET /api/v1/menu', () => {
       category: 'Empanadas Clássicas',
       is_available: true,
       description: 'Carne bovina temperada',
-      emoji: '🥩',
+      image_url: 'https://images.unsplash.com/photo-1604382355076-af4b0eb60143?w=500&auto=format&fit=crop&q=60',
       created_at: '2026-01-01T00:00:00Z',
       updated_at: '2026-01-01T00:00:00Z',
     });
@@ -168,7 +168,7 @@ describe('GET /api/v1/menu', () => {
       category: 'Empanadas Especiais',
       is_available: false,
       description: null,
-      emoji: '🦐',
+      image_url: 'https://images.unsplash.com/photo-1604382355076-af4b0eb60143?w=500&auto=format&fit=crop&q=60',
       created_at: '2026-01-01T00:00:00Z',
       updated_at: '2026-01-01T00:00:00Z',
     });
