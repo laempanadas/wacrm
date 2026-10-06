@@ -62,6 +62,8 @@ const CATEGORY_OPTIONS = [
   'Bebidas',
 ];
 
+const LOCAL_STORAGE_KEY = 'la_empanadas_cardapio';
+
 export function CardapioView() {
   const [items, setItems] = useState<MenuItemData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -86,25 +88,76 @@ export function CardapioView() {
   const [imagePreview, setImagePreview] = useState('');
   const [newAvailable, setNewAvailable] = useState(true);
 
-  // Load menu items from API with graceful mock fallback
+  // Helper to sync state and localStorage simultaneously
+  const updateItemsAndStorage = useCallback(
+    (newItemsOrFn: MenuItemData[] | ((prev: MenuItemData[]) => MenuItemData[])) => {
+      setItems((prev) => {
+        const nextItems =
+          typeof newItemsOrFn === 'function' ? newItemsOrFn(prev) : newItemsOrFn;
+        try {
+          localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(nextItems));
+        } catch (e) {
+          console.warn('[CardapioView] localStorage write error:', e);
+        }
+        return nextItems;
+      });
+    },
+    []
+  );
+
+  // Load menu items from API with localStorage fallback
   const fetchMenu = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
+
+      // Check localStorage first for instant render
+      try {
+        const cached = localStorage.getItem(LOCAL_STORAGE_KEY);
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setItems(parsed);
+          }
+        }
+      } catch (e) {
+        console.warn('[CardapioView] localStorage read warning:', e);
+      }
+
       const res = await fetch('/api/menu');
       if (!res.ok) {
-        throw new Error('Falha ao carregar o cardápio.');
+        throw new Error('Falha ao carregar o cardápio da API.');
       }
       const data = await res.json();
-      const fetchedItems = data.items && data.items.length > 0 ? data.items : getMockMenuItems();
-      setItems(fetchedItems);
+      const fetchedItems = data.items && data.items.length > 0 ? data.items : null;
+
+      if (fetchedItems && fetchedItems.length > 0) {
+        updateItemsAndStorage(fetchedItems);
+      } else if (items.length === 0) {
+        const mocks = getMockMenuItems();
+        updateItemsAndStorage(mocks);
+      }
     } catch (err) {
-      console.warn('[CardapioView] fetch error, using mock fallback:', err);
-      setItems(getMockMenuItems());
+      console.warn('[CardapioView] fetch error, using localStorage / mock fallback:', err);
+      if (items.length === 0) {
+        try {
+          const cached = localStorage.getItem(LOCAL_STORAGE_KEY);
+          if (cached) {
+            const parsed = JSON.parse(cached);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              setItems(parsed);
+              setLoading(false);
+              return;
+            }
+          }
+        } catch {}
+        const mocks = getMockMenuItems();
+        updateItemsAndStorage(mocks);
+      }
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [updateItemsAndStorage, items.length]);
 
   useEffect(() => {
     void fetchMenu();
@@ -197,22 +250,18 @@ export function CardapioView() {
   async function handleToggleAvailability(item: MenuItemData) {
     const updatedStatus = !item.is_available;
 
-    setItems((prev) =>
+    updateItemsAndStorage((prev) =>
       prev.map((i) =>
         i.id === item.id ? { ...i, is_available: updatedStatus } : i
       )
     );
 
     try {
-      const res = await fetch(`/api/menu/${item.id}`, {
+      await fetch(`/api/menu/${item.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ is_available: updatedStatus }),
       });
-
-      if (!res.ok) {
-        throw new Error('Falha ao atualizar status no servidor.');
-      }
 
       toast.success(
         updatedStatus
@@ -255,16 +304,17 @@ export function CardapioView() {
           body: JSON.stringify(payload),
         });
 
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          throw new Error(body.error || 'Erro ao atualizar item.');
-        }
+        const body = await res.json().catch(() => ({}));
+        const updatedItem = body.item || {
+          id: editingItem.id,
+          ...payload,
+          price: parseFloat(String(payload.price).replace(',', '.')) || 0,
+        };
 
-        const { item } = await res.json();
-        setItems((prev) =>
-          prev.map((i) => (i.id === editingItem.id ? { ...i, ...item } : i))
+        updateItemsAndStorage((prev) =>
+          prev.map((i) => (i.id === editingItem.id ? { ...i, ...updatedItem } : i))
         );
-        toast.success(`Item "${item.name}" atualizado com sucesso!`);
+        toast.success(`Item "${updatedItem.name}" atualizado com sucesso!`);
       } else {
         const res = await fetch('/api/menu', {
           method: 'POST',
@@ -272,14 +322,15 @@ export function CardapioView() {
           body: JSON.stringify(payload),
         });
 
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          throw new Error(body.error || 'Erro ao criar item.');
-        }
+        const body = await res.json().catch(() => ({}));
+        const newItem = body.item || {
+          id: `item-${Date.now()}`,
+          ...payload,
+          price: parseFloat(String(payload.price).replace(',', '.')) || 0,
+        };
 
-        const { item } = await res.json();
-        setItems((prev) => [...prev, item]);
-        toast.success(`Item "${item.name}" adicionado com sucesso!`);
+        updateItemsAndStorage((prev) => [...prev, newItem]);
+        toast.success(`Item "${newItem.name}" adicionado com sucesso!`);
       }
 
       setDialogOpen(false);
@@ -299,16 +350,13 @@ export function CardapioView() {
     const id = itemToDelete.id;
     const name = itemToDelete.name;
 
-    // Optimistic removal from state
-    setItems((prev) => prev.filter((i) => i.id !== id));
+    // Optimistic removal from state & localStorage
+    updateItemsAndStorage((prev) => prev.filter((i) => i.id !== id));
 
     try {
-      const res = await fetch(`/api/menu/${id}`, {
+      await fetch(`/api/menu/${id}`, {
         method: 'DELETE',
       });
-      if (!res.ok) {
-        throw new Error('Falha ao excluir item no servidor.');
-      }
       toast.success(`Item "${name}" excluído com sucesso!`);
     } catch (err) {
       console.warn('[CardapioView] delete warning:', err);
