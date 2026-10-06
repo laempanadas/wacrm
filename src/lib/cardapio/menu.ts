@@ -90,24 +90,69 @@ export function formatBRL(value: number): string {
   }).format(value);
 }
 
+export interface DynamicMenuItem {
+  name: string;
+  price: number;
+  category: string;
+  is_available: boolean;
+  emoji?: string | null;
+  description?: string | null;
+}
+
 /**
  * Gera o texto do cardápio formatado para envio no WhatsApp
- * (usa *negrito* do WhatsApp e emojis).
+ * (usa *negrito* do WhatsApp e emojis). Se uma lista de itens dinâmicos for
+ * fornecida, agrupa por categoria e indica itens pausados/esgotados.
  */
-export function buildWhatsappMenuText(): string {
+export function buildWhatsappMenuText(customItems?: DynamicMenuItem[]): string {
+  if (!customItems || customItems.length === 0) {
+    const lines: string[] = [];
+    lines.push('🫔 *La Empanadas — Cardápio* 🫔');
+    lines.push('');
+
+    for (const category of MENU) {
+      const header = category.subtitle
+        ? `${category.emoji} *${category.title}* (${category.subtitle})`
+        : `${category.emoji} *${category.title}*`;
+      lines.push(header);
+      for (const item of category.items) {
+        const desc = item.description ? ` (${item.description})` : '';
+        lines.push(
+          `${item.emoji} ${item.name}${desc} — ${formatBRL(item.price)}`
+        );
+      }
+      lines.push('');
+    }
+
+    lines.push('📲 Faça seu pedido pelo WhatsApp!');
+    return lines.join('\n').trim();
+  }
+
   const lines: string[] = [];
   lines.push('🫔 *La Empanadas — Cardápio* 🫔');
   lines.push('');
 
-  for (const category of MENU) {
-    const header = category.subtitle
-      ? `${category.emoji} *${category.title}* (${category.subtitle})`
-      : `${category.emoji} *${category.title}*`;
-    lines.push(header);
-    for (const item of category.items) {
+  const categoriesMap = new Map<string, DynamicMenuItem[]>();
+  for (const item of customItems) {
+    const cat = item.category || 'Outros';
+    const list = categoriesMap.get(cat) ?? [];
+    list.push(item);
+    categoriesMap.set(cat, list);
+  }
+
+  for (const [catName, items] of categoriesMap.entries()) {
+    const knownCat = MENU.find(
+      (c) => c.title.toLowerCase() === catName.toLowerCase()
+    );
+    const emoji = knownCat?.emoji || '🥟';
+    lines.push(`${emoji} *${catName}*`);
+
+    for (const item of items) {
       const desc = item.description ? ` (${item.description})` : '';
+      const itemEmoji = item.emoji || '🥟';
+      const statusNote = item.is_available ? '' : ' _(Esgotado)_';
       lines.push(
-        `${item.emoji} ${item.name}${desc} — ${formatBRL(item.price)}`
+        `${itemEmoji} ${item.name}${desc} — ${formatBRL(item.price)}${statusNote}`
       );
     }
     lines.push('');

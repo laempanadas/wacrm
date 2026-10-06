@@ -113,6 +113,19 @@ export interface Tag {
   created_at: string;
 }
 
+export interface MenuItemRecord {
+  id: string;
+  account_id: string;
+  name: string;
+  price: number;
+  category: string;
+  is_available: boolean;
+  description?: string | null;
+  emoji?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ContactTag {
   id: string;
   contact_id: string;
