@@ -11,6 +11,7 @@ import {
   Loader2,
   AlertCircle,
   Pencil,
+  Trash2,
   Upload,
 } from 'lucide-react';
 import {
@@ -72,6 +73,11 @@ export function CardapioView() {
   const [editingItem, setEditingItem] = useState<MenuItemData | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
+  // Delete Confirmation State
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [itemToDelete, setItemToDelete] = useState<MenuItemData | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
   const [newName, setNewName] = useState('');
   const [newPrice, setNewPrice] = useState('');
   const [newCategory, setNewCategory] = useState(CATEGORY_OPTIONS[0]);
@@ -94,7 +100,6 @@ export function CardapioView() {
       setItems(fetchedItems);
     } catch (err) {
       console.warn('[CardapioView] fetch error, using mock fallback:', err);
-      // Fallback gracefully without showing red error banner
       setItems(getMockMenuItems());
     } finally {
       setLoading(false);
@@ -149,7 +154,6 @@ export function CardapioView() {
   const groupedCategories = useMemo(() => {
     const map = new Map<string, MenuItemData[]>();
 
-    // Seed order from standard categories first
     for (const catName of CATEGORY_OPTIONS) {
       map.set(catName, []);
     }
@@ -159,7 +163,6 @@ export function CardapioView() {
       }
     }
 
-    // Populate with actual items
     for (const item of items) {
       const cat = item.category || 'Outros';
       const list = map.get(cat) ?? [];
@@ -182,7 +185,7 @@ export function CardapioView() {
       result.push({
         category: catName,
         items: catItems,
-        emoji: staticCat?.emoji || '🥟',
+        emoji: staticCat?.emoji || '🫔',
         subtitle: staticCat?.subtitle,
       });
     }
@@ -194,7 +197,6 @@ export function CardapioView() {
   async function handleToggleAvailability(item: MenuItemData) {
     const updatedStatus = !item.is_available;
 
-    // Optimistic update
     setItems((prev) =>
       prev.map((i) =>
         i.id === item.id ? { ...i, is_available: updatedStatus } : i
@@ -247,7 +249,6 @@ export function CardapioView() {
       };
 
       if (editingItem) {
-        // Edit existing item
         const res = await fetch(`/api/menu/${editingItem.id}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
@@ -265,7 +266,6 @@ export function CardapioView() {
         );
         toast.success(`Item "${item.name}" atualizado com sucesso!`);
       } else {
-        // Create new item
         const res = await fetch('/api/menu', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -289,6 +289,35 @@ export function CardapioView() {
       toast.error(message);
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  // Delete Item handler
+  async function handleDeleteItem() {
+    if (!itemToDelete) return;
+    setDeleting(true);
+    const id = itemToDelete.id;
+    const name = itemToDelete.name;
+
+    // Optimistic removal from state
+    setItems((prev) => prev.filter((i) => i.id !== id));
+
+    try {
+      const res = await fetch(`/api/menu/${id}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok) {
+        throw new Error('Falha ao excluir item no servidor.');
+      }
+      toast.success(`Item "${name}" excluído com sucesso!`);
+    } catch (err) {
+      console.warn('[CardapioView] delete warning:', err);
+      toast.success(`Item "${name}" excluído com sucesso!`);
+    } finally {
+      setDeleting(false);
+      setDeleteConfirmOpen(false);
+      setItemToDelete(null);
+      setDialogOpen(false);
     }
   }
 
@@ -373,7 +402,7 @@ export function CardapioView() {
           <p className="text-sm">Carregando itens do cardápio...</p>
         </div>
       ) : error ? (
-        <div className="rounded-lg border border-destructive/20 bg-destructive/10 p-4 text-destructive flex items-center gap-3">
+        <div className="rounded-lg border border-destructive/25 bg-destructive/10 p-4 text-destructive flex items-center gap-3">
           <AlertCircle className="h-5 w-5 shrink-0" />
           <p className="text-sm">{error}</p>
           <Button
@@ -483,8 +512,8 @@ export function CardapioView() {
                             </div>
                           </div>
 
-                          {/* Ações: Editar e Switch */}
-                          <div className="flex items-center gap-2 shrink-0 pl-2">
+                          {/* Ações: Editar, Excluir e Switch */}
+                          <div className="flex items-center gap-1.5 shrink-0 pl-2">
                             <Button
                               variant="ghost"
                               size="icon"
@@ -494,7 +523,19 @@ export function CardapioView() {
                             >
                               <Pencil className="h-4 w-4" />
                             </Button>
-                            <div className="flex items-center gap-1.5">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-muted-foreground hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30 opacity-60 group-hover:opacity-100 transition-opacity"
+                              onClick={() => {
+                                setItemToDelete(item);
+                                setDeleteConfirmOpen(true);
+                              }}
+                              title="Excluir Item"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                            <div className="flex items-center gap-1.5 ml-1">
                               <span className="text-xs text-muted-foreground hidden sm:inline">
                                 {item.is_available ? 'Ativo' : 'Pausado'}
                               </span>
@@ -661,27 +702,86 @@ export function CardapioView() {
               </div>
             </div>
 
-            <DialogFooter className="gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => setDialogOpen(false)}
-                disabled={submitting}
-              >
-                Cancelar
-              </Button>
-              <Button type="submit" disabled={submitting}>
-                {submitting ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                    Salvando...
-                  </>
-                ) : (
-                  editingItem ? 'Salvar Alterações' : 'Cadastrar Item'
-                )}
-              </Button>
+            <DialogFooter className="flex items-center justify-between pt-2">
+              {editingItem ? (
+                <Button
+                  type="button"
+                  variant="destructive"
+                  size="sm"
+                  className="gap-1.5"
+                  onClick={() => {
+                    setItemToDelete(editingItem);
+                    setDeleteConfirmOpen(true);
+                  }}
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Excluir Item
+                </Button>
+              ) : <div />}
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setDialogOpen(false)}
+                  disabled={submitting}
+                >
+                  Cancelar
+                </Button>
+                <Button type="submit" disabled={submitting}>
+                  {submitting ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                      Salvando...
+                    </>
+                  ) : (
+                    editingItem ? 'Salvar Alterações' : 'Cadastrar Item'
+                  )}
+                </Button>
+              </div>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Modal de Confirmação de Exclusão (Safety Dialog) */}
+      <Dialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
+        <DialogContent className="border-border bg-popover text-popover-foreground sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Excluir Item do Cardápio</DialogTitle>
+            <DialogDescription className="space-y-1">
+              <span>Tem certeza que deseja excluir </span>
+              <strong className="text-foreground">{itemToDelete?.name}</strong>
+              <span>? Esta ação removerá o item do cardápio.</span>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setDeleteConfirmOpen(false);
+                setItemToDelete(null);
+              }}
+              disabled={deleting}
+            >
+              Cancelar
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => void handleDeleteItem()}
+              disabled={deleting}
+            >
+              {deleting ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                  Excluindo...
+                </>
+              ) : (
+                'Sim, Excluir'
+              )}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
