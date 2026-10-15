@@ -9,9 +9,16 @@
  * - Exclusão de boletos para delivery
  */
 
-import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
+import {
+  MercadoPagoConfig,
+  Preference,
+  Payment,
+  MerchantOrder,
+} from 'mercadopago';
+import { exactBrlCents, paymentMatchesOrder } from './payment-identity';
 
 export interface PaymentLinkItem {
+  id?: string;
   title: string;
   quantity: number;
   unitPrice: number;
@@ -23,6 +30,8 @@ export type DeliveryKind = 'delivery' | 'retirada';
 export interface CreatePaymentLinkParams {
   items: PaymentLinkItem[];
   externalReference?: string;
+  /** SDK transport hint only; the durable checkout ledger guarantees exclusion. */
+  idempotencyKey?: string;
   payerName?: string;
   payerEmail?: string;
   payerPhone?: string;
@@ -47,6 +56,10 @@ export interface PaymentStatusResult {
   paymentId: string | null;
   paidAmount?: number;
   externalReference?: string | null;
+  preferenceId?: string | null;
+  collectorId?: string | null;
+  currency?: string | null;
+  identityError?: string;
 }
 
 export const MP_NOT_CONFIGURED_MESSAGE =
@@ -70,8 +83,8 @@ export function normalizePaymentStatus(
 ): PaymentStatus {
   switch (raw?.toLowerCase()) {
     case 'approved':
-    case 'authorized':
       return 'approved';
+    case 'authorized': // authorization is not captured/settled payment
     case 'in_process':
     case 'in_mediation':
       return 'in_process';
@@ -111,27 +124,38 @@ export async function createPaymentLink(
     throw new Error('Informe ao menos um item para gerar o link de pagamento.');
   }
 
+  for (const item of params.items) {
+    if (
+      !item ||
+      typeof item.title !== 'string' ||
+      !item.title.trim() ||
+      item.title.length > 250 ||
+      !Number.isSafeInteger(item.quantity) ||
+      item.quantity <= 0 ||
+      !Number.isFinite(item.unitPrice) ||
+      item.unitPrice <= 0 ||
+      (item.id !== undefined &&
+        (typeof item.id !== 'string' || !item.id.trim())) ||
+      (item.description !== undefined && typeof item.description !== 'string')
+    ) {
+      throw new Error(
+        'Item inválido: informe título, quantidade inteira e preço positivo; nenhum item será descartado.'
+      );
+    }
+  }
   const client = getClient();
   const preference = new Preference(client);
 
-  // ⚠️ [QUALIDADE 100]: Itens com description e category_id
-  const validItems = params.items
-    .filter((item) => item.quantity > 0 && item.unitPrice > 0)
-    .map((item, index) => ({
-      id: `item-${index + 1}`,
-      title: item.title.trim().substring(0, 250),
-      description:
-        item.description?.trim() ||
-        `${item.title.trim()} — Artesanal La Empanadas`,
-      category_id: 'food_and_drink',
-      quantity: Number(item.quantity),
-      unit_price: Number(item.unitPrice),
-      currency_id: 'BRL' as const,
-    }));
-
-  if (validItems.length === 0) {
-    throw new Error('Nenhum item com preço válido informado.');
-  }
+  // Preserve every SKU line; invalid baskets fail as a whole before I/O.
+  const validItems = params.items.map((item, index) => ({
+    id: item.id ?? `item-${index + 1}`,
+    title: item.title,
+    description: item.description ?? `${item.title} — Artesanal La Empanadas`,
+    category_id: 'food_and_drink',
+    quantity: item.quantity,
+    unit_price: item.unitPrice,
+    currency_id: 'BRL' as const,
+  }));
 
   const { firstName, lastName } = splitFullName(params.payerName);
 
@@ -155,8 +179,18 @@ export async function createPaymentLink(
     params.externalReference?.trim() ||
     `PED-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
 
+  // SDK Options omits `retries` in its .d.ts, but the installed RestClient
+  // accepts it and Preference.create forwards this object unchanged.
+  const requestOptions = params.idempotencyKey
+    ? { idempotencyKey: params.idempotencyKey, retries: 0 }
+    : undefined;
   // ⚠️ [QUALIDADE 100]: Estrutura completa exigida pela auditoria do Mercado Pago
   const result = await preference.create({
+    // Verified in installed SDK 3.2.1: requestOptions reach RestClient.fetch.
+    // Its default retries also retry network/timeout errors. Durable checkout
+    // requests must make exactly one attempt; the preference header is not a
+    // substitute for the ledger (the endpoint may not enforce it).
+    ...(requestOptions ? { requestOptions } : {}),
     body: {
       items: validItems,
       external_reference: extRef,
@@ -203,10 +237,79 @@ export async function createPaymentLink(
 export async function getPaymentById(
   paymentId: string | number
 ): Promise<PaymentStatusResult> {
+  if (
+    !/^[1-9]\d*$/.test(String(paymentId)) ||
+    (typeof paymentId === 'number' && !Number.isSafeInteger(paymentId))
+  ) {
+    return {
+      ok: true,
+      status: 'unknown',
+      rawStatus: null,
+      paymentId: null,
+      identityError: 'Invalid payment ID.',
+    };
+  }
   try {
     const client = getClient();
     const payment = new Payment(client);
     const result = await payment.get({ id: String(paymentId) });
+    // Checkout Pro payments link to the preference through merchant_order.
+    // A global access token proves gateway access, NOT CRM account ownership.
+    const merchant = result.order?.id
+      ? await new MerchantOrder(client).get({
+          merchantOrderId: String(result.order.id),
+        })
+      : null;
+    const blocked = (identityError: string): PaymentStatusResult => ({
+      ok: true,
+      status: 'unknown',
+      rawStatus: result.status ?? null,
+      paymentId: String(paymentId),
+      identityError,
+    });
+    if (
+      String(result.id) !== String(paymentId) ||
+      !merchant?.preference_id ||
+      String(merchant.id) !== String(result.order?.id) ||
+      !Number.isSafeInteger(result.collector_id) ||
+      (result.collector_id ?? 0) <= 0 ||
+      merchant.collector?.id !== result.collector_id ||
+      !merchant.payments?.some((p) => String(p.id) === String(result.id)) ||
+      !result.external_reference ||
+      merchant.external_reference !== result.external_reference
+    ) {
+      return blocked(
+        'Missing or inconsistent payment/merchant-order identity; reconcile legacy payment.'
+      );
+    }
+    const preference = await new Preference(client).get({
+      preferenceId: merchant.preference_id,
+    });
+    const items = preference.items ?? [];
+    let totalCents = 0;
+    for (const item of items) {
+      const cents = exactBrlCents(item.unit_price);
+      if (
+        item.currency_id !== 'BRL' ||
+        cents === null ||
+        !Number.isSafeInteger(item.quantity) ||
+        item.quantity <= 0
+      ) {
+        return blocked('Invalid BRL preference items.');
+      }
+      totalCents += cents * item.quantity;
+    }
+    if (
+      preference.id !== merchant.preference_id ||
+      preference.collector_id !== result.collector_id ||
+      preference.external_reference !== result.external_reference ||
+      !items.length ||
+      !Number.isSafeInteger(totalCents) ||
+      totalCents !== exactBrlCents(result.transaction_amount) ||
+      result.currency_id !== 'BRL'
+    ) {
+      return blocked('Payment does not match its gateway preference.');
+    }
 
     return {
       ok: true,
@@ -215,6 +318,10 @@ export async function getPaymentById(
       paymentId: String(result.id),
       paidAmount: result.transaction_amount,
       externalReference: result.external_reference ?? null,
+      preferenceId: merchant?.preference_id ?? null,
+      collectorId:
+        result.collector_id != null ? String(result.collector_id) : null,
+      currency: result.currency_id ?? null,
     };
   } catch (error) {
     console.error(
@@ -231,44 +338,61 @@ export async function getPaymentById(
   }
 }
 
-export async function getPaymentStatusByExternalReference(
-  externalReference: string
-): Promise<PaymentStatusResult> {
+/** The caller must resolve this canonical order in its authenticated account.
+ * Search the SDK-supported merchant-order preference filter, never a global
+ * reference/latest payment. Multiple payment attempts require reconciliation. */
+export async function getPaymentStatusForOrder(order: {
+  account_id: string;
+  preference_id: string;
+  external_reference: string;
+  total: unknown;
+}): Promise<PaymentStatusResult> {
+  const blocked = (identityError: string): PaymentStatusResult => ({
+    ok: true,
+    status: 'unknown',
+    rawStatus: null,
+    paymentId: null,
+    identityError,
+  });
+  if (
+    !order.account_id ||
+    !order.preference_id ||
+    !order.external_reference ||
+    exactBrlCents(order.total) === null
+  )
+    return blocked('Unlinked order; reconciliation required.');
   try {
-    const client = getClient();
-    const payment = new Payment(client);
-
-    const search = await payment.search({
-      options: {
-        external_reference: externalReference,
-        sort: 'date_created',
-        criteria: 'desc',
-        limit: 1,
-      },
+    const search = await new MerchantOrder(getClient()).search({
+      options: { preference_id: order.preference_id, limit: 100 },
     });
-
-    const results = (search.results ?? []) as Array<{
-      id?: number | string;
-      status?: string;
-      transaction_amount?: number;
-    }>;
-
-    if (!results.length) {
-      return { ok: true, status: 'pending', rawStatus: null, paymentId: null };
+    const elements = search.elements ?? [];
+    if (
+      !Number.isSafeInteger(search.total) ||
+      search.total !== elements.length ||
+      elements.some((m) => m.preference_id !== order.preference_id)
+    ) {
+      return blocked(
+        'Ambiguous or incomplete merchant-order search; reconciliation required.'
+      );
     }
-
-    const latest = results[0];
-    return {
-      ok: true,
-      status: normalizePaymentStatus(latest.status),
-      rawStatus: latest.status ?? null,
-      paymentId: latest.id != null ? String(latest.id) : null,
-      paidAmount: latest.transaction_amount,
-    };
+    const payments = elements.flatMap((m) => m.payments ?? []);
+    if (!payments.length)
+      return { ok: true, status: 'pending', rawStatus: null, paymentId: null };
+    if (payments.length !== 1 || payments[0].id == null) {
+      return blocked('Ambiguous payment attempts; reconciliation required.');
+    }
+    const payment = await getPaymentById(payments[0].id);
+    if (!payment.ok)
+      return { ok: false, status: 'unknown', rawStatus: null, paymentId: null };
+    if (payment.identityError || !paymentMatchesOrder(payment, order)) {
+      return blocked(
+        'Payment identity does not match account order; reconciliation required.'
+      );
+    }
+    return payment;
   } catch (error) {
     console.error(
-      '[MercadoPago Error] Falha ao buscar external_reference:',
-      externalReference,
+      '[MercadoPago Error] Could not resolve order payment:',
       error
     );
     return { ok: false, status: 'unknown', rawStatus: null, paymentId: null };

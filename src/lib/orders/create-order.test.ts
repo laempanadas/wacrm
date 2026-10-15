@@ -177,6 +177,7 @@ function fakeDb(tables: Record<string, Row[]>) {
       upsert: (p: Row) => ((op = 'upsert'), (payload = p), q),
       update: (p: Row) => ((op = 'update'), (payload = p), q),
       eq: (k: string, v: unknown) => (filters.push([k, v]), q),
+      is: (k: string, v: unknown) => (filters.push([k, v]), q),
       limit: () => q,
       maybeSingle: async () => ({ data: run()[0] ?? null, error: null }),
       then: (resolve: (r: { data: Row[]; error: null }) => void) =>
@@ -262,7 +263,7 @@ describe('createOrderDeal', () => {
     expect(tables.contact_tags).toHaveLength(1);
   });
 
-  it('atualiza deal aberto existente para a conversa em vez de duplicar', async () => {
+  it('mantém auto-deal de valor zero separado do novo pedido', async () => {
     const tables = seededTables();
     // Deal preexistente aberto criado pelo webhook (ensureAutoDealForConversation) com valor 0
     tables.deals = [
@@ -285,29 +286,30 @@ describe('createOrderDeal', () => {
       skipOrderRecord: true,
     });
 
-    expect(res.dealId).toBe('deal-existing-1');
-    expect(tables.deals).toHaveLength(1);
+    expect(res.dealId).not.toBe('deal-existing-1');
+    expect(tables.deals).toHaveLength(2);
     expect(tables.deals[0]).toMatchObject({
       id: 'deal-existing-1',
-      value: 33.5,
+      value: 0,
       title: 'Pedido - Maria',
       stage_id: 'novo',
     });
   });
 
-  it('é idempotente mesmo com skipOrderRecord=true (como no Flow custom_action)', async () => {
+  it('sem registro canônico cria deals separados e não infere idempotência pela conversa', async () => {
     const tables = seededTables();
-    const first = await createOrderDeal(fakeDb(tables), ctx, {
+    const db = fakeDb(tables);
+    const first = await createOrderDeal(db, ctx, {
       ...input,
       skipOrderRecord: true,
     });
-    const second = await createOrderDeal(fakeDb(tables), ctx, {
+    const second = await createOrderDeal(db, ctx, {
       ...input,
       skipOrderRecord: true,
     });
 
-    expect(second.dealId).toBe(first.dealId);
-    expect(tables.deals).toHaveLength(1);
+    expect(second.dealId).not.toBe(first.dealId);
+    expect(tables.deals).toHaveLength(2);
   });
 
   it('falha com mensagem clara quando o pipeline não existe', async () => {
@@ -323,7 +325,14 @@ describe('createDealForOrder', () => {
   it('cria o card sem gravar outro pedido e vincula o deal ao pedido existente', async () => {
     const tables = seededTables();
     tables.orders = [
-      { id: 'order-site', external_reference: 'SITE-1', status: 'pending' },
+      {
+        id: 'order-site',
+        account_id: 'acc',
+        contact_id: input.contactId,
+        deal_id: null,
+        external_reference: 'SITE-1',
+        status: 'pending',
+      },
     ];
 
     const res = await createDealForOrder(fakeDb(tables), ctx, 'order-site', {

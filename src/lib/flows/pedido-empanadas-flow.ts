@@ -109,7 +109,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
       config: {
         var_key: 'endereco',
         value: '{{vars.ultimo_endereco}}',
-        next_node_key: 'gerar_pagamento',
+        next_node_key: 'confirmar_delivery',
       } as SetVarNodeConfig,
     },
     {
@@ -119,8 +119,71 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
         prompt_text:
           '📍 Por favor, digite seu endereço de entrega (Rua, Número e Bairro):',
         var_key: 'endereco',
-        next_node_key: 'gerar_pagamento',
+        next_node_key: 'confirmar_delivery',
       } as CollectInputNodeConfig,
+    },
+    {
+      node_key: 'confirmar_delivery',
+      node_type: 'send_buttons',
+      config: {
+        text: 'Confira seu pedido antes do pagamento:\n{{vars.itens_lista}}\nTotal: {{vars.total_formatado}}\nEntrega: {{vars.endereco}}\nObservações: {{vars.observacoes}}\nPagamento online via Mercado Pago. Confirmar?',
+        buttons: [
+          {
+            reply_id: 'confirmar_pedido',
+            title: 'Confirmar pedido',
+            next_node_key: 'set_confirmado_delivery',
+          },
+          {
+            reply_id: 'corrigir_pedido',
+            title: 'Corrigir pedido',
+            next_node_key: 'handoff_correcao',
+          },
+        ],
+      } as SendButtonsNodeConfig,
+    },
+    {
+      node_key: 'set_confirmado_delivery',
+      node_type: 'set_var',
+      config: {
+        var_key: 'pedido_confirmado',
+        value: 'true',
+        next_node_key: 'gerar_pagamento',
+      } as SetVarNodeConfig,
+    },
+    {
+      node_key: 'confirmar_retirada',
+      node_type: 'send_buttons',
+      config: {
+        text: 'Confira seu pedido:\n{{vars.itens_lista}}\nTotal: {{vars.total_formatado}}\nRetirada na loja — pagamento na retirada.\nObservações: {{vars.observacoes}}\nConfirmar?',
+        buttons: [
+          {
+            reply_id: 'confirmar_pedido',
+            title: 'Confirmar pedido',
+            next_node_key: 'set_confirmado_retirada',
+          },
+          {
+            reply_id: 'corrigir_pedido',
+            title: 'Corrigir pedido',
+            next_node_key: 'handoff_correcao',
+          },
+        ],
+      } as SendButtonsNodeConfig,
+    },
+    {
+      node_key: 'set_confirmado_retirada',
+      node_type: 'set_var',
+      config: {
+        var_key: 'pedido_confirmado',
+        value: 'true',
+        next_node_key: 'registrar_retirada',
+      } as SetVarNodeConfig,
+    },
+    {
+      node_key: 'handoff_correcao',
+      node_type: 'handoff',
+      config: {
+        note: 'Revisar pedido antes de cobrar: {{vars.itens_texto}} | Observações: {{vars.observacoes}} | Endereço: {{vars.endereco}}',
+      } as HandoffNodeConfig,
     },
     {
       // Cria o card no pipeline, o pedido em `orders` e o link do
@@ -137,7 +200,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
       node_key: 'link_pagamento',
       node_type: 'send_message' as const,
       config: {
-        text: '🫔 *Pedido Confirmado!*\n{{vars.itens_lista}}\n💵 *Total: {{vars.total_formatado}}*\n📍 *Entrega:* {{vars.endereco}}\n\n💳 *Pague online com Pix ou Cartão pelo link abaixo:*\n{{vars.link_mercado_pago}}\n\nAssim que o pagamento for aprovado, seu pedido entra automaticamente em preparo!',
+        text: '🫔 *Pedido confirmado!*\n{{vars.itens_lista}}\nTotal: {{vars.total_formatado}}\nEntrega: {{vars.endereco}}\nObservações: {{vars.observacoes}}\n\nPague com Pix ou cartão pelo botão abaixo. Após a aprovação, seu pedido entra em preparo.',
         next_node_key: 'handoff_delivery',
       } as SendMessageNodeConfig,
     },
@@ -156,7 +219,7 @@ export const PEDIDO_EMPANADAS_FLOW: FlowTemplate = {
       config: {
         var_key: 'tipo_entrega',
         value: 'retirada',
-        next_node_key: 'registrar_retirada',
+        next_node_key: 'confirmar_retirada',
       } as SetVarNodeConfig,
     },
     {

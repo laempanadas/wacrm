@@ -10,8 +10,6 @@ import { runAutomationsForTrigger } from '@/lib/automations/engine';
 import { dispatchInboundToFlows } from '@/lib/flows/engine';
 import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply';
 import { dispatchWebhookEvent } from '@/lib/webhooks/deliver';
-import { createPaymentLink } from '@/lib/payments/mercado-pago';
-import { createDealForOrder } from '@/lib/orders/create-order';
 import { ensureAutoDealForConversation } from '@/lib/deals/auto-deal-lifecycle';
 import { hasOrderIntent } from '@/lib/orders/text-order-parser';
 import { processFreeTextOrderInbound } from '@/lib/orders/text-order-flow';
@@ -32,105 +30,6 @@ function supabaseAdmin() {
     );
   }
   return _adminClient;
-}
-
-/**
- * Preenche automaticamente os campos personalizados (custom fields) do
- * contato quando um pedido é detectado/pago. Faz o "de-para" pelo nome do
- * campo (`custom_fields.field_name`) para o UUID e grava em
- * `contact_custom_values` via upsert (conflito em contact_id+custom_field_id).
- *
- * É best-effort: qualquer falha é apenas logada e nunca interrompe o fluxo
- * principal do pedido/pagamento. Campos com valor vazio/undefined são
- * ignorados (não sobrescrevem valores já existentes).
- *
- * Os nomes usados aqui são EXATAMENTE os exibidos na UI de campos
- * personalizados: 'Itens_pedido', 'Endereco_entrega', 'Forma_pagamento',
- * 'Nome_cliente'.
- */
-async function saveOrderCustomFields(
-  supabase: ReturnType<typeof supabaseAdmin>,
-  accountId: string,
-  contactId: string,
-  fields: {
-    itens?: string;
-    endereco?: string;
-    formaPagamento?: string;
-    nomeCliente?: string;
-  }
-): Promise<void> {
-  try {
-    // Mapa nome-do-campo → valor, descartando vazios.
-    const byName: Record<string, string> = {};
-    if (fields.itens && fields.itens.trim())
-      byName['Itens_pedido'] = fields.itens.trim();
-    if (fields.endereco && fields.endereco.trim())
-      byName['Endereco_entrega'] = fields.endereco.trim();
-    if (fields.formaPagamento && fields.formaPagamento.trim())
-      byName['Forma_pagamento'] = fields.formaPagamento.trim();
-    if (fields.nomeCliente && fields.nomeCliente.trim())
-      byName['Nome_cliente'] = fields.nomeCliente.trim();
-
-    const names = Object.keys(byName);
-    if (names.length === 0) return;
-
-    // Busca os IDs dos campos personalizados pelo nome, dentro da conta.
-    const { data: defs, error: defsErr } = await supabase
-      .from('custom_fields')
-      .select('id, field_name')
-      .eq('account_id', accountId)
-      .in('field_name', names);
-
-    if (defsErr) {
-      console.error(
-        '[custom-fields] Erro ao buscar definições de campos:',
-        defsErr
-      );
-      return;
-    }
-    if (!defs || defs.length === 0) {
-      console.warn(
-        '[custom-fields] Nenhum campo personalizado encontrado para:',
-        names.join(', ')
-      );
-      return;
-    }
-
-    const rows = defs
-      .filter(
-        (d: { id: string; field_name: string }) =>
-          byName[d.field_name] !== undefined
-      )
-      .map((d: { id: string; field_name: string }) => ({
-        contact_id: contactId,
-        custom_field_id: d.id,
-        value: byName[d.field_name],
-      }));
-
-    if (rows.length === 0) return;
-
-    const { error: upsertErr } = await supabase
-      .from('contact_custom_values')
-      .upsert(rows, { onConflict: 'contact_id,custom_field_id' });
-
-    if (upsertErr) {
-      console.error(
-        '[custom-fields] Erro ao gravar valores dos campos:',
-        upsertErr
-      );
-      return;
-    }
-
-    console.log(
-      `[custom-fields] Campos preenchidos para contato ${contactId}:`,
-      names.join(', ')
-    );
-  } catch (err) {
-    console.error(
-      '[custom-fields] Falha inesperada ao preencher campos do pedido:',
-      err
-    );
-  }
 }
 
 interface WhatsAppMessage {
@@ -526,256 +425,6 @@ async function handleReaction(
   );
 }
 
-function parseCurrencyString(raw: string): number {
-  if (!raw) return 0;
-  const cleaned = raw.trim().replace(/[^\d.,]/g, '');
-  if (!cleaned) return 0;
-
-  if (cleaned.includes('.') && cleaned.includes(',')) {
-    if (cleaned.lastIndexOf(',') > cleaned.lastIndexOf('.')) {
-      return parseFloat(cleaned.replace(/\./g, '').replace(',', '.')) || 0;
-    }
-    return parseFloat(cleaned.replace(/,/g, '')) || 0;
-  }
-
-  if (cleaned.includes(',')) {
-    return parseFloat(cleaned.replace(',', '.')) || 0;
-  }
-
-  if (cleaned.includes('.')) {
-    const parts = cleaned.split('.');
-    if (parts.length === 2 && parts[1].length <= 2) {
-      return parseFloat(cleaned) || 0;
-    }
-    return parseFloat(cleaned.replace(/\./g, '')) || 0;
-  }
-
-  return parseFloat(cleaned) || 0;
-}
-/**
- * ETAPA 2 — Detecta se o cliente quer pagar
- */
-function isPaymentConfirmation(text: string): boolean {
-  if (!text) return false;
-
-  const normalized = text
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .trim();
-
-  const triggers = [
-    'pagar',
-    'pago',
-    'paguei',
-    'credito',
-    'debito',
-    'cartao',
-    'pix',
-    'link',
-    'pagamento',
-    'quero pagar',
-    'pode mandar',
-    'manda o link',
-    'como pago',
-    'confirmar',
-    'confirmo',
-  ];
-
-  return triggers.some((t) => normalized.includes(t));
-}
-/**
- * ETAPA 3 — Lê o [TOTAL:XXX.XX] deixado pela IA nas últimas mensagens
- * Busca nas últimas 5 mensagens do bot e extrai o valor numérico
- */
-async function extractTotalFromLastBotMessage(
-  conversationId: string
-): Promise<number | null> {
-  // 1. Busca as últimas 5 mensagens do bot nessa conversa
-  const { data: botMessages } = await supabaseAdmin()
-    .from('messages')
-    .select('content_text')
-    .eq('conversation_id', conversationId)
-    .eq('sender_type', 'bot')
-    .order('created_at', { ascending: false })
-    .limit(5);
-
-  // 2. Se não encontrou nenhuma mensagem do bot, retorna null
-  if (!botMessages || botMessages.length === 0) return null;
-
-  // 3. Percorre as mensagens procurando o marcador [TOTAL:XXX.XX]
-  for (const msg of botMessages) {
-    const text = msg.content_text || '';
-
-    // Regex: procura [TOTAL:] ou "Total: R$ ..."
-    const match = text.match(/\[TOTAL:([\d.]+)\]/i);
-    if (match) {
-      const total = parseFloat(match[1]); // converte "140.00" → 140
-      if (total > 0) return total; // retorna se for um valor válido
-    }
-
-    const matchBr = text.match(/Total:\s*\*?R\$\s*([\d.,]+)\*?/i);
-    if (matchBr) {
-      const total = parseCurrencyString(matchBr[1]);
-      if (total > 0) return total;
-    }
-  }
-
-  // 4. Não encontrou marcador em nenhuma das 5 mensagens
-  return null;
-}
-
-/**
- * 🥟 Parser resiliente para pedidos do site laempanadas.com.br
- */
-function parseWebsiteOrder(text: string) {
-  if (!text || !text.toUpperCase().includes('LA EMPANADAS - NOVO PEDIDO')) {
-    return null;
-  }
-
-  const clienteMatch = text.match(/(?:\*?Cliente:\*?)\s*([^\n\r*]+)/i);
-  const cliente = clienteMatch ? clienteMatch[1].trim() : 'Cliente';
-
-  const enderecoMatch = text.match(/(?:\*?Entregar em:\*?)\s*([^\n\r*]+)/i);
-  const endereco = enderecoMatch ? enderecoMatch[1].trim() : '';
-
-  const totalMatch = text.match(
-    /(?:\*?Total(?: Estimado)?:\*?)\s*R\$\s*([\d.,]+)/i
-  );
-  const total = totalMatch ? parseCurrencyString(totalMatch[1]) : 0;
-
-  const items: Array<{ title: string; quantity: number; unitPrice: number }> =
-    [];
-  // Suporta: - 1x, • 1 x, 1x, etc.
-  const itemRegex = /(?:[-•*]\s*)?(\d+)\s*x\s*([^[—\n\r]+)(?:\[([^\]]+)\])?/gi;
-  let match: RegExpExecArray | null;
-  while ((match = itemRegex.exec(text)) !== null) {
-    const quantity = parseInt(match[1], 10) || 1;
-    const title = match[2].trim();
-    items.push({ title, quantity, unitPrice: 0 });
-  }
-
-  if (items.length > 0 && total > 0) {
-    const totalQty = items.reduce((acc, it) => acc + it.quantity, 0);
-    const unitAvg = total / (totalQty || 1);
-    items.forEach((it) => (it.unitPrice = Number(unitAvg.toFixed(2))));
-  } else if (items.length === 0 && total > 0) {
-    items.push({ title: 'Pedido de Empanadas', quantity: 1, unitPrice: total });
-  }
-
-  return {
-    cliente,
-    endereco,
-    total,
-    totalFormatado: `R$ ${total.toFixed(2).replace('.', ',')}`,
-    items,
-  };
-}
-
-/**
- * 🛡️ [BLINDAGEM TOTAL]: Envia Botão CTA (≤20 chars) com Fallback para Mensagem de Texto
- */
-async function sendWhatsAppPaymentMessage(params: {
-  phoneNumberId: string;
-  accessToken: string;
-  toPhone: string;
-  headerText: string;
-  bodyText: string;
-  footerText: string;
-  buttonText: string;
-  buttonUrl: string;
-}): Promise<{ messageId: string | null; formattedText: string }> {
-  // Limite estrito de 20 caracteres da Meta para o botão
-  const label = (params.buttonText || '💳 Pagar Agora').trim().substring(0, 20);
-
-  // 1. Tenta enviar como Botão CTA Nativo
-  try {
-    const res = await fetch(
-      `https://graph.facebook.com/v21.0/${params.phoneNumberId}/messages`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${params.accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          messaging_product: 'whatsapp',
-          recipient_type: 'individual',
-          to: params.toPhone,
-          type: 'interactive',
-          interactive: {
-            type: 'cta_url',
-            header: {
-              type: 'text',
-              text: params.headerText,
-            },
-            body: {
-              text: params.bodyText,
-            },
-            footer: {
-              text: params.footerText,
-            },
-            action: {
-              name: 'cta_url',
-              parameters: {
-                display_text: label,
-                url: params.buttonUrl,
-              },
-            },
-          },
-        }),
-      }
-    );
-    const data = await res.json();
-    if (data?.messages?.[0]?.id) {
-      return {
-        messageId: data.messages[0].id,
-        formattedText: `${params.bodyText}\n[Botão: ${label}]`,
-      };
-    }
-    console.warn(
-      '[WhatsApp CTA Button Failed] Tentando fallback de texto:',
-      data
-    );
-  } catch (error) {
-    console.error('[WhatsApp CTA Error]:', error);
-  }
-
-  // 2. Plano de contingência garantido (Mensagem de Texto)
-  const fallbackText =
-    `${params.bodyText}\n\n` +
-    `👉 *Link para pagamento (Pix ou Cartão):*\n${params.buttonUrl}\n\n` +
-    `_${params.footerText}_`;
-
-  try {
-    const resText = await fetch(
-      `https://graph.facebook.com/v21.0/${params.phoneNumberId}/messages`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${params.accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          messaging_product: 'whatsapp',
-          recipient_type: 'individual',
-          to: params.toPhone,
-          type: 'text',
-          text: { body: fallbackText },
-        }),
-      }
-    );
-    const dataText = await resText.json();
-    return {
-      messageId: dataText?.messages?.[0]?.id || null,
-      formattedText: fallbackText,
-    };
-  } catch (err) {
-    console.error('[WhatsApp Fallback Error]:', err);
-    return { messageId: null, formattedText: fallbackText };
-  }
-}
-
 async function processMessage(
   message: WhatsAppMessage,
   contact: { profile: { name: string }; wa_id: string },
@@ -818,6 +467,21 @@ async function processMessage(
 
   if (message.type === 'reaction') {
     await handleReaction(message, conversation.id, contactRecord.id);
+    return;
+  }
+
+  // Reserve the Meta ID before inserting history or executing any business effect.
+  // An uncertain/crashed receipt is intentionally not replayed automatically.
+  const { error: receiptError } = await supabaseAdmin()
+    .from('whatsapp_inbound_receipts')
+    .insert({
+      account_id: accountId,
+      meta_message_id: message.id,
+      payload: message,
+    });
+  if (receiptError?.code === '23505') return;
+  if (receiptError) {
+    console.error('[webhook] Unable to reserve inbound receipt:', receiptError);
     return;
   }
 
@@ -899,14 +563,9 @@ async function processMessage(
   await flagBroadcastReplyIfAny(accountId, contactRecord.id);
 
   // ============================================================
-  // ⚡ PEDIDO VINDO DO SITE (laempanadas.com.br)
-  // ============================================================
-  const siteOrder = parseWebsiteOrder(contentText || '');
-
-  // ============================================================
   // 🥟 PEDIDO POR TEXTO LIVRE NO WHATSAPP
   // ============================================================
-  if (!order && !siteOrder && (contentText || message.text?.body)) {
+  if (!order && (contentText || message.text?.body)) {
     try {
       const textOrderResult = await processFreeTextOrderInbound({
         supabase: supabaseAdmin(),
@@ -921,6 +580,10 @@ async function processMessage(
         senderPhone,
         conversationId: conversation.id,
         inboundText: contentText ?? message.text?.body ?? '',
+        inboundMessageId: message.id,
+        inboundTimestamp: new Date(
+          Number(message.timestamp) * 1000
+        ).toISOString(),
         phoneNumberId,
         accessToken,
       });
@@ -948,6 +611,13 @@ async function processMessage(
       }
     } catch (err) {
       console.error('[webhook] Erro no fluxo de pedido por texto livre:', err);
+      // Never fall through to the LLM or a second payment path after a failed order turn.
+      await supabaseAdmin()
+        .from('conversations')
+        .update({ ai_autoreply_disabled: true })
+        .eq('id', conversation.id)
+        .eq('account_id', accountId);
+      return;
     }
   }
 
@@ -955,9 +625,9 @@ async function processMessage(
   // 🤖 AUTOMAÇÃO: CRIAR DEAL AUTOMATICAMENTE
   // ============================================================
   // Garante que existe um deal aberto para a conversa quando é mensagem comum.
-  // Pedidos de catálogo (order), site (siteOrder) e texto livre gerenciam seus
+  // Pedidos de catálogo e texto livre (inclusive mensagens do site) gerenciam seus
   // próprios deals com os dados completos (itens, total, endereço).
-  if (!order && !siteOrder && !hasOrderIntent(contentText || '')) {
+  if (!order && !hasOrderIntent(contentText || '')) {
     try {
       await ensureAutoDealForConversation(supabaseAdmin(), {
         accountId,
@@ -971,256 +641,8 @@ async function processMessage(
     }
   }
 
-  if (siteOrder && siteOrder.total > 0) {
-    console.log(
-      '[webhook] Processando pedido do site. Total:',
-      siteOrder.total
-    );
-
-    const externalRef = `SITE-${Date.now()}-${contactRecord.id.substring(0, 5)}`;
-
-    const paymentResult = await createPaymentLink({
-      items: siteOrder.items,
-      externalReference: externalRef,
-      payerName: siteOrder.cliente,
-      payerPhone: senderPhone,
-      deliveryKind: 'delivery',
-      deliveryAddress: siteOrder.endereco,
-    });
-
-    if (paymentResult.paymentUrl) {
-      // 🛡️ SALVA NA TABELA ORDERS PARA O CRON DE 15 MIN E O WEBHOOK DO MERCADO PAGO ENCONTRAREM
-      const { data: siteOrderRow, error: siteInsertErr } = await supabaseAdmin()
-        .from('orders')
-        .insert({
-          account_id: accountId,
-          contact_id: contactRecord.id,
-          external_reference: externalRef,
-          preference_id: paymentResult.preferenceId,
-          payment_url: paymentResult.paymentUrl,
-          total: siteOrder.total,
-          items: siteOrder.items,
-          delivery_address: siteOrder.endereco,
-          payer_phone: senderPhone,
-          payer_name: siteOrder.cliente,
-          status: 'pending',
-        })
-        .select('id')
-        .maybeSingle();
-      if (siteInsertErr) {
-        console.error(
-          '[webhook] Erro ao gravar pedido na tabela orders:',
-          siteInsertErr
-        );
-      } else {
-        console.log(
-          '[webhook] Pedido do site gravado na tabela orders:',
-          externalRef
-        );
-      }
-
-      // Card no pipeline "Pedidos Delivery", como os pedidos do catálogo.
-      await createDealForOrder(
-        supabaseAdmin(),
-        { accountId, userId: configOwnerUserId },
-        (siteOrderRow?.id as string | undefined) ?? null,
-        {
-          contactId: contactRecord.id,
-          customerName: siteOrder.cliente,
-          deliveryKind: 'delivery',
-          paymentMethod: 'mercado_pago',
-          total: siteOrder.total,
-          deliveryAddress: siteOrder.endereco,
-          paidOnline: false,
-          conversationId: conversation.id,
-          external_reference: externalRef,
-        }
-      );
-
-      // Preenche os campos personalizados do contato com os dados do pedido.
-      await saveOrderCustomFields(
-        supabaseAdmin(),
-        accountId,
-        contactRecord.id,
-        {
-          itens: siteOrder.items
-            .map((it) => `${it.quantity}x ${it.title}`)
-            .join(', '),
-          endereco: siteOrder.endereco,
-          formaPagamento: 'Mercado Pago',
-          nomeCliente: siteOrder.cliente,
-        }
-      );
-
-      const bodyText =
-        `Olá, *${siteOrder.cliente}*! Recebemos seu pedido com sucesso! 🥟✨\n\n` +
-        `📍 *Entrega:* ${siteOrder.endereco || 'A combinar'}\n` +
-        `💵 *Total:* ${siteOrder.totalFormatado}\n\n` +
-        `Clique no botão abaixo para pagar com segurança via Pix (aprovação imediata) ou Cartão:`;
-
-      // Envia via CTA ou Fallback garantido
-      const sendResult = await sendWhatsAppPaymentMessage({
-        phoneNumberId,
-        accessToken,
-        toPhone: senderPhone,
-        headerText: '🥟 La Empanadas',
-        bodyText,
-        footerText: 'Mercado Pago • Produção imediata após confirmação',
-        buttonText: '💳 Pagar Agora',
-        buttonUrl: paymentResult.paymentUrl,
-      });
-
-      if (sendResult.messageId) {
-        await supabaseAdmin().from('messages').insert({
-          conversation_id: conversation.id,
-          sender_type: 'bot',
-          content_type: 'interactive',
-          content_text: sendResult.formattedText,
-          message_id: sendResult.messageId,
-          status: 'sent',
-          created_at: new Date().toISOString(),
-        });
-      }
-    }
-
-    return;
-  }
-  // ============================================================
-  // 💳 ETAPA 4 — PAGAMENTO VIA AGENTE IA
-  // Detecta intenção de pagar e gera link do Mercado Pago
-  // ============================================================
-  if (!siteOrder && isPaymentConfirmation(contentText || '')) {
-    // Busca o total que a IA deixou marcado na conversa
-    const totalDoAgente = await extractTotalFromLastBotMessage(conversation.id);
-
-    if (totalDoAgente && totalDoAgente > 0) {
-      console.log(
-        '[agente] Pagamento solicitado. Total encontrado:',
-        totalDoAgente
-      );
-
-      // Gera um ID único para esse pedido
-      const externalRef = `AGENTE-${Date.now()}-${contactRecord.id.substring(0, 5)}`;
-
-      // Chama a mesma função que já funciona para o site
-      const paymentResult = await createPaymentLink({
-        items: [
-          {
-            title: 'Pedido La Empanadas (WhatsApp)',
-            quantity: 1,
-            unitPrice: totalDoAgente,
-          },
-        ],
-        externalReference: externalRef,
-        payerName: contactRecord.name || contactName,
-        payerPhone: senderPhone,
-        deliveryKind: 'delivery',
-        deliveryAddress: '',
-      });
-
-      if (paymentResult.paymentUrl) {
-        // Salva o pedido na tabela orders (igual ao fluxo do site)
-        const { data: agentOrderRow, error: agentInsertErr } =
-          await supabaseAdmin()
-            .from('orders')
-            .insert({
-              account_id: accountId,
-              contact_id: contactRecord.id,
-              external_reference: externalRef,
-              preference_id: paymentResult.preferenceId,
-              payment_url: paymentResult.paymentUrl,
-              total: totalDoAgente,
-              items: [
-                {
-                  title: 'Pedido WhatsApp',
-                  quantity: 1,
-                  unitPrice: totalDoAgente,
-                },
-              ],
-              delivery_address: '',
-              payer_phone: senderPhone,
-              payer_name: contactRecord.name || contactName,
-              status: 'pending',
-            })
-            .select('id')
-            .maybeSingle();
-        if (agentInsertErr) {
-          console.error('[agente] Erro ao gravar pedido:', agentInsertErr);
-        } else {
-          console.log('[agente] Pedido gravado na tabela orders:', externalRef);
-        }
-
-        // Card no pipeline "Pedidos Delivery", como os pedidos do catálogo.
-        await createDealForOrder(
-          supabaseAdmin(),
-          { accountId, userId: configOwnerUserId },
-          (agentOrderRow?.id as string | undefined) ?? null,
-          {
-            contactId: contactRecord.id,
-            customerName: contactRecord.name || contactName,
-            deliveryKind: 'delivery',
-            paymentMethod: 'mercado_pago',
-            total: totalDoAgente,
-            paidOnline: false,
-            conversationId: conversation.id,
-            external_reference: externalRef,
-          }
-        );
-
-        // Preenche os campos personalizados do contato com os dados do pedido.
-        // O agente não coleta itens detalhados nem endereço, então gravamos um
-        // resumo com o total e a forma/nome disponíveis.
-        await saveOrderCustomFields(
-          supabaseAdmin(),
-          accountId,
-          contactRecord.id,
-          {
-            itens: `Pedido WhatsApp - R$ ${totalDoAgente.toFixed(2).replace('.', ',')}`,
-            formaPagamento: 'Mercado Pago',
-            nomeCliente: contactRecord.name || contactName,
-          }
-        );
-
-        // Formata o total para exibir: 140 → "R$ 140,00"
-        const fmt = (v: number) => `R$ ${v.toFixed(2).replace('.', ',')}`;
-
-        // Monta o corpo da mensagem
-        const bodyText =
-          `Perfeito, *${contactRecord.name || contactName}*! 🥟\n\n` +
-          `💵 *Total: ${fmt(totalDoAgente)}*\n` +
-          `🚚 Frete: GRÁTIS\n\n` +
-          `Clique no botão abaixo para pagar com Pix (aprovação imediata) ou Cartão:`;
-
-        // Envia o botão de pagamento (CTA ou texto como fallback)
-        const sendResult = await sendWhatsAppPaymentMessage({
-          phoneNumberId,
-          accessToken,
-          toPhone: senderPhone,
-          headerText: '🥟 La Empanadas',
-          bodyText,
-          footerText: 'Mercado Pago • Produção imediata após confirmação',
-          buttonText: '💳 Pagar Agora',
-          buttonUrl: paymentResult.paymentUrl,
-        });
-
-        // Salva a mensagem enviada no histórico da conversa
-        if (sendResult.messageId) {
-          await supabaseAdmin().from('messages').insert({
-            conversation_id: conversation.id,
-            sender_type: 'bot',
-            content_type: 'interactive',
-            content_text: sendResult.formattedText,
-            message_id: sendResult.messageId,
-            status: 'sent',
-            created_at: new Date().toISOString(),
-          });
-        }
-
-        // Para aqui — não aciona a IA nessa rodada
-        return;
-      }
-    }
-  }
+  // Checkout is only authorized from a confirmed, catalog-grounded structured draft.
+  // Never charge a total extracted from AI prose or supplied by a website message.
   // ============================================================
   // 🔄 FLUXOS NORMAIS
   // ============================================================
@@ -1235,6 +657,7 @@ async function processMessage(
           text: contentText ?? '',
           total: order.total,
           items: order.items,
+          notes: order.notes,
           meta_message_id: message.id,
         }
       : interactiveReplyId
@@ -1243,6 +666,7 @@ async function processMessage(
             reply_id: interactiveReplyId,
             reply_title: contentText ?? '',
             meta_message_id: message.id,
+            context_message_id: message.context?.id,
           }
         : {
             kind: 'text',
@@ -1321,6 +745,7 @@ async function parseMessageContent(
   interactiveReplyId: string | null;
   order: {
     total: number;
+    notes?: string;
     items: Array<{
       retailer_id: string;
       name?: string;
@@ -1486,11 +911,12 @@ async function parseMessageContent(
         '🛒 Novo pedido pelo catálogo:',
         ...lines,
         `Total: ${fmt(total)}`,
+        ...(message.order?.text ? [`Observações: ${message.order.text}`] : []),
       ].join('\n');
       return {
         ...empty,
         contentText: summary,
-        order: { total, items },
+        order: { total, items, notes: message.order?.text },
       };
     }
 

@@ -1,29 +1,20 @@
-/**
- * src/lib/orders/text-order-flow.ts
- *
- * Gerencia o fluxo conversacional de pedidos por texto livre no WhatsApp:
- * 1. Processa itens enviados pelo cliente via parser determinístico.
- * 2. Solicita endereço (ou confirmação de endereço anterior) se não informado.
- * 3. Cria Deal no CRM ("Pedidos Delivery" -> "Novo Pedido") e pedido na tabela 'orders'.
- * 4. Gera link oficial do Mercado Pago (Pix/Cartão).
- * 5. Envia mensagem de confirmação com link do Mercado Pago e botão CTA.
- */
-
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { correctFlowCheckout } from '@/lib/flows/checkout-consent';
+import { hasOrderIntent } from './text-order-parser';
+import { loadOrderCatalog } from './order-catalog';
 import {
-  parseTextOrder,
-  extractAddressFromText,
-  isAddressConfirmation,
-} from './text-order-parser';
+  advanceOrderDraft,
+  orderSummary,
+  type OrderDraft,
+} from './order-draft';
 import { createOrderWithMercadoPago } from './create-order-with-mercado-pago';
 import {
-  STANDARD_DELIVERY_CUSTOM_FIELDS,
-  type StandardDeliveryCustomField,
-  type ContactOrderFieldsInput,
-  parseAddressComponents,
   getSavedCustomerAddress,
   saveContactOrderFields,
 } from './custom-fields';
+import { applyContactTag, TAG_HUMANO } from './create-order';
+import { sendTextMessage } from '@/lib/whatsapp/meta-api';
+import { sendWhatsAppPaymentMessage } from '@/lib/whatsapp/payment-message';
 
 export {
   STANDARD_DELIVERY_CUSTOM_FIELDS,
@@ -32,7 +23,7 @@ export {
   parseAddressComponents,
   getSavedCustomerAddress,
   saveContactOrderFields,
-};
+} from './custom-fields';
 
 export interface TextOrderFlowContext {
   supabase: SupabaseClient;
@@ -43,427 +34,331 @@ export interface TextOrderFlowContext {
   senderPhone: string;
   conversationId: string;
   inboundText: string;
+  inboundMessageId: string;
+  inboundTimestamp: string;
   phoneNumberId: string;
   accessToken: string;
 }
-
 export interface TextOrderFlowResult {
   handled: boolean;
-  outcome?: 'order_created' | 'address_requested';
+  outcome?:
+    | 'order_created'
+    | 'address_requested'
+    | 'confirmation_requested'
+    | 'needs_human'
+    | 'duplicate';
   error?: string;
 }
 
-/**
- * Envia mensagem do WhatsApp (botão CTA com fallback garantido de texto)
- */
-async function sendPaymentMessageWithFallback(params: {
-  phoneNumberId: string;
-  accessToken: string;
-  toPhone: string;
-  headerText: string;
-  bodyText: string;
-  footerText: string;
-  buttonText: string;
-  buttonUrl: string;
-}): Promise<{ messageId: string | null; formattedText: string }> {
-  const label = (params.buttonText || '💳 Pagar Agora').trim().substring(0, 20);
+async function handoff(ctx: TextOrderFlowContext): Promise<void> {
+  const { error } = await ctx.supabase
+    .from('conversations')
+    .update({ ai_autoreply_disabled: true })
+    .eq('id', ctx.conversationId)
+    .eq('account_id', ctx.accountId);
+  if (error) throw error;
+  await applyContactTag(ctx.supabase, ctx, ctx.contactRecord.id, TAG_HUMANO);
+}
 
-  // 1. Tenta CTA Url
+async function saveDraft(
+  ctx: TextOrderFlowContext,
+  draft: OrderDraft,
+  release = false
+): Promise<void> {
+  const { data, error } = await ctx.supabase
+    .from('order_drafts')
+    .update({
+      state: draft,
+      ...(release ? { processing_message_id: null } : {}),
+      updated_at: new Date().toISOString(),
+    })
+    .eq('account_id', ctx.accountId)
+    .eq('conversation_id', ctx.conversationId)
+    .eq('processing_message_id', ctx.inboundMessageId)
+    .select('id')
+    .single();
+  if (error || !data)
+    throw new Error(error?.message || 'Order turn lost its durable claim');
+}
+
+/** At-most-once outbound effect. Ambiguous sends remain reserved for reconciliation. */
+async function sendAndRecord(
+  ctx: TextOrderFlowContext,
+  effectKey: string,
+  text: string,
+  paymentUrl?: string
+): Promise<void> {
+  const db = ctx.supabase;
+  const { error: claimError } = await db.from('order_message_outbox').insert({
+    account_id: ctx.accountId,
+    conversation_id: ctx.conversationId,
+    effect_key: effectKey,
+    status: 'sending',
+    payload: { text, paymentUrl },
+  });
+  if (claimError?.code === '23505') return;
+  if (claimError) throw claimError;
   try {
-    const res = await fetch(
-      `https://graph.facebook.com/v21.0/${params.phoneNumberId}/messages`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${params.accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          messaging_product: 'whatsapp',
-          recipient_type: 'individual',
-          to: params.toPhone,
-          type: 'interactive',
-          interactive: {
-            type: 'cta_url',
-            header: { type: 'text', text: params.headerText },
-            body: { text: params.bodyText },
-            footer: { text: params.footerText },
-            action: {
-              name: 'cta_url',
-              parameters: { display_text: label, url: params.buttonUrl },
-            },
-          },
-        }),
-      }
-    );
-    const data = await res.json();
-    if (data?.messages?.[0]?.id) {
-      return {
-        messageId: data.messages[0].id,
-        formattedText: `${params.bodyText}\n[Botão: ${label}]`,
+    let record: {
+      messageId: string;
+      contentType: string;
+      formattedText: string;
+      interactivePayload?: unknown;
+    };
+    if (paymentUrl)
+      record = await sendWhatsAppPaymentMessage({
+        phoneNumberId: ctx.phoneNumberId,
+        accessToken: ctx.accessToken,
+        toPhone: ctx.senderPhone,
+        bodyText: text,
+        buttonUrl: paymentUrl,
+        buttonText: '💳 Pagar Agora',
+        lastCustomerMessageAt: ctx.inboundTimestamp,
+      });
+    else {
+      const age = Date.now() - Date.parse(ctx.inboundTimestamp);
+      if (!Number.isFinite(age) || age < 0 || age >= 24 * 60 * 60 * 1000)
+        throw new Error(
+          'Janela de atendimento encerrada; é necessário um template aprovado.'
+        );
+      const result = await sendTextMessage({
+        phoneNumberId: ctx.phoneNumberId,
+        accessToken: ctx.accessToken,
+        to: ctx.senderPhone,
+        text,
+      });
+      if (!result.messageId)
+        throw new Error(
+          'Envio sem confirmação da Meta; não repetir automaticamente.'
+        );
+      record = {
+        messageId: result.messageId,
+        contentType: 'text',
+        formattedText: text,
       };
     }
-  } catch (e) {
-    console.warn(
-      '[sendPaymentMessageWithFallback] CTA Button failed, trying text fallback:',
-      e
-    );
-  }
-
-  // 2. Fallback de texto
-  const fallbackText =
-    `${params.bodyText}\n\n` +
-    `👉 *Link para pagamento (Pix ou Cartão):*\n${params.buttonUrl}\n\n` +
-    `_${params.footerText}_`;
-
-  try {
-    const resText = await fetch(
-      `https://graph.facebook.com/v21.0/${params.phoneNumberId}/messages`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${params.accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          messaging_product: 'whatsapp',
-          recipient_type: 'individual',
-          to: params.toPhone,
-          type: 'text',
-          text: { body: fallbackText },
-        }),
-      }
-    );
-    const dataText = await resText.json();
-    return {
-      messageId: dataText?.messages?.[0]?.id || null,
-      formattedText: fallbackText,
-    };
-  } catch (err) {
-    console.error(
-      '[sendPaymentMessageWithFallback] Texto fallback falhou:',
-      err
-    );
-    return { messageId: null, formattedText: fallbackText };
-  }
-}
-
-/**
- * Envia mensagem simples de texto para o WhatsApp do cliente
- */
-async function sendSimpleTextMessage(params: {
-  phoneNumberId: string;
-  accessToken: string;
-  toPhone: string;
-  text: string;
-}): Promise<string | null> {
-  try {
-    const res = await fetch(
-      `https://graph.facebook.com/v21.0/${params.phoneNumberId}/messages`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${params.accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          messaging_product: 'whatsapp',
-          recipient_type: 'individual',
-          to: params.toPhone,
-          type: 'text',
-          text: { body: params.text },
-        }),
-      }
-    );
-    const data = await res.json();
-    return data?.messages?.[0]?.id || null;
-  } catch (err) {
-    console.error('[sendSimpleTextMessage] Erro ao enviar texto simples:', err);
-    return null;
-  }
-}
-
-/**
- * Salva mensagem enviada pelo bot na tabela 'messages'
- */
-async function recordBotMessage(
-  supabase: SupabaseClient,
-  conversationId: string,
-  text: string,
-  messageId: string | null
-): Promise<void> {
-  try {
-    await supabase.from('messages').insert({
-      conversation_id: conversationId,
+    // Save the receipt first: DB failure afterwards must never repeat an accepted Meta send.
+    const { error: receiptError } = await db
+      .from('order_message_outbox')
+      .update({ status: 'sent', message_id: record.messageId, payload: record })
+      .eq('account_id', ctx.accountId)
+      .eq('effect_key', effectKey);
+    if (receiptError) throw receiptError;
+    const { error: messageError } = await db.from('messages').insert({
+      conversation_id: ctx.conversationId,
       sender_type: 'bot',
-      content_type: 'text',
-      content_text: text,
-      message_id: messageId,
+      content_type: record.contentType,
+      content_text: record.formattedText,
+      interactive_payload: record.interactivePayload ?? null,
+      message_id: record.messageId,
       status: 'sent',
-      created_at: new Date().toISOString(),
     });
-  } catch (err) {
-    console.error('[recordBotMessage] Erro ao registrar mensagem do bot:', err);
+    if (messageError) throw messageError;
+  } catch (error) {
+    await db
+      .from('order_message_outbox')
+      .update({ status: 'uncertain' })
+      .eq('account_id', ctx.accountId)
+      .eq('effect_key', effectKey);
+    throw error;
   }
 }
 
-/**
- * Orquestrador principal do fluxo de pedidos por texto livre.
- */
 export async function processFreeTextOrderInbound(
   ctx: TextOrderFlowContext
 ): Promise<TextOrderFlowResult> {
-  const {
-    supabase,
-    accountId,
-    userId,
-    contactRecord,
-    contactName,
-    senderPhone,
-    conversationId,
-    inboundText,
-    phoneNumberId,
-    accessToken,
-  } = ctx;
-
-  const customerName = contactRecord.name || contactName || 'Cliente';
-
-  // ============================================================
-  // CASO 1: O cliente enviou uma mensagem com ITENS de pedido
-  // ============================================================
-  const parsedOrder = parseTextOrder(inboundText);
-
-  if (parsedOrder.hasItems && parsedOrder.total > 0) {
-    console.log('[text-order-flow] Itens reconhecidos no texto livre:', {
-      itemsCount: parsedOrder.items.length,
-      total: parsedOrder.total,
-    });
-
-    const itemsFormattedList = parsedOrder.items
-      .map((it) => `• ${it.quantity}x ${it.title}`)
-      .join('\n');
-
-    const deliveryAddress = parsedOrder.deliveryAddress;
-
-    // Se o cliente não colocou o endereço na mesma mensagem, verifica se possui endereço salvo
-    const savedAddress = await getSavedCustomerAddress(
-      supabase,
-      accountId,
-      contactRecord.id
-    );
-
-    // Se já veio endereço na mesma mensagem:
-    if (deliveryAddress && deliveryAddress.trim().length > 5) {
-      console.log(
-        '[text-order-flow] Pedido completo com endereço na mesma mensagem!'
+  const db = ctx.supabase;
+  let ownsTurn = false;
+  let catalogRunOwnsTurn = false;
+  try {
+    const { data: existing, error: readError } = await db
+      .from('order_drafts')
+      .select('state')
+      .eq('account_id', ctx.accountId)
+      .eq('conversation_id', ctx.conversationId)
+      .maybeSingle();
+    if (readError) throw readError;
+    if (!existing && !hasOrderIntent(ctx.inboundText))
+      return { handled: false };
+    if (!ctx.inboundMessageId)
+      throw new Error('Missing inbound Meta message ID');
+    const { data: activeFlow, error: flowError } = await db
+      .from('flow_runs')
+      .select(
+        'id, account_id, flow_id, user_id, contact_id, conversation_id, status, current_node_key, consent_revision, vars'
+      )
+      .eq('account_id', ctx.accountId)
+      .eq('conversation_id', ctx.conversationId)
+      .eq('status', 'active')
+      .maybeSingle();
+    if (flowError) throw flowError;
+    const catalogOwnsTurn = activeFlow && Array.isArray(activeFlow.vars?.itens);
+    catalogRunOwnsTurn = Boolean(catalogOwnsTurn);
+    // The new catalog run owns delivery/address/confirmation replies even when
+    // an old text draft remains persisted (including payment_created).
+    if (catalogOwnsTurn && !hasOrderIntent(ctx.inboundText))
+      return { handled: false };
+    const { data: conversation, error: conversationError } = await db
+      .from('conversations')
+      .select('assigned_agent_id, ai_autoreply_disabled, last_agent_message_at')
+      .eq('id', ctx.conversationId)
+      .eq('account_id', ctx.accountId)
+      .maybeSingle();
+    if (conversationError) throw conversationError;
+    const activeAgent =
+      conversation?.assigned_agent_id &&
+      conversation.last_agent_message_at &&
+      Date.now() - Date.parse(conversation.last_agent_message_at) <
+        30 * 60 * 1000;
+    if (
+      (conversation?.ai_autoreply_disabled || activeAgent) &&
+      !catalogOwnsTurn
+    )
+      return { handled: true, outcome: 'needs_human' };
+    // Do not steal item corrections from an active catalog order into a new text draft.
+    // The original cart remains intact; an attendant reviews the persisted inbound change.
+    if (catalogOwnsTurn) {
+      await correctFlowCheckout(db, activeFlow, ctx.inboundText);
+      await sendAndRecord(
+        ctx,
+        `turn:${ctx.inboundMessageId}`,
+        'Sua alteração foi preservada para revisão. Se o checkout já iniciou, um atendente reconciliará o pedido e o pagamento; não presumimos cancelamento.'
       );
-
-      const mpResult = await createOrderWithMercadoPago(
-        { accountId, userId },
-        {
-          contactId: contactRecord.id,
-          customerName,
-          deliveryKind: 'delivery',
-          deliveryAddress: deliveryAddress.trim(),
-          items: parsedOrder.items.map((it) => ({
-            title: it.title,
-            quantity: it.quantity,
-            unitPrice: it.unitPrice,
-          })),
-          conversationId,
-          payerPhone: senderPhone,
-        }
-      );
-
-      if (mpResult.ok && mpResult.link_mercado_pago) {
-        await saveContactOrderFields(supabase, accountId, contactRecord.id, {
-          itens: parsedOrder.items
-            .map((it) => `${it.quantity}x ${it.title}`)
-            .join(', '),
-          endereco: deliveryAddress.trim(),
-          formaPagamento: 'Mercado Pago',
-          nomeCliente: customerName,
-        });
-
-        const bodyText =
-          `🫔 *Pedido Confirmado!*\n\n` +
-          `${itemsFormattedList}\n\n` +
-          `💵 *Total: ${parsedOrder.totalFormatted}*\n` +
-          `📍 *Entrega:* ${deliveryAddress.trim()}\n\n` +
-          `💳 *Pague pelo link seguro do Mercado Pago (Pix ou Cartão):*\n` +
-          `${mpResult.link_mercado_pago}\n\n` +
-          `Assim que o pagamento for aprovado, seu pedido entra automaticamente em preparo!`;
-
-        const sendResult = await sendPaymentMessageWithFallback({
-          phoneNumberId,
-          accessToken,
-          toPhone: senderPhone,
-          headerText: '🥟 La Empanadas',
-          bodyText,
-          footerText: 'Mercado Pago • Produção imediata após confirmação',
-          buttonText: '💳 Pagar Agora',
-          buttonUrl: mpResult.link_mercado_pago,
-        });
-
-        await recordBotMessage(
-          supabase,
-          conversationId,
-          sendResult.formattedText,
-          sendResult.messageId
-        );
-        return { handled: true, outcome: 'order_created' };
-      }
+      return { handled: true, outcome: 'needs_human' };
     }
-
-    // Se NÃO tem endereço na mensagem, solicita o endereço:
-    await saveContactOrderFields(supabase, accountId, contactRecord.id, {
-      itens: parsedOrder.items
-        .map((it) => `${it.quantity}x ${it.title}`)
-        .join(', '),
+    const { data: claim, error: claimError } = await db.rpc(
+      'claim_order_turn',
+      {
+        p_account_id: ctx.accountId,
+        p_conversation_id: ctx.conversationId,
+        p_contact_id: ctx.contactRecord.id,
+        p_message_id: ctx.inboundMessageId,
+        p_text: ctx.inboundText,
+      }
+    );
+    if (claimError) throw claimError;
+    if (claim?.outcome === 'duplicate')
+      return { handled: true, outcome: 'duplicate' };
+    if (claim?.outcome !== 'claimed') {
+      await handoff(ctx);
+      return {
+        handled: true,
+        outcome: 'needs_human',
+        error: 'Outro turno está em processamento; atendimento necessário.',
+      };
+    }
+    ownsTurn = true;
+    const initial: OrderDraft = {
+      id: claim.id,
+      version: 0,
+      items: [],
+      unresolved: [],
+      stage: 'collecting',
+      total: 0,
+    };
+    const previous = claim.state?.id ? (claim.state as OrderDraft) : initial;
+    const catalog = await loadOrderCatalog(db, ctx.accountId);
+    const savedAddress = await getSavedCustomerAddress(
+      db,
+      ctx.accountId,
+      ctx.contactRecord.id
+    );
+    const transition = advanceOrderDraft(
+      previous,
+      ctx.inboundText,
+      catalog,
+      savedAddress
+    );
+    const draft = transition.draft;
+    await saveDraft(ctx, draft);
+    const customerName = ctx.contactRecord.name || ctx.contactName || 'Cliente';
+    await saveContactOrderFields(db, ctx.accountId, ctx.contactRecord.id, {
+      itens: orderSummary(draft),
+      endereco: draft.deliveryAddress,
       nomeCliente: customerName,
     });
-
-    let askAddressMessage: string;
-    if (savedAddress) {
-      askAddressMessage =
-        `🫔 *Pedido anotado:*\n` +
-        `${itemsFormattedList}\n\n` +
-        `💵 *Total: ${parsedOrder.totalFormatted}*\n\n` +
-        `Para onde devemos entregar?\n` +
-        `Por favor, envie seu *endereço completo* (Rua, Número e Bairro) ou responda *SIM* para entregar no endereço cadastrado:\n` +
-        `📍 _${savedAddress}_`;
-    } else {
-      askAddressMessage =
-        `🫔 *Pedido anotado:*\n` +
-        `${itemsFormattedList}\n\n` +
-        `💵 *Total: ${parsedOrder.totalFormatted}*\n\n` +
-        `Para onde devemos entregar? Por favor, envie seu *endereço completo* (Rua, Número e Bairro).`;
-    }
-
-    const sentId = await sendSimpleTextMessage({
-      phoneNumberId,
-      accessToken,
-      toPhone: senderPhone,
-      text: askAddressMessage,
-    });
-
-    await recordBotMessage(supabase, conversationId, askAddressMessage, sentId);
-    return { handled: true, outcome: 'address_requested' };
-  }
-
-  // ============================================================
-  // CASO 2: O cliente está respondendo ao pedido anotado com endereço
-  // ============================================================
-  const { data: lastBotMessages } = await supabase
-    .from('messages')
-    .select('content_text')
-    .eq('conversation_id', conversationId)
-    .eq('sender_type', 'bot')
-    .order('created_at', { ascending: false })
-    .limit(3);
-
-  const lastBotMsg = lastBotMessages?.find(
-    (m: { content_text?: string | null }) =>
-      m.content_text && m.content_text.includes('Pedido anotado:')
-  );
-
-  if (lastBotMsg && lastBotMsg.content_text) {
-    console.log(
-      '[text-order-flow] Detectada resposta a pedido anotado pendente de endereço!'
-    );
-
-    const pendingOrderParsed = parseTextOrder(lastBotMsg.content_text);
-
-    if (pendingOrderParsed.hasItems && pendingOrderParsed.total > 0) {
-      const savedAddress = await getSavedCustomerAddress(
-        supabase,
-        accountId,
-        contactRecord.id
+    if (transition.checkout) {
+      const reference = `TEXT-${draft.id}-${draft.version}`;
+      const result = await createOrderWithMercadoPago(
+        { accountId: ctx.accountId, userId: ctx.userId },
+        {
+          contactId: ctx.contactRecord.id,
+          customerName,
+          deliveryKind: 'delivery',
+          deliveryAddress: draft.deliveryAddress,
+          items: draft.items.map((item) => ({
+            id: item.id,
+            title: item.title,
+            quantity: item.quantity,
+            unitPrice: item.unitPrice,
+            description: item.notes,
+            requestedText: item.requestedText,
+          })),
+          conversationId: ctx.conversationId,
+          payerPhone: ctx.senderPhone,
+          externalReference: reference,
+        }
       );
-
-      let confirmedAddress: string | null = null;
-
-      if (isAddressConfirmation(inboundText) && savedAddress) {
-        confirmedAddress = savedAddress;
-      } else {
-        const candidate = extractAddressFromText(inboundText);
-        if (candidate) {
-          confirmedAddress = candidate;
-        } else if (
-          inboundText.trim().length >= 8 &&
-          !['oi', 'ola', 'boa noite', 'cardapio', 'menu'].includes(
-            inboundText.toLowerCase().trim()
-          )
-        ) {
-          confirmedAddress = inboundText.trim();
-        }
-      }
-
-      if (confirmedAddress) {
-        console.log('[text-order-flow] Endereço confirmado:', confirmedAddress);
-
-        const mpResult = await createOrderWithMercadoPago(
-          { accountId, userId },
-          {
-            contactId: contactRecord.id,
-            customerName,
-            deliveryKind: 'delivery',
-            deliveryAddress: confirmedAddress,
-            items: pendingOrderParsed.items.map((it) => ({
-              title: it.title,
-              quantity: it.quantity,
-              unitPrice: it.unitPrice,
-            })),
-            conversationId,
-            payerPhone: senderPhone,
-          }
+      if (!result.ok || !result.link_mercado_pago)
+        throw new Error(
+          result.error || 'Falha ao criar pagamento; atendimento necessário.'
         );
-
-        if (mpResult.ok && mpResult.link_mercado_pago) {
-          const itemsFormattedList = pendingOrderParsed.items
-            .map((it) => `• ${it.quantity}x ${it.title}`)
-            .join('\n');
-
-          await saveContactOrderFields(supabase, accountId, contactRecord.id, {
-            itens: pendingOrderParsed.items
-              .map((it) => `${it.quantity}x ${it.title}`)
-              .join(', '),
-            endereco: confirmedAddress,
-            formaPagamento: 'Mercado Pago',
-            nomeCliente: customerName,
-          });
-
-          const bodyText =
-            `🫔 *Pedido Confirmado!*\n\n` +
-            `${itemsFormattedList}\n\n` +
-            `💵 *Total: ${pendingOrderParsed.totalFormatted}*\n` +
-            `📍 *Entrega:* ${confirmedAddress}\n\n` +
-            `💳 *Pague pelo link seguro do Mercado Pago (Pix ou Cartão):*\n` +
-            `${mpResult.link_mercado_pago}\n\n` +
-            `Assim que o pagamento for aprovado, seu pedido entra automaticamente em preparo!`;
-
-          const sendResult = await sendPaymentMessageWithFallback({
-            phoneNumberId,
-            accessToken,
-            toPhone: senderPhone,
-            headerText: '🥟 La Empanadas',
-            bodyText,
-            footerText: 'Mercado Pago • Produção imediata após confirmação',
-            buttonText: '💳 Pagar Agora',
-            buttonUrl: mpResult.link_mercado_pago,
-          });
-
-          await recordBotMessage(
-            supabase,
-            conversationId,
-            sendResult.formattedText,
-            sendResult.messageId
-          );
-          return { handled: true, outcome: 'order_created' };
-        }
-      }
+      draft.stage = 'payment_created';
+      await saveDraft(ctx, draft);
+      await sendAndRecord(
+        ctx,
+        `payment:${reference}`,
+        `La Empanadas — Pedido ${result.orderId || result.dealId || draft.id}\nTotal: R$ ${draft.total.toFixed(2).replace('.', ',')}\nPague com segurança pelo Mercado Pago.`,
+        result.link_mercado_pago
+      );
+    } else {
+      if (draft.stage === 'needs_human' || draft.stage === 'payment_created')
+        await handoff(ctx);
+      const reply =
+        draft.stage === 'awaiting_address' && savedAddress
+          ? `${transition.reply}\nOu responda SIM para usar o endereço cadastrado: ${savedAddress}`
+          : transition.reply;
+      await sendAndRecord(ctx, `turn:${ctx.inboundMessageId}`, reply);
     }
+    const { error: eventError } = await db
+      .from('order_inbound_events')
+      .update({ status: 'completed' })
+      .eq('account_id', ctx.accountId)
+      .eq('meta_message_id', ctx.inboundMessageId);
+    if (eventError) throw eventError;
+    await saveDraft(ctx, draft, true);
+    return {
+      handled: true,
+      outcome: transition.checkout
+        ? 'order_created'
+        : draft.stage === 'needs_human' || draft.stage === 'payment_created'
+          ? 'needs_human'
+          : draft.stage === 'awaiting_address'
+            ? 'address_requested'
+            : 'confirmation_requested',
+    };
+  } catch (error) {
+    // Fail closed: no LLM/legacy payment fallback and no automatic uncertain-effect retry.
+    if (ownsTurn)
+      await db
+        .from('order_inbound_events')
+        .update({ status: 'failed' })
+        .eq('account_id', ctx.accountId)
+        .eq('meta_message_id', ctx.inboundMessageId);
+    try {
+      // Catalog ownership is exclusively changed by the consent RPC. A failed
+      // RPC/notice must not let this stale text worker hand off a newer run.
+      if (!catalogRunOwnsTurn) await handoff(ctx);
+    } catch (handoffError) {
+      console.error(
+        '[text-order-flow] handoff persistence failed',
+        handoffError
+      );
+    }
+    return {
+      handled: true,
+      outcome: 'needs_human',
+      error: error instanceof Error ? error.message : String(error),
+    };
   }
-
-  return { handled: false };
 }

@@ -230,6 +230,8 @@ export interface Message {
    * cue (renders with a "↩ button reply" affordance).
    */
   interactive_reply_id?: string;
+  /** Persisted outbound interactive object; validate its shape before rendering. */
+  interactive_payload?: unknown;
 }
 
 export type ReactionActor = 'customer' | 'agent';

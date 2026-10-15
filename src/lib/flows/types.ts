@@ -249,6 +249,14 @@ export interface FlowNodeRow {
 }
 
 export interface FlowRunRow {
+  /** Migration 038: monotonically advancing consent snapshot CAS. */
+  consent_revision?: number;
+  /** Server-owned consent evidence. Legacy rows have no confirmation authority. */
+  consent_prompt_snapshot?: Record<string, unknown> | null;
+  consent_prompt_node?: string | null;
+  consent_prompt_message?: string | null;
+  consent_confirmed_snapshot?: Record<string, unknown> | null;
+  consent_inbound_message?: string | null;
   id: string;
   flow_id: string;
   account_id: string;
@@ -305,10 +313,13 @@ export type ParsedInbound =
       reply_id: string;
       reply_title: string;
       meta_message_id: string;
+      /** Original Meta outbound ID, not the internal messages UUID. */
+      context_message_id?: string;
     }
   | {
       kind: 'catalog_order';
       text: string;
+      notes?: string;
       total: number;
       items: Array<{
         retailer_id: string;

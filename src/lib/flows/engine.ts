@@ -8,6 +8,14 @@
 
 import { supabaseAdmin } from './admin-client';
 import {
+  authorizeFlowCheckout,
+  confirmFlowCheckout,
+  correctFlowCheckout,
+  finishFlowCheckout,
+  transitionFlowRun,
+  writeFlowVars,
+} from './checkout-consent';
+import {
   createOrderDeal,
   type OrderDeliveryKind,
   type OrderPaymentMethod,
@@ -18,12 +26,16 @@ import {
   saveContactOrderFields,
 } from '@/lib/orders/text-order-flow';
 import { PEDIDO_EMPANADAS_FLOW } from './pedido-empanadas-flow';
-import { productNameFromCardapio } from '@/lib/cardapio/product-names';
+import { loadOrderCatalog } from '@/lib/orders/order-catalog';
+import { isCompleteDeliveryAddress } from '@/lib/orders/text-order-parser';
+import { groundCatalogOrder } from './catalog-order';
+import type { Item } from '@/lib/orders/create-order-with-mercado-pago';
 import {
   engineSendInteractiveButtons,
   engineSendInteractiveList,
   engineSendMedia,
   engineSendText,
+  engineSendPayment,
 } from './meta-send';
 import { decideFallback, resolveFallbackPolicy } from './fallback';
 import {
@@ -152,6 +164,51 @@ function interpolateVars(
   });
 }
 
+function normalizeButtonReply(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/_/g, ' ')
+    .replace(/^[^a-z0-9]+/, '')
+    .trim();
+}
+
+function hasGroundedCatalogOrder(vars: Record<string, unknown>): boolean {
+  if (
+    vars.catalog_order_version !== 1 ||
+    !Array.isArray(vars.itens) ||
+    !vars.itens.length
+  )
+    return false;
+  let totalCents = 0;
+  for (const raw of vars.itens) {
+    if (!raw || typeof raw !== 'object') return false;
+    const item = raw as Item;
+    if (
+      typeof item.id !== 'string' ||
+      !item.id ||
+      typeof item.title !== 'string' ||
+      !item.title.trim() ||
+      typeof item.description !== 'string' ||
+      !item.description.trim() ||
+      !Number.isSafeInteger(item.quantity) ||
+      item.quantity <= 0 ||
+      !Number.isFinite(item.unitPrice) ||
+      item.unitPrice <= 0
+    )
+      return false;
+    const cents = Math.round(item.unitPrice * 100);
+    if (!Number.isSafeInteger(cents) || cents <= 0) return false;
+    totalCents += cents * item.quantity;
+  }
+  return (
+    Number.isSafeInteger(totalCents) &&
+    typeof vars.total === 'number' &&
+    Math.round(vars.total * 100) === totalCents
+  );
+}
+
 function formatBRLNumber(value: number): string {
   return `R$ ${value.toFixed(2).replace('.', ',')}`;
 }
@@ -170,8 +227,7 @@ async function loadActiveRunForContact(
     .order('started_at', { ascending: false })
     .limit(1);
   if (error) {
-    console.error('[flows] loadActiveRunForContact error:', error.message);
-    return null;
+    throw new Error(`Active flow lookup failed: ${error.message}`);
   }
   const rows = (data as FlowRunRow[] | null) ?? [];
   return rows[0] ?? null;
@@ -187,8 +243,7 @@ async function loadFlow(
     .eq('id', flowId)
     .maybeSingle();
   if (error) {
-    console.error('[flows] loadFlow error:', error.message);
-    return null;
+    throw new Error(`Flow lookup failed: ${error.message}`);
   }
   return (data as FlowRow | null) ?? null;
 }
@@ -245,21 +300,24 @@ async function isDuplicateInbound(
   contactId: string,
   metaMessageId: string
 ): Promise<boolean> {
-  const { data: runs } = await db
+  const { data: runs, error: runsError } = await db
     .from('flow_runs')
     .select('id')
     .eq('account_id', accountId)
     .eq('contact_id', contactId);
+  if (runsError) throw new Error('Inbound deduplication runs unavailable');
   if (!runs?.length) return false;
   const runIds = runs.map((r) => (r as { id: string }).id);
 
-  const { count } = await db
+  const { count, error: eventsError } = await db
     .from('flow_run_events')
     .select('id', { count: 'exact', head: true })
     .in('flow_run_id', runIds)
     .eq('event_type', 'reply_received')
     .filter('payload->>meta_message_id', 'eq', metaMessageId);
-  return (count ?? 0) > 0;
+  if (eventsError || count === null)
+    throw new Error('Inbound deduplication events unavailable');
+  return count > 0;
 }
 
 // Meta retries webhooks, so the same cart can arrive twice. The run it
@@ -270,21 +328,24 @@ async function isOrderAlreadyStarted(
   contactId: string,
   metaMessageId: string
 ): Promise<boolean> {
-  const { data: runs } = await db
+  const { data: runs, error: runsError } = await db
     .from('flow_runs')
     .select('id')
     .eq('account_id', accountId)
     .eq('contact_id', contactId);
+  if (runsError) throw new Error('Inbound deduplication runs unavailable');
   if (!runs?.length) return false;
   const runIds = runs.map((r) => (r as { id: string }).id);
 
-  const { count } = await db
+  const { count, error: eventsError } = await db
     .from('flow_run_events')
     .select('id', { count: 'exact', head: true })
     .in('flow_run_id', runIds)
     .eq('event_type', 'started')
     .filter('payload->>meta_message_id', 'eq', metaMessageId);
-  return (count ?? 0) > 0;
+  if (eventsError || count === null)
+    throw new Error('Inbound deduplication events unavailable');
+  return count > 0;
 }
 
 export async function ensureActiveCatalogFlow(
@@ -475,12 +536,15 @@ async function sendButtonsAndSuspend(
     .eq('message_id', whatsapp_message_id)
     .maybeSingle();
 
-  await db
-    .from('flow_runs')
-    .update({
+  await transitionFlowRun(
+    db,
+    run,
+    {
+      current_node_key: node.node_key,
       last_prompt_message_id: (msg as { id: string } | null)?.id ?? null,
-    })
-    .eq('id', run.id);
+    },
+    whatsapp_message_id
+  );
 
   return { outcome: 'advanced', node_key: node.node_key };
 }
@@ -533,12 +597,15 @@ async function sendListAndSuspend(
     .eq('message_id', whatsapp_message_id)
     .maybeSingle();
 
-  await db
-    .from('flow_runs')
-    .update({
+  await transitionFlowRun(
+    db,
+    run,
+    {
+      current_node_key: node.node_key,
       last_prompt_message_id: (msg as { id: string } | null)?.id ?? null,
-    })
-    .eq('id', run.id);
+    },
+    whatsapp_message_id
+  );
 
   return { outcome: 'advanced', node_key: node.node_key };
 }
@@ -546,29 +613,26 @@ async function sendListAndSuspend(
 async function executeHandoff(
   db: AdminClient,
   run: FlowRunRow,
-  node: FlowNodeRow
+  node: Pick<FlowNodeRow, 'node_key' | 'config'>
 ): Promise<void> {
   const cfg = node.config as { assign_to?: string; note?: string };
+  if (
+    !(await transitionFlowRun(db, run, {
+      status: 'handed_off',
+      end_reason: 'handoff_node',
+      ...(cfg.assign_to ? { assigned_agent_id: cfg.assign_to } : {}),
+    }))
+  )
+    return;
   const interpolatedNote = cfg.note
     ? interpolateVars(cfg.note, run.vars)
     : undefined;
 
-  const convUpdate: Record<string, unknown> = {
-    status: 'pending',
-    updated_at: new Date().toISOString(),
-  };
-  if (cfg.assign_to) convUpdate.assigned_agent_id = cfg.assign_to;
-  if (run.conversation_id) {
-    await db
-      .from('conversations')
-      .update(convUpdate)
-      .eq('id', run.conversation_id);
-  }
+  // The RPC queues the conversation in the same transaction as the run CAS.
   await logEvent(db, run.id, 'handoff', node.node_key, {
     note: interpolatedNote ?? null,
     assigned_to: cfg.assign_to ?? null,
   });
-  await endRun(db, run.id, 'handed_off', 'handoff_node');
 }
 
 async function evaluateConditionNode(
@@ -611,18 +675,11 @@ async function evaluateConditionNode(
 
 async function endRun(
   db: AdminClient,
-  runId: string,
+  run: FlowRunRow,
   status: 'completed' | 'handed_off' | 'timed_out' | 'failed',
   reason: string
-): Promise<void> {
-  await db
-    .from('flow_runs')
-    .update({
-      status,
-      ended_at: new Date().toISOString(),
-      end_reason: reason,
-    })
-    .eq('id', runId);
+): Promise<boolean> {
+  return transitionFlowRun(db, run, { status, end_reason: reason });
 }
 
 // ============================================================
@@ -641,7 +698,7 @@ async function advanceFromNodeKey(
       await logEvent(db, run.id, 'error', null, {
         reason: 'next_node_key was null mid-advance',
       });
-      await endRun(db, run.id, 'failed', 'missing_next_node');
+      await endRun(db, run, 'failed', 'missing_next_node');
       return { outcome: 'completed' };
     }
     const node: FlowNodeRow | null = nodes.get(currentKey) ?? null;
@@ -649,9 +706,13 @@ async function advanceFromNodeKey(
       await logEvent(db, run.id, 'error', currentKey, {
         reason: 'node_not_found',
       });
-      await endRun(db, run.id, 'failed', 'node_not_found');
+      await endRun(db, run, 'failed', 'node_not_found');
       return { outcome: 'completed' };
     }
+    if (
+      !(await transitionFlowRun(db, run, { current_node_key: node.node_key }))
+    )
+      return { outcome: 'advanced' };
     await logEvent(db, run.id, 'node_entered', node.node_key, {
       node_type: node.node_type,
     });
@@ -663,13 +724,24 @@ async function advanceFromNodeKey(
     if (node.node_type === 'send_message') {
       const cfg = node.config as unknown as SendMessageNodeConfig;
       try {
-        const { whatsapp_message_id } = await engineSendText({
+        const sendArgs = {
           accountId: run.account_id,
           userId: run.user_id,
           conversationId: run.conversation_id!,
           contactId: run.contact_id!,
-          text: interpolateVars(cfg.text, run.vars),
-        });
+        };
+        const { whatsapp_message_id } =
+          node.node_key === 'link_pagamento'
+            ? await engineSendPayment({
+                ...sendArgs,
+                bodyText: `La Empanadas — Pedido ${run.vars.order_id}\nTotal: ${formatBRLNumber(Number(run.vars.total))}\nPague com segurança pelo Mercado Pago.`,
+                buttonUrl: String(run.vars.link_mercado_pago ?? ''),
+                effectKey: `flow:${run.id}:payment`,
+              })
+            : await engineSendText({
+                ...sendArgs,
+                text: interpolateVars(cfg.text, run.vars),
+              });
         await logEvent(db, run.id, 'message_sent', node.node_key, {
           node_type: 'send_message',
           whatsapp_message_id,
@@ -679,7 +751,16 @@ async function advanceFromNodeKey(
           reason: 'send_text_failed',
           detail: err instanceof Error ? err.message : String(err),
         });
-        await endRun(db, run.id, 'failed', 'send_text_failed');
+        if (node.node_key === 'link_pagamento') {
+          await executeHandoff(db, run, {
+            ...node,
+            config: {
+              note: 'Envio de pagamento bloqueado ou incerto; reconciliar outbox antes de reenviar.',
+            },
+          });
+          return { outcome: 'handed_off' };
+        }
+        await endRun(db, run, 'failed', 'send_text_failed');
         return { outcome: 'completed' };
       }
       currentKey = cfg.next_node_key;
@@ -710,7 +791,7 @@ async function advanceFromNodeKey(
           reason: 'send_media_failed',
           detail: err instanceof Error ? err.message : String(err),
         });
-        await endRun(db, run.id, 'failed', 'send_media_failed');
+        await endRun(db, run, 'failed', 'send_media_failed');
         return { outcome: 'completed' };
       }
       currentKey = cfg.next_node_key;
@@ -735,23 +816,20 @@ async function advanceFromNodeKey(
           .select('id')
           .eq('message_id', whatsapp_message_id)
           .maybeSingle();
-        await db
-          .from('flow_runs')
-          .update({
-            last_prompt_message_id: (msg as { id: string } | null)?.id ?? null,
-          })
-          .eq('id', run.id);
+        await transitionFlowRun(db, run, {
+          last_prompt_message_id: (msg as { id: string } | null)?.id ?? null,
+        });
       } catch (err) {
         await logEvent(db, run.id, 'error', node.node_key, {
           reason: 'collect_input_prompt_failed',
           detail: err instanceof Error ? err.message : String(err),
         });
-        await endRun(db, run.id, 'failed', 'collect_input_prompt_failed');
+        await endRun(db, run, 'failed', 'collect_input_prompt_failed');
         return { outcome: 'completed' };
       }
       const advanced = await advanceCurrentNodeKey(
         db,
-        run.id,
+        run,
         run.current_node_key,
         node.node_key
       );
@@ -772,7 +850,7 @@ async function advanceFromNodeKey(
           reason: 'condition_evaluation_failed',
           detail: err instanceof Error ? err.message : String(err),
         });
-        await endRun(db, run.id, 'failed', 'condition_evaluation_failed');
+        await endRun(db, run, 'failed', 'condition_evaluation_failed');
         return { outcome: 'completed' };
       }
       currentKey = branch === 'true' ? cfg.true_next : cfg.false_next;
@@ -814,16 +892,14 @@ async function advanceFromNodeKey(
         if (cfg.var_key) {
           const interpolated = interpolateVars(cfg.value, run.vars);
           const newVars = { ...run.vars, [cfg.var_key]: interpolated };
-          const { error } = await db
-            .from('flow_runs')
-            .update({ vars: newVars })
-            .eq('id', run.id);
-          if (!error) {
-            run.vars = newVars;
+          if (await writeFlowVars(db, run, newVars)) {
             await logEvent(db, run.id, 'node_entered', node.node_key, {
               var_key: cfg.var_key,
               var_value: interpolated,
             });
+          } else {
+            // A newer turn owns the run; never advance or hand off its state.
+            return { outcome: 'advanced' };
           }
         }
       } catch (err) {
@@ -831,6 +907,7 @@ async function advanceFromNodeKey(
           reason: 'set_var_failed',
           detail: err instanceof Error ? err.message : String(err),
         });
+        return { outcome: 'advanced' };
       }
       currentKey = cfg.next_node_key;
       continue;
@@ -843,8 +920,46 @@ async function advanceFromNodeKey(
       const cfg = node.config as unknown as CustomActionNodeConfig;
 
       let paymentLinkMissing = false;
+      let checkoutClaimId: string | null = null;
+      let checkoutFinishAttempted = false;
+      let checkoutEvidence: Record<string, unknown> = {};
       if (cfg.action === 'create_order_deal') {
+        if (
+          !hasGroundedCatalogOrder(run.vars) ||
+          run.vars.pedido_confirmado !== 'true'
+        ) {
+          await executeHandoff(db, run, {
+            ...node,
+            config: {
+              note: 'Pedido não validado ou sem confirmação explícita. Revisar antes de cobrar.',
+            },
+          });
+          return { outcome: 'handed_off' };
+        }
         try {
+          // Confirmation covers the displayed snapshot, not a changed or sold-out catalog.
+          const currentCatalog = await loadOrderCatalog(db, run.account_id);
+          const frozenItems = run.vars.itens as Item[];
+          if (
+            frozenItems.some((item) => {
+              const current = currentCatalog.find(
+                (entry) => entry.id === item.id
+              );
+              return (
+                !current ||
+                current.nome !== item.title ||
+                current.preco !== item.unitPrice
+              );
+            })
+          ) {
+            await executeHandoff(db, run, {
+              ...node,
+              config: {
+                note: 'Catálogo alterado após o resumo. Revisar disponibilidade/preços e obter nova confirmação antes de cobrar.',
+              },
+            });
+            return { outcome: 'handed_off' };
+          }
           const {
             nome,
             name,
@@ -885,6 +1000,15 @@ async function advanceFromNodeKey(
             validDelivery === 'delivery'
               ? String(endereco || address || '')
               : undefined;
+          if (isDelivery && !isCompleteDeliveryAddress(orderAddress ?? '')) {
+            await executeHandoff(db, run, {
+              ...node,
+              config: {
+                note: 'Endereço incompleto: obter Rua, Número e Bairro antes de cobrar.',
+              },
+            });
+            return { outcome: 'handed_off' };
+          }
 
           // One reference ties the Mercado Pago preference to the orders
           // row, which is how the MP webhook and the reminder cron find
@@ -909,32 +1033,14 @@ async function advanceFromNodeKey(
             (run.vars.order_id as string | undefined) ?? null;
           let tagName: string | undefined = undefined;
 
-          const rawItems = Array.isArray(itens) ? itens : [];
-          const mpItems =
-            rawItems.length > 0
-              ? rawItems.map((it: Record<string, unknown>) => ({
-                  title: String(
-                    it.name ||
-                      (it.retailer_id &&
-                        productNameFromCardapio(String(it.retailer_id))) ||
-                      it.retailer_id ||
-                      it.title ||
-                      'Empanada'
-                  ),
-                  quantity: Number(it.quantity || 1),
-                  unitPrice: Number(
-                    it.unit_price ||
-                      it.unitPrice ||
-                      orderTotal / (rawItems.length || 1)
-                  ),
-                }))
-              : [
-                  {
-                    title: 'Pedido La Empanadas',
-                    quantity: 1,
-                    unitPrice: orderTotal,
-                  },
-                ];
+          // Grounded lines are frozen at intake; never infer titles or prices here.
+          const mpItems = itens as Item[];
+
+          // Linearization point AFTER catalog/contact I/O, BEFORE CRM/gateway.
+          // The RPC locks the run and checks its exact snapshot and revision.
+          checkoutClaimId = await authorizeFlowCheckout(db, run);
+          if (!checkoutClaimId) return { outcome: 'advanced' };
+          checkoutEvidence = { external_reference: externalReference };
 
           if (isDelivery && orderTotal > 0 && !mpUrl) {
             try {
@@ -946,14 +1052,30 @@ async function advanceFromNodeKey(
                   deliveryKind: 'delivery',
                   deliveryAddress: orderAddress,
                   items: mpItems,
+                  externalReference,
                   conversationId: run.conversation_id ?? undefined,
                   payerPhone,
                 }
               );
 
-              if (mpRes.ok && mpRes.link_mercado_pago) {
+              checkoutEvidence = {
+                ...checkoutEvidence,
+                ...(mpRes.orderId ? { order_id: mpRes.orderId } : {}),
+                ...(mpRes.dealId ? { deal_id: mpRes.dealId } : {}),
+                ...(mpRes.link_mercado_pago
+                  ? { link_mercado_pago: mpRes.link_mercado_pago }
+                  : {}),
+              };
+
+              if (
+                mpRes.ok &&
+                mpRes.link_mercado_pago &&
+                mpRes.orderId &&
+                mpRes.dealId
+              ) {
                 mpUrl = mpRes.link_mercado_pago;
                 dealId = mpRes.dealId ?? null;
+                orderId = mpRes.orderId ?? null;
               } else {
                 console.error(
                   '[flows] Falha ao criar link Mercado Pago:',
@@ -966,7 +1088,7 @@ async function advanceFromNodeKey(
               console.error('[flows] Erro createOrderWithMercadoPago:', mpErr);
               paymentLinkMissing = true;
             }
-          } else if (!dealId) {
+          } else if (!isDelivery && !dealId) {
             // Criação do card no Pipeline CRM para Retirada (ou fallback)
             const result = await createOrderDeal(
               supabaseAdmin(),
@@ -976,6 +1098,7 @@ async function advanceFromNodeKey(
                 customerName,
                 deliveryKind: validDelivery,
                 paymentMethod: validPayment,
+                items: mpItems,
                 total: orderTotal,
                 deliveryAddress: orderAddress,
                 paidOnline: false,
@@ -986,11 +1109,40 @@ async function advanceFromNodeKey(
             dealId = result.dealId;
             tagName = result.tagName;
             orderId = result.orderId ?? null;
+            checkoutEvidence = {
+              ...checkoutEvidence,
+              deal_id: dealId,
+              order_id: orderId,
+            };
+            if (!orderId || !dealId)
+              throw new Error(
+                'Pickup requires a persisted canonical order and deal'
+              );
           }
 
-          if (isDelivery && !mpUrl) {
+          if (isDelivery && (!mpUrl || !orderId || !dealId)) {
             paymentLinkMissing = true;
           }
+
+          checkoutEvidence = {
+            ...checkoutEvidence,
+            ...(mpUrl ? { link_mercado_pago: mpUrl } : {}),
+            ...(dealId ? { deal_id: dealId } : {}),
+            ...(orderId ? { order_id: orderId } : {}),
+          };
+          // Preserve remote evidence even if a correction won ownership.
+          // Started requests cannot be cancelled by writing false consent.
+          checkoutFinishAttempted = true;
+          if (
+            !(await finishFlowCheckout(
+              db,
+              run,
+              checkoutClaimId,
+              checkoutEvidence,
+              !paymentLinkMissing
+            ))
+          )
+            return { outcome: 'handed_off' };
 
           // Salva os campos personalizados do contato (endereço, itens, forma de pagamento)
           if (run.contact_id) {
@@ -1006,15 +1158,6 @@ async function advanceFromNodeKey(
           }
 
           // Persiste as referências de deal e pedido nas variáveis da execução
-          const newVars = {
-            ...run.vars,
-            ...(mpUrl ? { link_mercado_pago: mpUrl } : {}),
-            ...(dealId ? { deal_id: dealId } : {}),
-            external_reference: externalReference,
-            ...(orderId ? { order_id: orderId } : {}),
-          };
-          await db.from('flow_runs').update({ vars: newVars }).eq('id', run.id);
-          run.vars = newVars;
 
           await logEvent(db, run.id, 'node_entered', node.node_key, {
             action_type: 'create_order_deal',
@@ -1026,16 +1169,31 @@ async function advanceFromNodeKey(
           });
         } catch (err) {
           console.error('[flows] create_order_deal error:', err);
+          if (checkoutClaimId && !checkoutFinishAttempted) {
+            try {
+              checkoutFinishAttempted = true;
+              await finishFlowCheckout(
+                db,
+                run,
+                checkoutClaimId,
+                {
+                  ...checkoutEvidence,
+                  error: err instanceof Error ? err.message : String(err),
+                },
+                false
+              );
+            } catch (evidenceError) {
+              console.error(
+                '[flows] blocking claim needs reconciliation:',
+                evidenceError
+              );
+            }
+          }
           await logEvent(db, run.id, 'error', node.node_key, {
             reason: 'create_order_deal_failed',
             detail: err instanceof Error ? err.message : String(err),
           });
-          if (
-            run.vars.tipo_entrega !== 'retirada' &&
-            !run.vars.link_mercado_pago
-          ) {
-            paymentLinkMissing = true;
-          }
+          paymentLinkMissing = true;
         }
       }
 
@@ -1046,25 +1204,10 @@ async function advanceFromNodeKey(
         await logEvent(db, run.id, 'error', node.node_key, {
           reason: 'payment_link_unavailable',
         });
-        try {
-          await engineSendText({
-            accountId: run.account_id,
-            userId: run.user_id,
-            conversationId: run.conversation_id!,
-            contactId: run.contact_id!,
-            text: 'Recebemos seu pedido, mas tivemos um problema ao gerar o link de pagamento. 😕\n\nUm atendente vai te enviar o link em instantes. Não é preciso refazer o pedido!',
-          });
-        } catch (sendErr) {
-          await logEvent(db, run.id, 'error', node.node_key, {
-            reason: 'payment_link_notice_send_failed',
-            detail:
-              sendErr instanceof Error ? sendErr.message : String(sendErr),
-          });
-        }
         await executeHandoff(db, run, {
           ...node,
           config: {
-            note: '⚠️ Link do Mercado Pago não foi gerado — envie o pagamento manualmente. Cliente: {{vars.nome}} | Total: {{vars.total_formatado}} | Endereço: {{vars.endereco}}',
+            note: 'Checkout bloqueado/incerto: reconciliar claim, pedido e gateway antes de qualquer cobrança ou reenvio. Cliente: {{vars.nome}} | Total: {{vars.total_formatado}}',
           },
         });
         return { outcome: 'handed_off' };
@@ -1078,7 +1221,7 @@ async function advanceFromNodeKey(
       await sendButtonsAndSuspend(db, run, node);
       const advanced = await advanceCurrentNodeKey(
         db,
-        run.id,
+        run,
         run.current_node_key,
         node.node_key
       );
@@ -1093,7 +1236,7 @@ async function advanceFromNodeKey(
       await sendListAndSuspend(db, run, node);
       const advanced = await advanceCurrentNodeKey(
         db,
-        run.id,
+        run,
         run.current_node_key,
         node.node_key
       );
@@ -1110,47 +1253,30 @@ async function advanceFromNodeKey(
     }
     if (node.node_type === 'end') {
       await logEvent(db, run.id, 'completed', node.node_key);
-      await endRun(db, run.id, 'completed', 'end_node');
+      await endRun(db, run, 'completed', 'end_node');
       return { outcome: 'completed' };
     }
     await logEvent(db, run.id, 'error', node.node_key, {
       reason: `unknown_node_type:${node.node_type}`,
     });
-    await endRun(db, run.id, 'failed', 'unknown_node_type');
+    await endRun(db, run, 'failed', 'unknown_node_type');
     return { outcome: 'completed' };
   }
   await logEvent(db, run.id, 'error', currentKey, {
     reason: 'advance_loop_safety_break',
   });
-  await endRun(db, run.id, 'failed', 'advance_loop_overflow');
+  await endRun(db, run, 'failed', 'advance_loop_overflow');
   return { outcome: 'completed' };
 }
 
 async function advanceCurrentNodeKey(
   db: AdminClient,
-  runId: string,
+  run: FlowRunRow,
   expectedOldKey: string | null,
   newKey: string
 ): Promise<boolean> {
-  let q = db
-    .from('flow_runs')
-    .update({
-      current_node_key: newKey,
-      last_advanced_at: new Date().toISOString(),
-    })
-    .eq('id', runId)
-    .eq('status', 'active');
-  if (expectedOldKey === null) {
-    q = q.is('current_node_key', null);
-  } else {
-    q = q.eq('current_node_key', expectedOldKey);
-  }
-  const { data, error } = await q.select('id');
-  if (error) {
-    console.error('[flows] advanceCurrentNodeKey error:', error.message);
-    return false;
-  }
-  return Array.isArray(data) && data.length > 0;
+  if (run.current_node_key !== expectedOldKey) return false;
+  return transitionFlowRun(db, run, { current_node_key: newKey });
 }
 
 // ============================================================
@@ -1195,7 +1321,14 @@ export async function dispatchInboundToFlows(
         reason: 'superseded_by_catalog_order',
         meta_message_id: input.message.meta_message_id,
       });
-      await endRun(db, activeRun.id, 'failed', 'superseded_by_catalog_order');
+      if (
+        !(await endRun(db, activeRun, 'failed', 'superseded_by_catalog_order'))
+      )
+        return {
+          consumed: true,
+          flow_run_id: activeRun.id,
+          outcome: 'advanced',
+        };
     } else if (activeRun) {
       const dupe = await isDuplicateInbound(
         db,
@@ -1211,7 +1344,7 @@ export async function dispatchInboundToFlows(
         };
       }
       const nodes = await loadAllNodes(db, activeRun.flow_id);
-      return handleReplyForActiveRun(db, activeRun, input.message, nodes);
+      return await handleReplyForActiveRun(db, activeRun, input.message, nodes);
     }
 
     const flow = await findEntryFlow(
@@ -1225,13 +1358,14 @@ export async function dispatchInboundToFlows(
       return { consumed: false, outcome: 'no_match' };
     }
     const nodes = await loadAllNodes(db, flow.id);
-    return startNewRun(db, flow, input, nodes);
+    return await startNewRun(db, flow, input, nodes);
   } catch (err) {
     console.error(
       '[flows] dispatchInboundToFlows threw:',
       err instanceof Error ? err.message : err
     );
-    return { consumed: false, outcome: 'no_match' };
+    // Storage uncertainty must not release this inbound to another order processor.
+    return { consumed: true, outcome: 'handed_off' };
   }
 }
 
@@ -1241,6 +1375,19 @@ async function handleReplyForActiveRun(
   message: ParsedInbound,
   nodes: Map<string, FlowNodeRow>
 ): Promise<DispatchInboundResult> {
+  const flow = await loadFlow(db, run.flow_id);
+  if (
+    flow?.trigger_type === 'catalog_order' &&
+    !hasGroundedCatalogOrder(run.vars)
+  ) {
+    await executeHandoff(db, run, {
+      node_key: run.current_node_key ?? 'legacy_catalog',
+      config: {
+        note: 'Pedido legado sem linhas validadas: revisar integralmente antes de cobrar.',
+      },
+    });
+    return { consumed: true, flow_run_id: run.id, outcome: 'handed_off' };
+  }
   await logEvent(db, run.id, 'reply_received', run.current_node_key, {
     meta_message_id: message.meta_message_id,
     reply_kind: message.kind,
@@ -1249,7 +1396,7 @@ async function handleReplyForActiveRun(
   });
 
   if (!run.current_node_key) {
-    await endRun(db, run.id, 'failed', 'active_run_missing_current_node');
+    await endRun(db, run, 'failed', 'active_run_missing_current_node');
     return {
       consumed: true,
       flow_run_id: run.id,
@@ -1259,10 +1406,26 @@ async function handleReplyForActiveRun(
 
   const currentNode = nodes.get(run.current_node_key) ?? null;
   if (!currentNode) {
-    await endRun(db, run.id, 'failed', 'current_node_not_found');
+    await endRun(db, run, 'failed', 'current_node_not_found');
     return { consumed: true, flow_run_id: run.id, outcome: 'no_match' };
   }
 
+  if (
+    flow?.trigger_type === 'catalog_order' &&
+    message.kind === 'text' &&
+    /\b(troca\w*|alter\w*|corrig\w*|cancel\w*|adicion\w*|remov\w*|sem|observa\w*)\b/.test(
+      normalizeButtonReply(message.text)
+    )
+  ) {
+    await correctFlowCheckout(db, run, message.text);
+    await executeHandoff(db, run, {
+      ...currentNode,
+      config: {
+        note: 'Cliente pediu revisão; texto integral preservado. Se checkout já iniciado, reconciliar claim e gateway; não presumir cancelamento.',
+      },
+    });
+    return { consumed: true, flow_run_id: run.id, outcome: 'handed_off' };
+  }
   let matched: string | null = null;
   if (
     message.kind === 'interactive_reply' &&
@@ -1276,22 +1439,19 @@ async function handleReplyForActiveRun(
   ) {
     // Permite que o cliente responda em texto simples aos botões (ex: "delivery", "retirar", "confirmar", etc.)
     const cfg = currentNode.config as unknown as SendButtonsNodeConfig;
-    const norm = message.text.trim().toLowerCase();
+    const norm = normalizeButtonReply(message.text);
     const hit = cfg.buttons?.find((b) => {
-      const bTitle = b.title.toLowerCase();
-      const bId = b.reply_id.toLowerCase();
+      const aliases: Record<string, string[]> = {
+        mesmo_endereco: ['sim', 'mesmo endereco', 'confirmar'],
+        delivery: ['delivery', 'entrega'],
+        retirada: ['retirada', 'retirar', 'retirar na loja'],
+        confirmar_pedido: ['confirmar', 'confirmar pedido', 'sim', 'confirmo'],
+        corrigir_pedido: ['corrigir', 'corrigir pedido'],
+      };
       return (
-        norm === bId ||
-        norm.includes(bId) ||
-        norm === bTitle ||
-        norm.includes(bTitle) ||
-        (bId === 'mesmo_endereco' &&
-          (norm.includes('confirm') ||
-            norm.includes('sim') ||
-            norm.includes('mesmo'))) ||
-        (bId === 'delivery' && norm.includes('entrega')) ||
-        (bId === 'retirada' &&
-          (norm.includes('retirar') || norm.includes('loja')))
+        norm === normalizeButtonReply(b.reply_id) ||
+        norm === normalizeButtonReply(b.title) ||
+        (aliases[b.reply_id] ?? []).includes(norm)
       );
     });
     if (hit) matched = hit.next_node_key;
@@ -1301,34 +1461,58 @@ async function handleReplyForActiveRun(
   ) {
     const cfg = currentNode.config as unknown as CollectInputNodeConfig;
     const captured = message.text.trim();
+    if (
+      flow?.trigger_type === 'catalog_order' &&
+      cfg.var_key === 'endereco' &&
+      !isCompleteDeliveryAddress(captured)
+    ) {
+      await engineSendText({
+        accountId: run.account_id,
+        userId: run.user_id,
+        conversationId: run.conversation_id!,
+        contactId: run.contact_id!,
+        text: 'Envie o endereço completo (Rua, Número e Bairro) antes de confirmar o pedido.',
+      });
+      return { consumed: true, flow_run_id: run.id, outcome: 'advanced' };
+    }
     if (captured.length > 0 && cfg.var_key) {
       const newVars = { ...run.vars, [cfg.var_key]: captured };
-      const { error: capErr } = await db
-        .from('flow_runs')
-        .update({
-          vars: newVars,
-          reprompt_count: 0,
-        })
-        .eq('id', run.id);
-      if (!capErr) {
-        run.vars = newVars;
+      if (await writeFlowVars(db, run, newVars)) {
         run.reprompt_count = 0;
         await logEvent(db, run.id, 'node_entered', currentNode.node_key, {
           captured_key: cfg.var_key,
           captured_length: captured.length,
         });
         matched = cfg.next_node_key;
+      } else {
+        return { consumed: true, flow_run_id: run.id, outcome: 'advanced' };
       }
     }
   }
 
   if (matched) {
+    const confirmationGate =
+      currentNode.node_type === 'send_buttons' &&
+      (currentNode.config as unknown as SendButtonsNodeConfig).buttons.some(
+        (button) =>
+          button.reply_id === 'confirmar_pedido' &&
+          button.next_node_key === matched
+      );
+    if (confirmationGate && !(await confirmFlowCheckout(db, run, message))) {
+      if (!run.consent_prompt_message) {
+        await executeHandoff(db, run, {
+          node_key: currentNode.node_key,
+          config: {
+            note: 'Resumo legado sem evidência de consentimento. Revisar o snapshot integral e obter nova confirmação antes de cobrar.',
+          },
+        });
+        return { consumed: true, flow_run_id: run.id, outcome: 'handed_off' };
+      }
+      return { consumed: true, flow_run_id: run.id, outcome: 'advanced' };
+    }
     if (run.reprompt_count !== 0) {
-      const { error } = await db
-        .from('flow_runs')
-        .update({ reprompt_count: 0 })
-        .eq('id', run.id);
-      if (!error) run.reprompt_count = 0;
+      if (!(await transitionFlowRun(db, run, { reprompt_count: 0 })))
+        return { consumed: true, flow_run_id: run.id, outcome: 'advanced' };
     }
     const outcome = await advanceFromNodeKey(db, run, matched, nodes);
     return {
@@ -1342,10 +1526,8 @@ async function handleReplyForActiveRun(
     (await loadFlow(db, run.flow_id))?.fallback_policy
   );
   const newReprompts = run.reprompt_count + 1;
-  await db
-    .from('flow_runs')
-    .update({ reprompt_count: newReprompts })
-    .eq('id', run.id);
+  if (!(await transitionFlowRun(db, run, { reprompt_count: newReprompts })))
+    return { consumed: true, flow_run_id: run.id, outcome: 'advanced' };
 
   const action = decideFallback({ policy, reprompt_count: newReprompts });
   await logEvent(db, run.id, 'fallback_fired', run.current_node_key, {
@@ -1380,19 +1562,13 @@ async function handleReplyForActiveRun(
     return { consumed: true, flow_run_id: run.id, outcome: 'fallback_fired' };
   }
   if (action.type === 'handoff') {
-    if (run.conversation_id) {
-      await db
-        .from('conversations')
-        .update({ status: 'pending', updated_at: new Date().toISOString() })
-        .eq('id', run.conversation_id);
-    }
-    await logEvent(db, run.id, 'handoff', run.current_node_key, {
-      reason: 'fallback_exhausted',
+    await executeHandoff(db, run, {
+      node_key: run.current_node_key!,
+      config: { note: 'fallback_exhausted' },
     });
-    await endRun(db, run.id, 'handed_off', 'fallback_exhausted');
     return { consumed: true, flow_run_id: run.id, outcome: 'handed_off' };
   }
-  await endRun(db, run.id, 'completed', 'fallback_exhausted_end');
+  await endRun(db, run, 'completed', 'fallback_exhausted_end');
   return { consumed: true, flow_run_id: run.id, outcome: 'completed' };
 }
 
@@ -1403,7 +1579,41 @@ async function startNewRun(
   nodes: Map<string, FlowNodeRow>
 ): Promise<DispatchInboundResult> {
   let seedVars: Record<string, unknown> = {};
+  let catalogError: string | null = null;
   if (input.message.kind === 'catalog_order') {
+    try {
+      const grounded = groundCatalogOrder(
+        input.message.items,
+        await loadOrderCatalog(db, input.accountId),
+        input.message.notes
+      );
+      const summary = grounded.items
+        .map(
+          (it) =>
+            `• ${it.quantity}x ${it.title} — ${formatBRLNumber(it.quantity * it.unitPrice)}`
+        )
+        .join('\n');
+      seedVars = {
+        catalog_order_version: 1,
+        itens: grounded.items,
+        itens_lista: summary,
+        itens_texto: summary,
+        total: grounded.total,
+        total_formatado: formatBRLNumber(grounded.total),
+        observacoes: 'Nenhuma',
+        catalog_inbound: input.message,
+      };
+      if (!hasGroundedCatalogOrder(seedVars))
+        throw new Error(
+          'Pedido com valores fora dos limites monetários seguros.'
+        );
+    } catch (error) {
+      catalogError = error instanceof Error ? error.message : String(error);
+      seedVars = {
+        catalog_inbound: input.message,
+        catalog_error: catalogError,
+      };
+    }
     // The WhatsApp profile name, so the flow doesn't have to ask for it.
     const { data: contact } = await db
       .from('contacts')
@@ -1420,17 +1630,7 @@ async function startNewRun(
     );
     const lastAddress = (savedAddress ?? '').trim();
     seedVars = {
-      itens_texto: input.message.text,
-      // Items only — the message templates show the total themselves.
-      itens_lista: input.message.items
-        .map(
-          (it) =>
-            `• ${it.quantity}x ${it.name ?? it.retailer_id} — ${formatBRLNumber(it.quantity * it.unit_price)}`
-        )
-        .join('\n'),
-      total: input.message.total,
-      total_formatado: formatBRLNumber(input.message.total),
-      itens: input.message.items,
+      ...seedVars,
       ...(contactName ? { nome: contactName } : {}),
       ...(lastAddress ? { ultimo_endereco: lastAddress } : {}),
     };
@@ -1458,7 +1658,17 @@ async function startNewRun(
     console.error('[flows] startNewRun insert error:', insErr.message);
     return { consumed: false, outcome: 'no_match' };
   }
+  if (!inserted) return { consumed: true, outcome: 'handed_off' };
   const run = inserted as FlowRunRow;
+  if (catalogError) {
+    await executeHandoff(db, run, {
+      node_key: 'catalog_review',
+      config: {
+        note: `Revisar pedido integral preservado em catalog_inbound: ${catalogError}`,
+      },
+    });
+    return { consumed: true, flow_run_id: run.id, outcome: 'handed_off' };
+  }
   await logEvent(db, run.id, 'started', flow.entry_node_id, {
     flow_id: flow.id,
     trigger_type: flow.trigger_type,

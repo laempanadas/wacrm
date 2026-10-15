@@ -121,6 +121,53 @@ function MediaImage({ url, alt }: { url: string; alt: string }) {
 // Recebe 'onPrimary' para ajustar dinamicamente as cores de badges e textos
 // de apoio, impedindo que textos de templates fiquem pretos ou da mesma cor do fundo.
 // ------------------------------------------------------------------
+function outboundPaymentCta(
+  message: Message
+): { body: string; url: string; label: string } | null {
+  if (message.sender_type === 'customer') return null;
+  const record = (value: unknown): Record<string, unknown> =>
+    typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  const payload = record(message.interactive_payload);
+  const body = record(payload.body);
+  const action = record(payload.action);
+  const parameters = record(action.parameters);
+  if (
+    payload.type !== 'cta_url' ||
+    action.name !== 'cta_url' ||
+    typeof body.text !== 'string' ||
+    typeof parameters.url !== 'string' ||
+    typeof parameters.display_text !== 'string'
+  )
+    return null;
+  if (
+    !body.text.trim() ||
+    !parameters.display_text.trim() ||
+    parameters.display_text.length > 20 ||
+    !/^https:\/\//i.test(parameters.url) ||
+    /[\s\u0000-\u001f\u007f]/.test(parameters.url)
+  )
+    return null;
+  try {
+    const url = new URL(parameters.url);
+    if (
+      url.protocol !== 'https:' ||
+      !url.hostname ||
+      url.username ||
+      url.password
+    )
+      return null;
+  } catch {
+    return null;
+  }
+  return {
+    body: body.text,
+    url: parameters.url,
+    label: parameters.display_text,
+  };
+}
+
 function MessageContent({
   message,
   onPrimary,
@@ -229,6 +276,24 @@ function MessageContent({
       );
 
     case 'interactive': {
+      const cta = outboundPaymentCta(message);
+      if (cta) {
+        return (
+          <div className="flex flex-col gap-2">
+            <p className="text-sm break-words whitespace-pre-wrap">
+              {cta.body}
+            </p>
+            <a
+              href={cta.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center justify-center rounded-lg border border-current/30 px-3 py-2 text-sm font-medium hover:bg-white/10"
+            >
+              {cta.label}
+            </a>
+          </div>
+        );
+      }
       return (
         <div className="flex flex-col gap-0.5">
           <span
@@ -237,8 +302,8 @@ function MessageContent({
               onPrimary ? 'text-primary-foreground/75' : 'text-muted-foreground'
             )}
           >
-            <CornerDownLeft className="h-3 w-3" />
-            Resposta de Botão
+            {!onPrimary && <CornerDownLeft className="h-3 w-3" />}
+            {onPrimary ? 'Mensagem Interativa' : 'Resposta de Botão'}
           </span>
           <p className="text-sm break-words whitespace-pre-wrap">
             {message.content_text || '[Resposta Interativa]'}

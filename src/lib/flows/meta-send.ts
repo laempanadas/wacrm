@@ -15,6 +15,174 @@ import {
   isRecipientNotAllowedError,
 } from '@/lib/whatsapp/phone-utils';
 import { supabaseAdmin } from './admin-client';
+import { sendWhatsAppPaymentMessage } from '@/lib/whatsapp/payment-message';
+
+interface SendPaymentEngineArgs {
+  accountId: string;
+  userId: string;
+  conversationId: string;
+  contactId: string;
+  bodyText: string;
+  buttonUrl: string;
+  buttonText?: string;
+  effectKey: string;
+}
+
+/** Durable at-most-once payment delivery. Uncertain claims require reconciliation. */
+export async function engineSendPayment(
+  args: SendPaymentEngineArgs
+): Promise<{ whatsapp_message_id: string }> {
+  const db = supabaseAdmin();
+  if (!args.effectKey.trim()) throw new Error('Payment effect key required');
+  const request = {
+    conversationId: args.conversationId,
+    contactId: args.contactId,
+    bodyText: args.bodyText,
+    buttonUrl: args.buttonUrl,
+    buttonText: args.buttonText ?? 'Pagar pedido',
+  };
+  const { error: claimError } = await db.from('order_message_outbox').insert({
+    account_id: args.accountId,
+    conversation_id: args.conversationId,
+    effect_key: args.effectKey,
+    status: 'sending',
+    payload: { request },
+  });
+  if (claimError) {
+    if (claimError.code !== '23505')
+      throw new Error(`Payment claim failed: ${claimError.message}`);
+    const { data: previous, error } = await db
+      .from('order_message_outbox')
+      .select('*')
+      .eq('account_id', args.accountId)
+      .eq('effect_key', args.effectKey)
+      .maybeSingle();
+    const storedRequest = previous?.payload?.request;
+    if (
+      error ||
+      !previous ||
+      !storedRequest ||
+      !Object.entries(request).every(
+        ([key, value]) => storedRequest[key] === value
+      )
+    )
+      throw new Error('Payment claim replay unavailable or input changed');
+    if (previous.status !== 'sent' || !previous.message_id)
+      throw new Error(
+        'Payment delivery pending or uncertain; reconcile before retry'
+      );
+    return { whatsapp_message_id: previous.message_id };
+  }
+  try {
+    const { data: conversation, error: conversationError } = await db
+      .from('conversations')
+      .select('id')
+      .eq('id', args.conversationId)
+      .eq('account_id', args.accountId)
+      .eq('contact_id', args.contactId)
+      .maybeSingle();
+    if (conversationError || !conversation)
+      throw new Error('Conversation not found for this account/contact');
+    const { data: contact, error: contactError } = await db
+      .from('contacts')
+      .select('id, phone')
+      .eq('id', args.contactId)
+      .eq('account_id', args.accountId)
+      .maybeSingle();
+    if (contactError || !contact?.phone)
+      throw new Error('Contact not found for this account');
+    const phone = sanitizePhoneForMeta(contact.phone);
+    if (!isValidE164(phone)) throw new Error('Invalid payment recipient phone');
+    // Never use conversations.last_message_at: it also includes our own sends.
+    const { data: inbound, error: inboundError } = await db
+      .from('messages')
+      .select('created_at')
+      .eq('conversation_id', args.conversationId)
+      .eq('sender_type', 'customer')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (inboundError || !inbound?.created_at)
+      throw new Error('Last customer timestamp unavailable');
+    const { data: config, error: configError } = await db
+      .from('whatsapp_config')
+      .select('*')
+      .eq('account_id', args.accountId)
+      .single();
+    if (configError || !config)
+      throw new Error('WhatsApp not configured for this account');
+    const receipt = await sendWhatsAppPaymentMessage({
+      phoneNumberId: config.phone_number_id,
+      accessToken: decrypt(config.access_token),
+      toPhone: phone,
+      bodyText: args.bodyText,
+      buttonUrl: args.buttonUrl,
+      buttonText: request.buttonText,
+      lastCustomerMessageAt: inbound.created_at,
+    });
+    if (!receipt.messageId) throw new Error('Payment delivery ambiguous');
+    // Save the known receipt before secondary writes; retain it even if they fail.
+    const { data: savedReceipt, error: receiptError } = await db
+      .from('order_message_outbox')
+      .update({
+        status: 'uncertain',
+        message_id: receipt.messageId,
+        payload: { request, receipt },
+      })
+      .eq('account_id', args.accountId)
+      .eq('effect_key', args.effectKey)
+      .select('effect_key')
+      .maybeSingle();
+    if (receiptError || !savedReceipt)
+      throw new Error('Payment receipt persistence failed');
+    const { error: messageError } = await db.from('messages').insert({
+      conversation_id: args.conversationId,
+      sender_type: 'bot',
+      content_type: receipt.contentType,
+      content_text: receipt.formattedText,
+      interactive_payload: receipt.interactivePayload ?? null,
+      message_id: receipt.messageId,
+      status: 'sent',
+    });
+    if (messageError) throw new Error('Payment message persistence failed');
+    const { data: updatedConversation, error: updateError } = await db
+      .from('conversations')
+      .update({
+        last_message_text: receipt.formattedText,
+        last_message_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', args.conversationId)
+      .eq('account_id', args.accountId)
+      .eq('contact_id', args.contactId)
+      .select('id')
+      .maybeSingle();
+    if (updateError || !updatedConversation)
+      throw new Error('Payment conversation persistence failed');
+    const { data: completed, error: completedError } = await db
+      .from('order_message_outbox')
+      .update({ status: 'sent' })
+      .eq('account_id', args.accountId)
+      .eq('effect_key', args.effectKey)
+      .select('effect_key')
+      .maybeSingle();
+    if (completedError || !completed)
+      throw new Error('Payment completion persistence failed');
+    return { whatsapp_message_id: receipt.messageId };
+  } catch (error) {
+    const { error: markError } = await db
+      .from('order_message_outbox')
+      .update({ status: 'uncertain' })
+      .eq('account_id', args.accountId)
+      .eq('effect_key', args.effectKey);
+    if (markError)
+      throw new Error(
+        'Payment delivery failed and uncertainty could not be persisted; claim remains blocked',
+        { cause: error }
+      );
+    throw error;
+  }
+}
 
 // ------------------------------------------------------------
 // Flows-side Meta sender (interactive variants).

@@ -9,8 +9,9 @@
  *  - Usa `external_reference` (preferido) como chave de idempotência.
  *  - Se external_reference não for fornecido, tenta usar conversationId.
  *  - Se external_reference existir: tenta localizar order existente e retorna imediatamente.
- *  - Ao criar: usa upsert (onConflict: 'external_reference') quando possível para
- *    evitar duplicação em concorrência.
+ *  - Ao criar: ON CONFLICT(account_id,external_reference) DO NOTHING mantém
+ *    o snapshot canônico vencedor; falhas de persistência bloqueiam sucesso.
+ *  - Todo novo pedido recebe deal próprio, inclusive chamadas legadas sem chave.
  *
  * Requisitos:
  *  - Supabase: tabela `orders` com coluna `external_reference` (opcional).
@@ -111,6 +112,16 @@ export type OrderDeliveryKind = 'delivery' | 'retirada';
 export type OrderPaymentMethod =
   'pix' | 'cartao' | 'dinheiro' | 'mercado_pago' | 'na_retirada';
 
+/** Keep legacy text/unpriced lines readable, without synthesizing prices. */
+export interface OrderItemSnapshot {
+  id?: string;
+  title?: string;
+  name?: string;
+  quantity?: number;
+  unitPrice?: number;
+  description?: string;
+}
+
 export interface CreateOrderInput {
   contactId: string;
   customerName: string;
@@ -121,12 +132,16 @@ export interface CreateOrderInput {
   paidOnline?: boolean;
   conversationId?: string;
   external_reference?: string | null;
-  items?: string | Array<{ title?: string; name?: string; quantity?: number }>;
+  items?: string | OrderItemSnapshot[];
+  observations?: string;
   /**
    * Only create the deal + tag. For callers that write their own `orders`
    * row (the catalog order flow), so the order isn't recorded twice.
    */
   skipOrderRecord?: boolean;
+  /** The caller holds a durable checkout claim and owns order persistence.
+   * Always insert a dedicated deal; never adopt an open conversation deal. */
+  checkoutOwned?: boolean;
 }
 
 export interface CreateOrderResult {
@@ -172,6 +187,9 @@ export function buildOrderNotes(input: {
   deliveryKind: OrderDeliveryKind;
   paymentMethod?: OrderPaymentMethod;
   deliveryAddress?: string;
+  items?: CreateOrderInput['items'];
+  total?: number;
+  observations?: string;
 }): string {
   const lines = [
     `Tipo: ${deliveryKindLabel(input.deliveryKind)}`,
@@ -182,7 +200,59 @@ export function buildOrderNotes(input: {
       `Endereço: ${input.deliveryAddress?.trim() || '(não informado)'}`
     );
   }
+  if (typeof input.items === 'string') {
+    lines.push('Itens:', input.items);
+  } else if (Array.isArray(input.items)) {
+    lines.push(
+      'Itens:',
+      ...input.items.map(
+        (item) =>
+          `${item.quantity ?? 1}x ${item.title ?? item.name ?? 'Item'}${item.id ? ` [${item.id}]` : ''}${item.unitPrice !== undefined ? ` - R$ ${item.unitPrice.toFixed(2)}` : ''}${item.description ? ` — ${item.description}` : ''}`
+      )
+    );
+  }
+  if (input.observations) lines.push(`Observações: ${input.observations}`);
+  if (input.total !== undefined)
+    lines.push(`Total: R$ ${input.total.toFixed(2)}`);
   return lines.join('\n');
+}
+
+/** BRL cents, constrained by deals.value NUMERIC(12,2); never replace bad
+ * monetary input with zero or silently round a fractional cent. */
+function moneyCents(value: number, label: string): number {
+  const cents = Math.round(value * 100);
+  const floatNoise = Number.EPSILON * Math.max(1, Math.abs(value * 100)) * 4;
+  if (
+    !Number.isFinite(value) ||
+    value < 0 ||
+    value > 9_999_999_999.99 ||
+    !Number.isSafeInteger(cents) ||
+    Math.abs(value * 100 - cents) > floatNoise
+  ) {
+    throw new Error(`Invalid order ${label}`);
+  }
+  return cents;
+}
+
+function validateOrderAmounts(input: CreateOrderInput): void {
+  const totalCents = moneyCents(input.total, 'total');
+  if (!Array.isArray(input.items)) return;
+  let sum = 0;
+  let fullyPriced = input.items.length > 0;
+  for (const item of input.items) {
+    const quantity = item.quantity ?? 1;
+    if (!Number.isSafeInteger(quantity) || quantity <= 0)
+      throw new Error('Invalid order item quantity');
+    if (item.unitPrice === undefined) {
+      fullyPriced = false;
+      continue;
+    }
+    sum += moneyCents(item.unitPrice, 'item price') * quantity;
+    if (!Number.isSafeInteger(sum)) throw new Error('Invalid order item total');
+  }
+  // Legacy unpriced lines/text keep their supplied total; no guessed pricing.
+  if (fullyPriced && sum !== totalCents)
+    throw new Error('Order total does not match items');
 }
 
 // Supabase admin singleton (service role)
@@ -195,6 +265,65 @@ function supabaseAdmin() {
     );
   }
   return _adminClient!;
+}
+
+function validId(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function assertCanonicalIdentity(
+  order: Record<string, unknown> | null,
+  ctx: { accountId: string },
+  contactId: string
+): asserts order is Record<string, unknown> & {
+  id: string;
+  contact_id: string;
+} {
+  if (
+    !order ||
+    !validId(order.id) ||
+    order.account_id !== ctx.accountId ||
+    order.contact_id !== contactId
+  )
+    throw new Error('Canonical order identity does not match account/contact');
+}
+
+async function canonicalOrderResult(
+  supabase: SupabaseClient,
+  ctx: { accountId: string; userId: string },
+  order: Record<string, unknown> | null,
+  contactId: string
+): Promise<CreateOrderResult> {
+  assertCanonicalIdentity(order, ctx, contactId);
+  if (!validId(order.deal_id))
+    throw new Error('Canonical order has no deal id');
+  const { data: deal, error } = await supabase
+    .from('deals')
+    .select('id, account_id, contact_id, pipeline_id, stage_id')
+    .eq('account_id', ctx.accountId)
+    .eq('contact_id', contactId)
+    .eq('id', order.deal_id)
+    .maybeSingle();
+  if (error) throw error;
+  if (
+    !deal ||
+    deal.id !== order.deal_id ||
+    deal.account_id !== ctx.accountId ||
+    deal.contact_id !== contactId ||
+    !validId(deal.pipeline_id) ||
+    !validId(deal.stage_id)
+  )
+    throw new Error('Canonical order deal identity was not persisted');
+  const tagName = selectStatusTagName(Boolean(order.paid_online));
+  await applyContactTag(supabase, ctx, contactId, tagName);
+  return {
+    dealId: order.deal_id,
+    pipelineId: deal.pipeline_id,
+    stageId: deal.stage_id,
+    tagName,
+    orderId: order.id,
+    orderAlreadyExisted: true,
+  };
 }
 
 /**
@@ -210,10 +339,16 @@ export async function createOrderDeal(
   ctx: { accountId: string; userId: string },
   input: CreateOrderInput
 ): Promise<CreateOrderResult> {
-  const supabase = supabaseClient ?? supabaseAdmin();
-
+  // Freeze caller data before the first await: notes and rows share a snapshot.
+  input = structuredClone(input);
   if (!ctx?.accountId) throw new Error('ctx.accountId is required');
   if (!input?.contactId) throw new Error('input.contactId is required');
+  if (input.checkoutOwned && !input.skipOrderRecord)
+    throw new Error(
+      'Checkout-owned deals require caller-owned order persistence'
+    );
+  validateOrderAmounts(input);
+  const supabase = supabaseClient ?? supabaseAdmin();
 
   // Normalize idempotency key
   const extRefRaw = (input.external_reference ?? input.conversationId) || null;
@@ -253,6 +388,7 @@ export async function createOrderDeal(
       const { data: foundOrders, error: findErr } = await supabase
         .from('orders')
         .select('*')
+        .eq('account_id', ctx.accountId)
         .eq('external_reference', externalReference)
         .limit(1);
 
@@ -260,94 +396,20 @@ export async function createOrderDeal(
 
       if (foundOrders && foundOrders.length > 0) {
         const found = foundOrders[0];
-        const tagName = selectStatusTagName(Boolean(found.paid_online));
-        // ensure tag is applied (idempotent)
-        try {
-          await applyContactTag(supabase, ctx, input.contactId, tagName);
-        } catch (tErr) {
-          console.warn(
-            'applyContactTag failed while returning existing order',
-            tErr
-          );
-        }
-
-        return {
-          dealId: found.deal_id,
-          pipelineId: pipeline.id,
-          stageId: stage.id,
-          tagName,
-          orderId: found.id,
-          orderAlreadyExisted: true,
-        };
+        return canonicalOrderResult(supabase, ctx, found, input.contactId);
       }
     } catch (e) {
-      console.warn(
-        'Failed to lookup existing order by external_reference — continuing to create',
-        e
-      );
+      // An unavailable lookup is not evidence that the canonical order is absent.
+      throw e;
     }
   }
 
-  // 4) Resolve or create deal (idempotent: checks for existing open deal for this conversation or contact)
+  // 4) Every new order gets a dedicated deal, including legacy/no-reference
+  // callers. Never look up/reuse an open conversation deal: ledger ownership
+  // may not yet be linked, and a lookup cannot atomically prove it is unowned.
+  // Tradeoff: webhook-created zero-value auto-deals remain separate. Idempotent
+  // reuse is permitted only via a persisted canonical order, above.
   let dealId: string | null = null;
-
-  try {
-    let existingDealQuery = supabase
-      .from('deals')
-      .select('id, value, stage_id')
-      .eq('account_id', ctx.accountId)
-      .eq('contact_id', input.contactId)
-      .eq('pipeline_id', pipeline.id)
-      .eq('status', 'open');
-
-    if (input.conversationId) {
-      existingDealQuery = existingDealQuery.eq(
-        'conversation_id',
-        input.conversationId
-      );
-    }
-
-    const { data: existingDeal } = await existingDealQuery
-      .limit(1)
-      .maybeSingle();
-
-    if (existingDeal?.id) {
-      // Reutiliza e atualiza o deal existente (ex.: deal criado no webhook com valor 0 ou deal anterior aberto)
-      const updatePayload: Record<string, unknown> = {
-        title: buildOrderTitle(input.customerName),
-        value:
-          Number.isFinite(input.total) && input.total > 0 ? input.total : 0,
-        notes: buildOrderNotes({
-          deliveryKind: input.deliveryKind,
-          paymentMethod: input.paymentMethod,
-          deliveryAddress: input.deliveryAddress,
-        }),
-        stage_id: stage.id,
-      };
-      if (input.conversationId) {
-        updatePayload.conversation_id = input.conversationId;
-      }
-
-      const { error: updateErr } = await supabase
-        .from('deals')
-        .update(updatePayload)
-        .eq('id', existingDeal.id);
-
-      if (updateErr) {
-        console.warn(
-          '[createOrderDeal] update existing deal failed, falling back to insert:',
-          updateErr
-        );
-      } else {
-        dealId = existingDeal.id as string;
-      }
-    }
-  } catch (findDealErr) {
-    console.warn(
-      '[createOrderDeal] failed to check existing deal:',
-      findDealErr
-    );
-  }
 
   if (!dealId) {
     const dealPayload: Record<string, unknown> = {
@@ -358,13 +420,9 @@ export async function createOrderDeal(
       contact_id: input.contactId,
       conversation_id: input.conversationId ?? null,
       title: buildOrderTitle(input.customerName),
-      value: Number.isFinite(input.total) && input.total > 0 ? input.total : 0,
+      value: input.total,
       currency: 'BRL',
-      notes: buildOrderNotes({
-        deliveryKind: input.deliveryKind,
-        paymentMethod: input.paymentMethod,
-        deliveryAddress: input.deliveryAddress,
-      }),
+      notes: buildOrderNotes(input),
       status: 'open',
     };
 
@@ -396,7 +454,9 @@ export async function createOrderDeal(
     contact_id: input.contactId,
     deal_id: dealId,
     external_reference: externalReference,
-    total_amount: Number.isFinite(input.total) ? input.total : 0,
+    total: input.total,
+    items: input.items ?? null,
+    total_amount: input.total,
     paid_online: Boolean(input.paidOnline),
     status: 'pending',
     delivery_kind: input.deliveryKind,
@@ -407,23 +467,31 @@ export async function createOrderDeal(
 
   // 6) Upsert or insert order
   let orderRecord: Record<string, unknown> | null = null;
+  let orderAlreadyExisted = false;
   if (externalReference) {
     try {
       const { data: upserted, error: upsertErr } = await supabase
         .from('orders')
-        .upsert(orderPayload, { onConflict: 'external_reference' })
+        .upsert(orderPayload, {
+          onConflict: 'account_id,external_reference',
+          ignoreDuplicates: true,
+        })
         .select('*')
         .maybeSingle();
 
-      if (upsertErr) {
-        console.warn('orders upsert error; attempting fetch', upsertErr);
+      if (upsertErr && upsertErr.code !== '23505') throw upsertErr;
+      if (upsertErr || !upserted) {
+        // DO NOTHING keeps the first canonical snapshot immutable. Read the
+        // winning row only within the same account; never fabricate success.
         const { data: fetched, error: fetchedErr } = await supabase
           .from('orders')
           .select('*')
+          .eq('account_id', ctx.accountId)
           .eq('external_reference', externalReference)
           .limit(1);
         if (fetchedErr) throw fetchedErr;
         orderRecord = fetched?.[0];
+        orderAlreadyExisted = Boolean(orderRecord);
       } else {
         orderRecord = upserted;
       }
@@ -444,6 +512,17 @@ export async function createOrderDeal(
     }
     orderRecord = inserted;
   }
+
+  if (!orderRecord?.id) throw new Error('Canonical order was not persisted');
+  assertCanonicalIdentity(orderRecord, ctx, input.contactId);
+
+  if (orderAlreadyExisted) {
+    return canonicalOrderResult(supabase, ctx, orderRecord, input.contactId);
+  }
+  if (orderRecord.deal_id !== dealId)
+    throw new Error(
+      'Canonical order deal identity does not match inserted deal'
+    );
 
   // 7) Apply tag
   const tagName = selectStatusTagName(Boolean(input.paidOnline));
@@ -502,17 +581,64 @@ export async function createDealForOrder(
   input: Omit<CreateOrderInput, 'skipOrderRecord'>
 ): Promise<CreateOrderResult | null> {
   try {
+    if (!ctx?.accountId || !input?.contactId)
+      throw new Error('Account/contact required');
+    if (orderId !== null) {
+      if (!validId(orderId)) throw new Error('Canonical order id required');
+      // Preflight BEFORE deal/tag effects, even with an admin DB client.
+      const { data: order, error } = await supabase
+        .from('orders')
+        .select('*')
+        .eq('account_id', ctx.accountId)
+        .eq('id', orderId)
+        .maybeSingle();
+      if (error) throw error;
+      assertCanonicalIdentity(order, ctx, input.contactId);
+      if (order.deal_id !== null)
+        return await canonicalOrderResult(
+          supabase,
+          ctx,
+          order,
+          input.contactId
+        );
+    }
     const result = await createOrderDeal(supabase, ctx, {
       ...input,
       skipOrderRecord: true,
     });
     if (orderId) {
-      const { error } = await supabase
+      const { data: linked, error } = await supabase
         .from('orders')
         .update({ deal_id: result.dealId })
-        .eq('id', orderId);
-      if (error)
-        console.error('[createDealForOrder] link deal_id failed:', error);
+        .eq('account_id', ctx.accountId)
+        .eq('id', orderId)
+        .eq('contact_id', input.contactId)
+        .is('deal_id', null)
+        .select('*')
+        .maybeSingle();
+      if (error) throw error;
+      if (!linked) {
+        // CAS lost: never replace the winner's deal with this provisional deal.
+        const { data: winner, error: readError } = await supabase
+          .from('orders')
+          .select('*')
+          .eq('account_id', ctx.accountId)
+          .eq('id', orderId)
+          .maybeSingle();
+        if (readError) throw readError;
+        if (!winner?.deal_id)
+          throw new Error('Order deal linkage was not persisted');
+        return await canonicalOrderResult(
+          supabase,
+          ctx,
+          winner,
+          input.contactId
+        );
+      }
+      assertCanonicalIdentity(linked, ctx, input.contactId);
+      if (linked.id !== orderId || linked.deal_id !== result.dealId)
+        throw new Error('Order deal linkage was not persisted');
+      return { ...result, orderId };
     }
     return result;
   } catch (err) {

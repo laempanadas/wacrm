@@ -6,10 +6,10 @@ import {
 import { sendPaymentConfirmationWhatsApp } from '@/lib/whatsapp/send-message';
 import { engineSendText } from '@/lib/flows/meta-send';
 import { getPaymentById } from '@/lib/payments/mercado-pago';
+import { paymentMatchesOrder } from '@/lib/payments/payment-identity';
 import { markContactPaymentConfirmed } from '@/lib/orders/create-order';
 import { saveContactOrderFields } from '@/lib/orders/custom-fields';
-import { moveDealToStage, PIPELINE_STAGES } from '@/lib/orders/pipeline-stages';
-import { updateDealWithPayment } from '@/lib/deals/auto-deal-lifecycle';
+import { resolveStage, PIPELINE_STAGES } from '@/lib/orders/pipeline-stages';
 import {
   ORDER_STATUS_PAID,
   extractPaymentId,
@@ -59,7 +59,7 @@ async function notifyCustomer(order: {
   lines.push('', 'Obrigado pela preferência! 🥟');
 
   try {
-    const { data: conversation } = await db
+    const { data: conversation, error: conversationError } = await db
       .from('conversations')
       .select('id, user_id')
       .eq('account_id', order.account_id)
@@ -67,6 +67,7 @@ async function notifyCustomer(order: {
       .order('updated_at', { ascending: false })
       .limit(1)
       .maybeSingle();
+    if (conversationError) throw conversationError;
     if (!conversation) throw new Error('conversation not found');
 
     await engineSendText({
@@ -85,11 +86,13 @@ async function notifyCustomer(order: {
   }
 
   try {
-    const { data: contact } = await db
+    const { data: contact, error: contactError } = await db
       .from('contacts')
       .select('phone')
       .eq('id', order.contact_id)
+      .eq('account_id', order.account_id)
       .maybeSingle();
+    if (contactError) throw contactError;
     if (!contact?.phone) throw new Error('contact phone not found');
     await sendPaymentConfirmationWhatsApp(
       db,
@@ -106,45 +109,50 @@ async function notifyCustomer(order: {
   }
 }
 
-/**
- * Moves the order's pipeline card to "Na Cozinha" (MVP: payment_approved).
- * Separate query for deal_id so an orders table without that column
- * can't break the payment confirmation. Best-effort.
- */
-async function moveDealToCookingStage(
+/** Payment follow-up must not use moveDealToStage: its legacy order sync
+ * overwrites paid with payment_approved and lets duplicate webhooks notify twice.
+ * Validate pipeline ownership, then update only the account-bound deal. */
+async function updatePaidDeal(
   db: SupabaseClient,
   accountId: string,
-  orderId: string
-): Promise<void> {
-  try {
-    const { data, error } = await db
-      .from('orders')
-      .select('deal_id')
-      .eq('id', orderId)
-      .maybeSingle();
-    const dealId = (data as { deal_id?: string | null } | null)?.deal_id;
-    if (error || !dealId) {
-      console.warn(
-        `[mp-webhook] Pedido ${orderId} sem deal vinculado — card não movido`,
-        error?.message ?? ''
-      );
-      return;
-    }
-    const result = await moveDealToStage(db, {
-      accountId,
-      dealId,
-      targetStage: PIPELINE_STAGES.COOKING,
-    });
-    if (result.moved) {
-      console.log(`[mp-webhook] Card ${dealId} movido para "Na Cozinha"`);
-    } else {
-      console.warn(
-        `[mp-webhook] Card do pedido ${orderId} não movido: ${result.reason}`
-      );
-    }
-  } catch (err) {
-    console.error('[mp-webhook] Erro ao mover card para "Na Cozinha":', err);
-  }
+  dealId: string,
+  paidAmount: number
+) {
+  const deal = await db
+    .from('deals')
+    .select('id, pipeline_id')
+    .eq('account_id', accountId)
+    .eq('id', dealId)
+    .maybeSingle();
+  if (deal.error) throw deal.error;
+  if (!deal.data) throw new Error('Linked deal missing');
+  const pipeline = await db
+    .from('pipelines')
+    .select('id')
+    .eq('account_id', accountId)
+    .eq('id', deal.data.pipeline_id)
+    .maybeSingle();
+  if (pipeline.error) throw pipeline.error;
+  if (!pipeline.data) throw new Error('Linked pipeline missing');
+  const stage = await resolveStage(
+    db,
+    pipeline.data.id,
+    PIPELINE_STAGES.COOKING
+  );
+  if (!stage) throw new Error('Cooking stage missing');
+  const saved = await db
+    .from('deals')
+    .update({
+      value: paidAmount,
+      stage_id: stage.id,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('account_id', accountId)
+    .eq('id', dealId)
+    .select('id')
+    .maybeSingle();
+  if (saved.error) throw saved.error;
+  if (!saved.data?.id) throw new Error('Deal payment update not persisted');
 }
 
 /** Tag "Confirmado" on the contact. Best-effort. */
@@ -155,11 +163,14 @@ async function tagContactConfirmed(
 ): Promise<void> {
   try {
     // tags.user_id is required; the contact's owner is the natural author.
-    const { data: contact } = await db
+    const { data: contact, error: contactError } = await db
       .from('contacts')
       .select('user_id')
       .eq('id', contactId)
+      .eq('account_id', accountId)
       .maybeSingle();
+    if (contactError) throw contactError;
+    if (!contact?.user_id) throw new Error('Contact owner missing');
     await markContactPaymentConfirmed(
       db,
       { accountId, userId: (contact?.user_id as string | undefined) ?? '' },
@@ -222,35 +233,99 @@ export async function POST(req: NextRequest) {
     }
 
     const externalReference = payment.externalReference;
-    if (!externalReference) {
-      console.warn(
-        '[mp-webhook] external_reference ausente no pagamento',
-        paymentId
+    if (!externalReference || !payment.preferenceId) {
+      return NextResponse.json(
+        {
+          error:
+            payment.identityError ??
+            'Unlinked payment; reconciliation required',
+        },
+        { status: 409 }
       );
-      return new Response('OK', { status: 200 });
     }
 
     const db = supabaseAdmin();
     const { data: order, error: orderError } = await db
       .from('orders')
       .select(
-        'id, total, status, contact_id, account_id, items, delivery_address, payer_name'
+        'id, total, status, contact_id, deal_id, account_id, preference_id, external_reference, items, delivery_address, payer_name'
       )
-      .eq('external_reference', externalReference)
-      .order('created_at', { ascending: false })
-      .limit(1)
+      .eq('preference_id', payment.preferenceId)
       .maybeSingle();
 
     if (orderError) {
       console.error('[mp-webhook] Erro ao buscar pedido:', orderError);
       return NextResponse.json({ error: 'Database error' }, { status: 500 });
     }
-    if (!order) {
+    if (
+      !order ||
+      !order.account_id ||
+      order.external_reference !== externalReference
+    ) {
       console.warn(
         '[mp-webhook] Pedido não encontrado para external_reference:',
         externalReference
       );
-      return new Response('OK', { status: 200 });
+      return NextResponse.json(
+        { error: 'Unknown payment binding; reconciliation required' },
+        { status: 409 }
+      );
+    }
+
+    // Check identity, exact amount and BRL BEFORE any status mutation,
+    // including rejections. Missing gateway data never defaults to order.total.
+    if (!paymentMatchesOrder(payment, order)) {
+      return NextResponse.json(
+        { error: 'Payment does not match order' },
+        { status: 409 }
+      );
+    }
+
+    // Service-role FK integrity is not implied by a payment preference.
+    // Corrupt/foreign links must fail BEFORE order status or contact/deal writes.
+    if (order.contact_id) {
+      const contact = await db
+        .from('contacts')
+        .select('id')
+        .eq('account_id', order.account_id)
+        .eq('id', order.contact_id)
+        .maybeSingle();
+      if (contact.error) throw contact.error;
+      if (!contact.data)
+        return NextResponse.json(
+          { error: 'Invalid contact ownership; reconciliation required' },
+          { status: 409 }
+        );
+    }
+    if (order.deal_id) {
+      const deal = await db
+        .from('deals')
+        .select('id, contact_id, pipeline_id')
+        .eq('account_id', order.account_id)
+        .eq('id', order.deal_id)
+        .maybeSingle();
+      if (deal.error) throw deal.error;
+      if (
+        !deal.data ||
+        (order.contact_id && deal.data.contact_id !== order.contact_id)
+      ) {
+        return NextResponse.json(
+          { error: 'Invalid deal ownership; reconciliation required' },
+          { status: 409 }
+        );
+      }
+      const pipeline = await db
+        .from('pipelines')
+        .select('id')
+        .eq('account_id', order.account_id)
+        .eq('id', deal.data.pipeline_id)
+        .maybeSingle();
+      if (pipeline.error) throw pipeline.error;
+      if (!pipeline.data)
+        return NextResponse.json(
+          { error: 'Invalid pipeline ownership; reconciliation required' },
+          { status: 409 }
+        );
     }
 
     // O Mercado Pago manda várias notificações por pagamento.
@@ -260,11 +335,27 @@ export async function POST(req: NextRequest) {
 
     if (payment.status !== 'approved') {
       if (payment.status === 'rejected' || payment.status === 'in_process') {
-        await db
+        const changed = await db
           .from('orders')
           .update({ status: payment.status })
+          .eq('account_id', order.account_id)
+          .eq('preference_id', payment.preferenceId)
+          .eq('external_reference', externalReference)
           .eq('id', order.id)
-          .neq('status', ORDER_STATUS_PAID);
+          .or(`status.is.null,status.neq.${ORDER_STATUS_PAID}`)
+          .select('id');
+        if (changed.error) throw changed.error;
+        if (!changed.data?.length) {
+          const current = await db
+            .from('orders')
+            .select('status')
+            .eq('account_id', order.account_id)
+            .eq('id', order.id)
+            .maybeSingle();
+          if (current.error) throw current.error;
+          if (!current.data || !isOrderPaid(current.data.status))
+            throw new Error('Order status update not persisted');
+        }
       }
       console.log(
         `[mp-webhook] Pedido ${order.id}: pagamento ${payment.rawStatus}`
@@ -272,20 +363,16 @@ export async function POST(req: NextRequest) {
       return new Response('OK', { status: 200 });
     }
 
-    const paidAmount = payment.paidAmount ?? Number(order.total);
-    if (Math.abs(paidAmount - Number(order.total)) > 0.01) {
-      // Não marca como pago; 200 para o Mercado Pago não reenviar sem fim.
-      console.error(
-        `[mp-webhook] Valor divergente no pedido ${order.id}: pago=${paidAmount} esperado=${order.total}`
-      );
-      return new Response('OK', { status: 200 });
-    }
+    const paidAmount = payment.paidAmount!;
 
     // Só quem efetivamente muda o status confirma ao cliente — duas
     // notificações simultâneas não geram duas mensagens.
     const { data: transitioned, error: updateError } = await db
       .from('orders')
       .update({ status: ORDER_STATUS_PAID })
+      .eq('account_id', order.account_id)
+      .eq('preference_id', payment.preferenceId)
+      .eq('external_reference', externalReference)
       .eq('id', order.id)
       .or(`status.is.null,status.neq.${ORDER_STATUS_PAID}`)
       .select('id');
@@ -301,34 +388,26 @@ export async function POST(req: NextRequest) {
       );
     }
     if (!transitioned?.length) {
+      const current = await db
+        .from('orders')
+        .select('status')
+        .eq('account_id', order.account_id)
+        .eq('id', order.id)
+        .maybeSingle();
+      if (current.error) throw current.error;
+      if (!current.data || !isOrderPaid(current.data.status))
+        throw new Error('Paid transition not persisted');
       return new Response('OK', { status: 200 });
     }
     console.log(`[mp-webhook] Pedido ${order.id} pago (${externalReference})`);
 
-    if (order.account_id) {
-      // Move deal para "Na Cozinha" quando pagamento é aprovado
-      await moveDealToCookingStage(db, order.account_id, order.id);
-
-      // Atualiza deal com valor pago (automação de ciclo de vida)
+    if (order.deal_id) {
       try {
-        const { data: dealIdRow } = await db
-          .from('orders')
-          .select('deal_id')
-          .eq('id', order.id)
-          .maybeSingle();
-        const dealId = (dealIdRow as { deal_id?: string | null } | null)
-          ?.deal_id;
-        if (dealId) {
-          await updateDealWithPayment(db, {
-            accountId: order.account_id,
-            dealId,
-            paidAmount,
-          });
-        }
-      } catch (err) {
+        await updatePaidDeal(db, order.account_id, order.deal_id, paidAmount);
+      } catch (error) {
         console.warn(
-          '[mp-webhook] failed to update deal with payment (non-blocking):',
-          err
+          '[mp-webhook] Payment persisted; deal follow-up needs reconciliation:',
+          error
         );
       }
     }

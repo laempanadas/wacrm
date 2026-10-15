@@ -14,6 +14,8 @@ export interface ParsedOrderItem {
   quantity: number;
   unitPrice: number;
   totalPrice: number;
+  notes?: string;
+  requestedText?: string;
 }
 
 export interface ParsedOrderResult {
@@ -23,6 +25,8 @@ export interface ParsedOrderResult {
   totalFormatted: string;
   deliveryAddress?: string;
   rawText: string;
+  unresolved?: string[];
+  requiresKitchenReview?: boolean;
 }
 
 function normalize(text: string): string {
@@ -53,7 +57,7 @@ const WORD_TO_NUMBER: Record<string, number> = {
   'uma duzia': 12,
 };
 
-interface ProductCatalogEntry {
+export interface ProductCatalogEntry {
   id: string;
   nome: string;
   preco: number;
@@ -396,19 +400,26 @@ const CATALOG_PRODUCTS: ProductCatalogEntry[] = [
   },
 ];
 
-// Lista achatada de todos os aliases ordenados por comprimento decrescente (mais específicos primeiro)
-interface FlatAlias {
-  alias: string;
-  product: ProductCatalogEntry;
+/** Alias dictionary only. The legacy prices are NEVER used by the live order flow. */
+export function aliasesForCatalogName(name: string): string[] {
+  const full = normalize(name);
+  const short = full.replace(/^empanadas?\s+(?:de\s+)?/, '');
+  const known = CATALOG_PRODUCTS.find(
+    (product) => normalize(product.nome) === full
+  );
+  const shorthand =
+    /^(carne|calabresa|escarola|palmito|frango|atum|espinafre)\b/.exec(
+      short
+    )?.[1];
+  return Array.from(
+    new Set([
+      full,
+      short,
+      ...(known?.aliases ?? []),
+      ...(shorthand ? [shorthand] : []),
+    ])
+  );
 }
-
-const FLAT_ALIASES: FlatAlias[] = [];
-for (const prod of CATALOG_PRODUCTS) {
-  for (const alias of prod.aliases) {
-    FLAT_ALIASES.push({ alias, product: prod });
-  }
-}
-FLAT_ALIASES.sort((a, b) => b.alias.length - a.alias.length);
 
 // Palavras-chave que indicam intenção de pedir
 const ORDER_VERB_PATTERNS = [
@@ -457,7 +468,7 @@ export function hasOrderIntent(text: string): boolean {
 
   // Se o parser determinístico já consegue extrair itens válidos do cardápio, tem intenção de pedido garantida!
   const parsed = parseTextOrder(text);
-  if (parsed.hasItems) {
+  if (parsed.hasItems || parsed.unresolved?.length) {
     return true;
   }
 
@@ -504,109 +515,167 @@ function rangesOverlap(
  * Extrai itens e quantidades, calculando o valor total oficial.
  */
 export function parseTextOrder(text: string): ParsedOrderResult {
-  if (!text || text.trim().length === 0) {
-    return {
-      hasItems: false,
-      items: [],
-      total: 0,
-      totalFormatted: 'R$ 0,00',
-      rawText: text,
-    };
-  }
+  return parseCatalogOrder(text, CATALOG_PRODUCTS);
+}
 
-  const normalized = normalize(text);
-  const itemsFound: Map<string, ParsedOrderItem> = new Map();
-  const matchedRanges: Array<{ start: number; end: number }> = [];
-
+/** Production callers must supply the tenant's live catalog, never mock prices. */
+export function parseCatalogOrder(
+  text: string,
+  catalog: ProductCatalogEntry[]
+): ParsedOrderResult {
+  const source = (text || '').normalize('NFC').trim();
+  const address = extractAddressFromText(source);
+  const addressStart = address ? source.indexOf(address) : -1;
+  const orderText = (
+    addressStart >= 0
+      ? source
+          .slice(0, addressStart)
+          .replace(
+            /(?:,?\s*(?:entregar|entrega|manda)\s*(?:na|no|em)?\s*)$/i,
+            ''
+          ) +
+        '\n' +
+        source.slice(addressStart + address!.length)
+      : source
+  ).trim();
+  const normalized = normalize(orderText);
+  const matches: Array<{
+    start: number;
+    end: number;
+    quantity: number;
+    product: ProductCatalogEntry;
+  }> = [];
+  const aliases = catalog
+    .flatMap((product) =>
+      product.aliases.map((alias) => ({ alias: normalize(alias), product }))
+    )
+    .sort((a, b) => b.alias.length - a.alias.length);
   const numPattern =
-    '(?:\\d+|um|uma|dois|duas|tres|quatro|cinco|seis|sete|oito|nove|dez|meia\\s*duzia|uma\\s*duzia)';
-
-  // Passada 1: busca padrão de quantidade explícita antes do alias (ex: "2 carne", "1 coca zero lata")
-  for (const { alias, product } of FLAT_ALIASES) {
-    const escapedAlias = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    '(?:\\d+|um|uma|dois|duas|tres|quatro|cinco|seis|sete|oito|nove|dez|onze|doze|meia\\s+duzia|uma\\s+duzia)';
+  for (const { alias, product } of aliases) {
+    const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const regex = new RegExp(
-      `\\b(${numPattern})\\s*(?:x\\s*)?(?:de\\s*)?(?:empanadas?\\s*(?:de\\s*)?)?${escapedAlias}\\b`,
+      `\\b(${numPattern})\\s*(?:x\\s*)?(?:de\\s*)?(?:empanadas?\\s*(?:de\\s*)?)?${escaped}\\b`,
       'gi'
     );
-
-    let match: RegExpExecArray | null;
-    while ((match = regex.exec(normalized)) !== null) {
-      const start = match.index;
-      const end = match.index + match[0].length;
-
-      // Ignora se sobrepõe com match mais longo já registrado
-      if (matchedRanges.some((r) => rangesOverlap(r, { start, end }))) {
+    for (const match of normalized.matchAll(regex)) {
+      const start = match.index!;
+      const end = start + match[0].length;
+      if (matches.some((range) => rangesOverlap(range, { start, end })))
         continue;
-      }
-
-      const rawQty = match[1].toLowerCase().trim();
-      const qty = (WORD_TO_NUMBER[rawQty] ?? parseInt(rawQty, 10)) || 1;
-
-      matchedRanges.push({ start, end });
-
-      const existing = itemsFound.get(product.id);
-      if (existing) {
-        existing.quantity += qty;
-        existing.totalPrice = Number(
-          (existing.quantity * existing.unitPrice).toFixed(2)
-        );
-      } else {
-        itemsFound.set(product.id, {
-          id: product.id,
-          title: product.nome,
-          quantity: qty,
-          unitPrice: product.preco,
-          totalPrice: Number((qty * product.preco).toFixed(2)),
-        });
-      }
+      const rawQty = match[1].trim();
+      matches.push({
+        start,
+        end,
+        quantity: WORD_TO_NUMBER[rawQty] ?? Number(rawQty),
+        product,
+      });
     }
   }
-
-  // Passada 2: Fallback sem quantidade explícita (ex: "quero carne", "manda calabresa")
-  if (itemsFound.size === 0) {
-    for (const { alias, product } of FLAT_ALIASES) {
-      if (['coca', 'queijo', 'bacon', 'frango'].includes(alias)) continue;
-      if (alias.length < 5) continue;
-
-      const escapedAlias = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const singleRegex = new RegExp(
-        `\\b(?:quero|manda|envia|me ve|vou querer)?\\s*(?:uma?\\s+)?${escapedAlias}\\b`,
-        'i'
-      );
-      const match = singleRegex.exec(normalized);
-      if (match) {
-        const start = match.index;
-        const end = match.index + match[0].length;
-        if (matchedRanges.some((r) => rangesOverlap(r, { start, end }))) {
-          continue;
-        }
-        matchedRanges.push({ start, end });
-        itemsFound.set(product.id, {
-          id: product.id,
-          title: product.nome,
-          quantity: 1,
-          unitPrice: product.preco,
-          totalPrice: product.preco,
-        });
-      }
+  // No-quantity fallback is restricted to explicit purchase verbs.
+  if (
+    matches.length === 0 &&
+    /\b(?:quero|manda|envia|me ve|vou querer)\b/.test(normalized) &&
+    !/\d/.test(normalized)
+  ) {
+    for (const { alias, product } of aliases) {
+      const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const match = new RegExp(`\\b${escaped}\\b`).exec(normalized);
+      if (!match) continue;
+      const start = match.index;
+      const end = start + match[0].length;
+      if (!matches.some((range) => rangesOverlap(range, { start, end })))
+        matches.push({ start, end, quantity: 1, product });
     }
   }
-
-  const items = Array.from(itemsFound.values());
-  const total = Number(
-    items.reduce((acc, it) => acc + it.totalPrice, 0).toFixed(2)
+  matches.sort((a, b) => a.start - b.start);
+  const quantityStarts = Array.from(
+    normalized.matchAll(
+      new RegExp(`\\b(${numPattern})\\s*(?:x\\s*)?(?:de\\s*)?(?=[a-z])`, 'gi')
+    )
+  )
+    .filter(
+      (match) =>
+        !matches.some(
+          (range) => match.index! > range.start && match.index! < range.end
+        )
+    )
+    .map((match) => match.index!);
+  const unresolved: string[] = [];
+  // Only explicit conversational framing may be discarded before the first span.
+  const firstSpan = Math.min(
+    matches[0]?.start ?? orderText.length,
+    quantityStarts[0] ?? orderText.length
   );
-  const totalFormatted = `R$ ${total.toFixed(2).replace('.', ',')}`;
-
-  const deliveryAddress = extractAddressFromText(text) || undefined;
-
+  if (firstSpan < orderText.length) {
+    const prefix = orderText.slice(0, firstSpan).trim();
+    const filler =
+      /^(?:[\s,;.!]+|(?:boa noite|bom dia|boa tarde|oi|ola|vou querer|quero|gostaria(?: de)?|manda|envia|me ve|na verdade|adicione|adicionar|acrescente|acrescentar|mais|e)\b\s*)/;
+    let remaining = normalize(prefix);
+    while (filler.test(remaining)) remaining = remaining.replace(filler, '');
+    if (remaining) unresolved.push(prefix);
+  }
+  for (const start of quantityStarts) {
+    if (matches.some((match) => match.start === start)) continue;
+    const end = quantityStarts.find((next) => next > start) ?? orderText.length;
+    unresolved.push(
+      orderText
+        .slice(start, end)
+        .replace(/[,\n;\s]+$/g, '')
+        .trim()
+    );
+  }
+  const items: ParsedOrderItem[] = matches.flatMap((match) => {
+    const next =
+      quantityStarts.find((start) => start > match.start) ?? orderText.length;
+    const suffix = orderText
+      .slice(match.end, next)
+      .replace(/[,;\n\s]+$/g, '')
+      .replace(/\s+e\s*$/i, '')
+      .trim();
+    if (
+      !Number.isSafeInteger(match.quantity) ||
+      match.quantity <= 0 ||
+      !Number.isFinite(match.product.preco) ||
+      match.product.preco <= 0
+    ) {
+      unresolved.push(orderText.slice(match.start, next).trim());
+      return [];
+    }
+    return [
+      {
+        id: match.product.id,
+        title: match.product.nome,
+        quantity: match.quantity,
+        unitPrice: match.product.preco,
+        totalPrice:
+          (Math.round(match.product.preco * 100) * match.quantity) / 100,
+        ...(suffix ? { notes: suffix } : {}),
+        requestedText: orderText.slice(match.start, match.end).trim(),
+      },
+    ];
+  });
+  const total =
+    items.reduce((sum, item) => sum + Math.round(item.totalPrice * 100), 0) /
+    100;
+  if (!items.length && !unresolved.length && address && orderText)
+    unresolved.push(orderText);
+  if (
+    !items.length &&
+    !unresolved.length &&
+    /^(?:quero|manda|envia|me ve|vou querer)\s+/.test(normalized) &&
+    !/\b(?:saber|ver|cardapio|menu|horario|preco|pix)\b/.test(normalized)
+  )
+    unresolved.push(orderText);
   return {
     hasItems: items.length > 0,
     items,
     total,
-    totalFormatted,
-    deliveryAddress,
+    totalFormatted: `R$ ${total.toFixed(2).replace('.', ',')}`,
+    deliveryAddress: address || undefined,
     rawText: text,
+    unresolved,
+    requiresKitchenReview: items.some((item) => Boolean(item.notes)),
   };
 }
 
@@ -620,11 +689,83 @@ export function extractAddressFromText(text: string): string | null {
 
   // Prefixos comuns de endereço no Brasil
   const addressPrefixMatch = trimmed.match(
-    /(?:entregar\s+(?:na|no|em)|endereco(?:\s+de\s+entrega)?(?:\s+e)?:\s*|manda\s+(?:na|no|em)\s+)?((?:rua|r\.|r|av\.|av|avenida|alameda|al\.|al|travessa|tv\.|tv|rodovia|rod\.|rod|estrada|quadra|qd\.|condominio|bairro)\s+[^,\n]+(?:,\s*\d+)?(?:[^.\n]*))/i
+    /\b(?:entregar\s+(?:na|no|em)\s+|endereco(?:\s+de\s+entrega)?(?:\s+e)?:\s*|manda\s+(?:na|no|em)\s+)?(\b(?:rua|r\.|r|av\.|av|avenida|alameda|al\.|al|travessa|tv\.|tv|rodovia|rod\.|rod|estrada|quadra|qd\.|condominio|bairro)\s+[^,\n]+(?:,\s*\d+)?(?:[^.\n]*))/i
   );
 
   if (addressPrefixMatch && addressPrefixMatch[1]) {
-    const candidate = addressPrefixMatch[1].trim();
+    let candidate = addressPrefixMatch[1].trim();
+    // After the house number, quantity and kitchen-note clauses are not address
+    // locality. Preserve their full suffix for item extraction or clarification.
+    // A number immediately after the street type belongs to its name (Rua 7
+    // de Setembro), not the house. A later comma may introduce an order item.
+    const houseNumber = Array.from(
+      candidate.matchAll(/,\s*\d+\b|\s+\d+\b/g)
+    ).find((match) => /\s/.test(candidate.slice(0, match.index).trim()));
+    if (houseNumber) {
+      const numberEnd = houseNumber.index + houseNumber[0].length;
+      // Once locality text is present, a new separated clause is NOT address
+      // text by default. Recognize complete address complements, not a growing
+      // denylist of kitchen vocabulary. Unknown suffixes stay in orderText so
+      // the caller must clarify/review them before checkout.
+      const tail = candidate.slice(numberEnd);
+      const separators = Array.from(
+        // A digit-to-digit hyphen is part of a CEP, not a clause boundary.
+        tail.matchAll(/[,;:/()]|(?<!\d)[-–—]|[-–—](?!\d)|\s+e\s+/gi)
+      );
+      const unknownClause = separators.find((separator, index) => {
+        if (!tail.slice(0, separator.index).trim()) return false;
+        const clause = tail
+          .slice(
+            separator.index + separator[0].length,
+            separators[index + 1]?.index ?? tail.length
+          )
+          .trim();
+        if (!clause) return false;
+        return !(
+          /^(?:(?:(?:apto|apartamento|bloco|casa|lote|quadra|andar|sala|km)\s*\.?\s*[a-z0-9]+|\d+\s*(?:andar|bloco|apartamento|apto|casa|lote|quadra|sala)|cep\s*\d{5}-?\d{3}|sem\s+(?:numero(?:\s+no\s+portao)?|saida)|com\s+(?:portaria|acesso|entrada))\s*)+$/.test(
+            normalize(clause)
+          ) ||
+          /^(?:AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)$/.test(
+            clause
+          )
+        );
+      });
+      if (unknownClause)
+        candidate = candidate.slice(0, numberEnd + unknownClause.index).trim();
+      const remainder = normalize(candidate).slice(numberEnd);
+      const orderBoundary = Array.from(
+        remainder.matchAll(
+          /(?:[,;/-]\s*|\s+e\s+|\s+)((?:\d+|um|uma|dois|duas|tres|quatro|cinco|seis|sete|oito|nove|dez|onze|doze|meia\s+duzia|uma\s+duzia)\b\s*(?:x\s*)?(?:de\s*)?(?=[a-z])|(?:sem|com|observacao|obs|quero|adicione|acrescente)\b)/g
+        )
+      ).find((match) => {
+        const before = remainder.slice(0, match.index);
+        const clause = remainder.slice(
+          match.index! + match[0].length - match[1].length
+        );
+        // Address complements are not quantities or kitchen instructions. Keep
+        // scanning so a commercial clause after a complement is still retained.
+        if (
+          /^(?:sem\s+(?:numero|saida)|com\s+(?:portaria|acesso|entrada))\b/.test(
+            clause
+          )
+        )
+          return false;
+        if (
+          /^(?:sem|com|observacao|obs|quero|adicione|acrescente)\b/.test(clause)
+        )
+          return true;
+        return (
+          !/(?:apto|apartamento|bloco|casa|lote|quadra|andar|sala|km|cep|bairro|vila|jardim|parque|condominio)\s*\.?\s*$/i.test(
+            before
+          ) &&
+          !/^(?:andar|bloco|apartamento|apto|casa|lote|quadra|sala)\b/.test(
+            remainder.slice(match.index! + match[0].length)
+          )
+        );
+      });
+      if (orderBoundary)
+        candidate = candidate.slice(0, numberEnd + orderBoundary.index).trim();
+    }
     if (candidate.length >= 8) {
       return candidate;
     }
@@ -652,6 +793,16 @@ export function extractAddressFromText(text: string): string | null {
   }
 
   return null;
+}
+
+/** Structural completeness, not a geocoding or service-area approval. */
+export function isCompleteDeliveryAddress(text: string): boolean {
+  const address = text.trim();
+  if (!address || extractAddressFromText(address) !== address) return false;
+  // A street name, explicit house number and locality text after it are required.
+  return /^(?:rua|r\.?|avenida|av\.?|alameda|al\.?|travessa|tv\.?|rodovia|rod\.?|estrada|quadra|qd\.?|condominio)\s+[^\n]+?(?:,\s*|\s+)\d+[a-z]?(?:\s*[,;-]\s*|\s+)[^\n]*[a-z][^\n]*$/i.test(
+    normalize(address)
+  );
 }
 
 /**

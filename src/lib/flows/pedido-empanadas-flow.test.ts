@@ -64,18 +64,38 @@ describe('PEDIDO_EMPANADAS_FLOW template', () => {
     expect(collected).toEqual(['endereco']);
   });
 
-  it('delivery collects the address and sends the Mercado Pago link with required confirmation message', () => {
-    const keys = path('ask_endereco');
-    expect(keys).toContain('gerar_pagamento');
-    expect(text(keys)).toContain('{{vars.link_mercado_pago}}');
-    expect(JSON.stringify(node('set_delivery')!.config)).toContain(
-      '"value":"delivery"'
-    );
-
-    const paymentMsgNode = node('link_pagamento');
-    const pCfg = paymentMsgNode!.config as { text: string };
-    expect(pCfg.text).toBe(
-      '🫔 *Pedido Confirmado!*\n{{vars.itens_lista}}\n💵 *Total: {{vars.total_formatado}}*\n📍 *Entrega:* {{vars.endereco}}\n\n💳 *Pague online com Pix ou Cartão pelo link abaixo:*\n{{vars.link_mercado_pago}}\n\nAssim que o pagamento for aprovado, seu pedido entra automaticamente em preparo!'
+  it('delivery waits for the integral summary confirmation after either address path', () => {
+    for (const source of ['ask_endereco', 'usar_ultimo_endereco']) {
+      const keys = path(source);
+      expect(keys).toContain('confirmar_delivery');
+      expect(keys).not.toContain('gerar_pagamento');
+    }
+    const confirm = node('confirmar_delivery')!.config as {
+      text: string;
+      buttons: Array<{ reply_id: string; next_node_key: string }>;
+    };
+    for (const token of [
+      'itens_lista',
+      'total_formatado',
+      'endereco',
+      'observacoes',
+    ])
+      expect(confirm.text).toContain(`{{vars.${token}}}`);
+    expect(
+      confirm.buttons.find((b) => b.reply_id === 'confirmar_pedido')
+        ?.next_node_key
+    ).toBe('set_confirmado_delivery');
+    expect(
+      confirm.buttons.find((b) => b.reply_id === 'corrigir_pedido')
+        ?.next_node_key
+    ).toBe('handoff_correcao');
+    expect(node('set_confirmado_delivery')!.config).toEqual({
+      var_key: 'pedido_confirmado',
+      value: 'true',
+      next_node_key: 'gerar_pagamento',
+    });
+    expect(JSON.stringify(node('link_pagamento')!.config)).not.toContain(
+      '{{vars.link_mercado_pago}}'
     );
   });
 
@@ -126,12 +146,14 @@ describe('PEDIDO_EMPANADAS_FLOW template', () => {
     >;
     expect(reuse.var_key).toBe('endereco');
     expect(reuse.value).toBe('{{vars.ultimo_endereco}}');
-    expect(reuse.next_node_key).toBe('gerar_pagamento');
+    expect(reuse.next_node_key).toBe('confirmar_delivery');
   });
 
   it('pickup is paid at the store — no payment link', () => {
     const keys = path('set_retirada');
-    expect(keys).toContain('registrar_retirada');
+    expect(keys).toContain('confirmar_retirada');
+    expect(keys).not.toContain('registrar_retirada');
+    expect(path('set_confirmado_retirada')).toContain('registrar_retirada');
     expect(text(keys)).not.toContain('link_mercado_pago');
     expect(JSON.stringify(node('set_retirada')!.config)).toContain(
       '"value":"retirada"'
