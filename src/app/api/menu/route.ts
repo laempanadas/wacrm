@@ -4,7 +4,12 @@
 
 import { NextResponse } from 'next/server';
 import { getCurrentAccount, toErrorResponse } from '@/lib/auth/account';
-import { MENU, getMockMenuItems, DEFAULT_EMPANADA_IMAGE } from '@/lib/cardapio/menu';
+import {
+  MENU,
+  getMockMenuItems,
+  DEFAULT_EMPANADA_IMAGE,
+  type DynamicMenuItem,
+} from '@/lib/cardapio/menu';
 
 export async function GET() {
   try {
@@ -18,7 +23,10 @@ export async function GET() {
       .order('name', { ascending: true });
 
     if (selectError) {
-      console.warn('[GET /api/menu] database error, falling back to mock menu:', selectError.message);
+      console.warn(
+        '[GET /api/menu] database error, falling back to mock menu:',
+        selectError.message
+      );
       return NextResponse.json({ items: getMockMenuItems() });
     }
 
@@ -105,7 +113,10 @@ export async function POST(request: Request) {
 
     if (isNaN(priceNum) || priceNum < 0) {
       return NextResponse.json(
-        { error: 'Preço deve ser um valor numérico válido maior ou igual a zero.' },
+        {
+          error:
+            'Preço deve ser um valor numérico válido maior ou igual a zero.',
+        },
         { status: 400 }
       );
     }
@@ -118,7 +129,7 @@ export async function POST(request: Request) {
         : DEFAULT_EMPANADA_IMAGE;
     const is_available = body?.is_available !== false;
 
-    let savedItem: any = null;
+    let savedItem: DynamicMenuItem | null = null;
 
     try {
       const { supabase, accountId } = await getCurrentAccount();

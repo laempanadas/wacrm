@@ -9,9 +9,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Button } from '@/components/ui/button';
 import { ChevronRight, Loader2 } from 'lucide-react';
-import { toast } from 'sonner';
 import { useDealStageMovement } from '@/hooks/use-deal-stage-movement';
-import { PIPELINE_STAGES } from '@/lib/orders/pipeline-stages';
 import type { Deal, PipelineStage } from '@/types';
 
 interface DealQuickActionsProps {

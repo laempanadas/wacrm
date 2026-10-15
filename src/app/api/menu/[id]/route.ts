@@ -4,7 +4,10 @@
 
 import { NextResponse } from 'next/server';
 import { getCurrentAccount, toErrorResponse } from '@/lib/auth/account';
-import { DEFAULT_EMPANADA_IMAGE } from '@/lib/cardapio/menu';
+import {
+  DEFAULT_EMPANADA_IMAGE,
+  type DynamicMenuItem,
+} from '@/lib/cardapio/menu';
 
 export async function PATCH(
   request: Request,
@@ -28,7 +31,7 @@ export async function PATCH(
       );
     }
 
-    const updates: Record<string, unknown> = {};
+    const updates: Partial<DynamicMenuItem> = {};
 
     if (body.is_available !== undefined) {
       updates.is_available = Boolean(body.is_available);
@@ -53,10 +56,7 @@ export async function PATCH(
             ? parseFloat(body.price.replace(',', '.'))
             : NaN;
       if (isNaN(priceNum) || priceNum < 0) {
-        return NextResponse.json(
-          { error: 'Preço inválido.' },
-          { status: 400 }
-        );
+        return NextResponse.json({ error: 'Preço inválido.' }, { status: 400 });
       }
       updates.price = priceNum;
     }
@@ -74,12 +74,16 @@ export async function PATCH(
 
     if (body.description !== undefined) {
       updates.description =
-        typeof body.description === 'string' ? body.description.trim() || null : null;
+        typeof body.description === 'string'
+          ? body.description.trim() || null
+          : null;
     }
 
     if (body.image_url !== undefined) {
       updates.image_url =
-        typeof body.image_url === 'string' ? body.image_url.trim() || DEFAULT_EMPANADA_IMAGE : DEFAULT_EMPANADA_IMAGE;
+        typeof body.image_url === 'string'
+          ? body.image_url.trim() || DEFAULT_EMPANADA_IMAGE
+          : DEFAULT_EMPANADA_IMAGE;
     }
 
     if (Object.keys(updates).length === 0) {
@@ -89,7 +93,7 @@ export async function PATCH(
       );
     }
 
-    let updatedItem: any = null;
+    let updatedItem: DynamicMenuItem | null = null;
 
     try {
       const { supabase, accountId } = await getCurrentAccount();
@@ -119,10 +123,13 @@ export async function PATCH(
         id,
         ...updates,
         price: updates.price !== undefined ? Number(updates.price) : 8.5,
-        is_available: updates.is_available !== undefined ? Boolean(updates.is_available) : true,
-        image_url: (updates.image_url as string) || DEFAULT_EMPANADA_IMAGE,
-        category: (updates.category as string) || 'Empanadas Salgadas',
-        name: (updates.name as string) || 'Item Atualizado',
+        is_available:
+          updates.is_available !== undefined
+            ? Boolean(updates.is_available)
+            : true,
+        image_url: updates.image_url || DEFAULT_EMPANADA_IMAGE,
+        category: updates.category || 'Empanadas Salgadas',
+        name: updates.name || 'Item Atualizado',
       };
     }
 

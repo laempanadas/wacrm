@@ -1,19 +1,3 @@
-const fs = require('fs');
-const path = require('path');
-const fsPromises = fs.promises;
-
-// Paths ajustados para rodar de scripts/
-const CARDAPIO_PATH = path.join(
-  __dirname,
-  '..',
-  'assets',
-  'js',
-  'cardapio.json'
-);
-const TEMPLATE_PATH = path.join(__dirname, '..', 'produto-template.html');
-const OUTPUT_DIR = path.join(__dirname, '..', 'produtos');
-const SITEMAP_PATH = path.join(__dirname, '..', 'public', 'sitemap.xml');
-
 const CATEGORIAS = {
   salgada: { nome: 'Empanadas Salgadas', slug: 'empanadas-salgadas' },
   doce: { nome: 'Empanadas Doces', slug: 'empanadas-doces' },
@@ -34,6 +18,10 @@ function slugify(text) {
 }
 
 async function main() {
+  const [{ promises: fsPromises }, path] = await Promise.all([
+    import('node:fs'),
+    import('node:path'),
+  ]);
   console.log('Iniciando geracao de paginas de produto...');
 
   const template = await fsPromises.readFile(
@@ -68,25 +56,22 @@ async function main() {
 
       const slugProduto = slugify(item.nome) + '-' + item.id;
       const canonicalUrl =
-        'https://laempanadas.com.br/produtos/' +
-        slugify(item.nome) +
-        '-' +
-        item.id +
-        '.html';
+        'https://laempanadas.com.br/produtos/' + slugProduto + '.html';
       const imagemUrl = item.imagem.startsWith('http')
         ? item.imagem
         : 'https://laempanadas.com.br/' + item.imagem;
 
-      let html = template
-        .replace(/\{\{PRODUTO_NOME\}\}/g, item.nome)
+      const html = template
+        .replace(/\{\{PRODUTO_NOME\}\}/g, () => item.nome)
         .replace(/\{\{PRODUTO_NOME_ENCODED\}\}/g, encodeURIComponent(item.nome))
-        .replace(/\{\{PRODUTO_DESCRICAO\}\}/g, item.descricao)
+        .replace(/\{\{PRODUTO_DESCRICAO\}\}/g, () => item.descricao)
         .replace(
           /\{\{PRODUTO_DESCRICAO_SEO\}\}/g,
-          item.descricao +
+          () =>
+            item.descricao +
             ' Peca online com entrega rapida em Santo Andre. Frete gratis acima de R$ 100.'
         )
-        .replace(/\{\{PRODUTO_ID\}\}/g, item.id)
+        .replace(/\{\{PRODUTO_ID\}\}/g, () => item.id)
         .replace(
           /\{\{CATEGORIA_NOME\}\}/g,
           CATEGORIAS[item.categoriaId]?.nome || 'Outros'
@@ -100,21 +85,9 @@ async function main() {
           /\{\{PRECO_FORMATADO\}\}/g,
           'R$ ' + item.preco.toFixed(2).replace('.', ',')
         )
-        .replace(
-          /\{\{IMAGEM_URL\}\}/g,
-          item.imagem.startsWith('http')
-            ? item.imagem
-            : 'https://laempanadas.com.br/' + item.imagem
-        )
-        .replace(
-          /\{\{CANONICAL_URL\}\}/g,
-          'https://laempanadas.com.br/produtos/' +
-            slugify(item.nome) +
-            '-' +
-            item.id +
-            '.html'
-        )
-        .replace(/\{\{INGREDIENTES\}\}/g, item.descricao)
+        .replace(/\{\{IMAGEM_URL\}\}/g, () => imagemUrl)
+        .replace(/\{\{CANONICAL_URL\}\}/g, () => canonicalUrl)
+        .replace(/\{\{INGREDIENTES\}\}/g, () => item.descricao)
         .replace(/\{\{CALORIAS\}\}/g, Math.round(320))
         .replace(/\{\{PROTEINAS\}\}/g, '12')
         .replace(/\{\{CARBOIDRATOS\}\}/g, '28')
@@ -127,26 +100,20 @@ async function main() {
         )
         .replace(/\{\{CATEGORIA_SLUG\}\}/g, categoria.slug)
         .replace(/\{\{PRODUTO_NOME_ENCODED\}\}/g, encodeURIComponent(item.nome))
-        .replace(/\{\{PRODUTO_ID\}\}/g, item.id)
+        .replace(/\{\{PRODUTO_ID\}\}/g, () => item.id)
         .replace(/\{\{CATEGORIA_SLUG_LOWER\}\}/g, categoria.slug.toLowerCase());
 
-      const slug = slugify(item.nome) + '-' + item.id;
       const outputPath = path.join(
         __dirname,
         '..',
         'produtos',
-        slugify(item.nome) + '-' + item.id + '.html'
+        slugProduto + '.html'
       );
 
-      await fsPromises.writeFile(outputPath, template, 'utf-8');
+      await fsPromises.writeFile(outputPath, html, 'utf-8');
 
       urls.push({
-        url:
-          'https://laempanadas.com.br/produtos/' +
-          slugify(item.nome) +
-          '-' +
-          item.id +
-          '.html',
+        url: canonicalUrl,
         lastmod: new Date().toISOString().split('T')[0],
         changefreq: 'weekly',
         priority: '0.9',
@@ -161,8 +128,6 @@ async function main() {
       erros++;
     }
   }
-
-  const hoje = new Date().toISOString().split('T')[0];
 
   let sitemap = '<?xml version="1.0" encoding="UTF-8"?>\n';
   sitemap += '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"\n';

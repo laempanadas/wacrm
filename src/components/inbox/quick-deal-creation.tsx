@@ -35,7 +35,7 @@ export function QuickDealCreation({
    */
   const cleanValue = (input: string): string => {
     // Remove "R$", símbolos de moeda e caracteres indesejados
-    let cleaned = input
+    const cleaned = input
       .replace(/[R$\s]/g, '') // Remove R$, espaços
       .replace(/[^\d,.-]/g, '') // Remove tudo exceto dígitos, vírgula, ponto, hífen
       .trim();

@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import Image from 'next/image';
 import { cn } from '@/lib/utils';
 import type { Message, MessageReaction } from '@/types';
 import {
@@ -107,7 +108,11 @@ function MediaImage({ url, alt }: { url: string; alt: string }) {
   }
 
   return (
-    <img
+    <Image
+      unoptimized
+      width={240}
+      height={256}
+      style={{ width: 'auto', height: 'auto' }}
       src={src ?? ''}
       alt={alt}
       className="max-h-64 max-w-60 rounded-lg object-cover"

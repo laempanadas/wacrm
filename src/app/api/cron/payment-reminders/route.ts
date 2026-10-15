@@ -1,11 +1,37 @@
+import { timingSafeEqual } from 'node:crypto';
 import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { decrypt } from '@/lib/whatsapp/encryption';
+import type { WhatsAppConfig } from '@/types';
 
 export const dynamic = 'force-dynamic';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let _adminClient: any = null;
+interface ReminderOrder {
+  id: string;
+  account_id: string | null;
+  payer_phone: string | null;
+  payment_url: string | null;
+  payer_name: string | null;
+  total: number | string | null;
+}
+
+type ReminderConfig = Pick<
+  WhatsAppConfig,
+  'access_token' | 'phone_number_id'
+> & {
+  account_id: string;
+};
+
+function errorMessage(error: unknown): string | undefined {
+  return typeof error === 'object' &&
+    error !== null &&
+    'message' in error &&
+    typeof error.message === 'string'
+    ? error.message
+    : undefined;
+}
+
+let _adminClient: SupabaseClient | null = null;
 function supabaseAdmin() {
   if (!_adminClient) {
     const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
@@ -16,6 +42,18 @@ function supabaseAdmin() {
 }
 
 export async function GET(request: Request) {
+  const expected = process.env.AUTOMATION_CRON_SECRET;
+  if (!expected) {
+    return NextResponse.json({ error: 'cron not configured' }, { status: 503 });
+  }
+  const supplied = Buffer.from(request.headers.get('x-cron-secret') ?? '');
+  const expectedBuffer = Buffer.from(expected);
+  if (
+    supplied.length !== expectedBuffer.length ||
+    !timingSafeEqual(supplied, expectedBuffer)
+  ) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
   try {
     const { searchParams } = new URL(request.url);
     const forceTest = searchParams.get('force') === 'true';
@@ -41,7 +79,8 @@ export async function GET(request: Request) {
       query = query.is('reminded_at', null);
     }
 
-    const { data: pendingOrders, error: ordersError } = await query;
+    const { data: pendingOrders, error: ordersError } =
+      await query.returns<ReminderOrder[]>();
 
     if (ordersError) {
       console.error('[Cron Reminder] Erro ao consultar orders:', ordersError);
@@ -67,7 +106,8 @@ export async function GET(request: Request) {
     const { data: allConfigs } = await supabaseAdmin()
       .from('whatsapp_config')
       .select('*')
-      .limit(5);
+      .limit(5)
+      .returns<ReminderConfig[]>();
 
     if (!allConfigs || allConfigs.length === 0) {
       return NextResponse.json(
@@ -79,21 +119,22 @@ export async function GET(request: Request) {
       );
     }
 
-    // Garante que só envia para cada número de telefone 1 única vez por rodada (o pedido mais recente)
+    // Envia uma vez por telefone e conta em cada rodada (o pedido mais recente).
     const seenPhones = new Set<string>();
-    const uniqueOrders = pendingOrders.filter((order: any) => {
-      let raw = String(order.payer_phone || '').replace(/\D/g, '');
-      if (seenPhones.has(raw)) return false;
-      seenPhones.add(raw);
+    const uniqueOrders = pendingOrders.filter((order) => {
+      const raw = String(order.payer_phone || '').replace(/\D/g, '');
+      const key = JSON.stringify([order.account_id, raw]);
+      if (seenPhones.has(key)) return false;
+      seenPhones.add(key);
       return true;
     });
 
     const results: Array<{
       orderId: string;
-      phone: string;
+      phone: string | null;
       status: string;
       messageId?: string;
-      error?: any;
+      error?: unknown;
     }> = [];
 
     for (const order of uniqueOrders) {
@@ -106,9 +147,17 @@ export async function GET(request: Request) {
         continue;
       }
 
-      const config =
-        allConfigs.find((c: any) => c.account_id === order.account_id) ||
-        allConfigs[0];
+      const config = order.account_id
+        ? allConfigs.find((c) => c.account_id === order.account_id)
+        : undefined;
+      if (!config) {
+        results.push({
+          orderId: order.id,
+          phone: order.payer_phone,
+          status: 'skipped_no_account_config',
+        });
+        continue;
+      }
 
       const accessToken = decrypt(config.access_token);
       const phoneNumberId = config.phone_number_id;
@@ -212,6 +261,7 @@ export async function GET(request: Request) {
               reminded_at: new Date().toISOString(),
             })
             .eq('payer_phone', order.payer_phone)
+            .eq('account_id', order.account_id)
             .eq('status', 'pending');
 
           results.push({
@@ -228,12 +278,12 @@ export async function GET(request: Request) {
             error: resData,
           });
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         results.push({
           orderId: order.id,
           phone: rawPhone,
           status: 'error',
-          error: err.message,
+          error: errorMessage(err),
         });
       }
     }
@@ -243,10 +293,10 @@ export async function GET(request: Request) {
       processed: results.length,
       details: results,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[Cron Reminder Fatal Error]:', error);
     return NextResponse.json(
-      { error: 'Internal Error', message: error?.message },
+      { error: 'Internal Error', message: errorMessage(error) },
       { status: 500 }
     );
   }

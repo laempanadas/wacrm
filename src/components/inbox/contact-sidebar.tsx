@@ -1,16 +1,15 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import Image from 'next/image';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/hooks/use-auth';
-import { cn } from '@/lib/utils';
 import type { Contact, Deal, ContactNote, Tag } from '@/types';
 import {
   Phone,
   Mail,
   Copy,
   Check,
-  User,
   Tag as TagIcon,
   DollarSign,
   StickyNote,
@@ -149,7 +148,10 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
           <div className="flex flex-col items-center text-center">
             <div className="bg-muted text-foreground flex h-16 w-16 items-center justify-center rounded-full text-lg font-semibold">
               {contact.avatar_url ? (
-                <img
+                <Image
+                  unoptimized
+                  width={64}
+                  height={64}
                   src={contact.avatar_url}
                   alt={displayName}
                   className="h-16 w-16 rounded-full object-cover"
@@ -246,10 +248,7 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
                 <p className="text-muted-foreground px-1 text-xs">No deals</p>
               ) : (
                 deals.map((deal) => {
-                  const stages = (deals as any)[0]?.stage
-                    ? (deals.map((d: any) => d.stage).filter(Boolean) as any[])
-                    : [];
-                  const currentStage = (deal as any)?.stage as any;
+                  const currentStage = deal.stage ?? null;
 
                   return (
                     <div
@@ -284,12 +283,11 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
                         allStages={
                           Array.from(
                             new Map(
-                              (deals as any[])
-                                .map((d: any) => d.stage)
-                                .filter(Boolean)
-                                .map((s: any) => [s.id, s])
+                              deals.flatMap((d) =>
+                                d.stage ? [[d.stage.id, d.stage] as const] : []
+                              )
                             ).values()
-                          ) as any[]
+                          )
                         }
                         onDealUpdated={fetchContactData}
                       />

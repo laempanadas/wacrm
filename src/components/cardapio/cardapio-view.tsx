@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useMemo, useCallback } from 'react';
+import Image from 'next/image';
 import { toast } from 'sonner';
 import {
   Copy,
@@ -520,7 +521,10 @@ export function CardapioView() {
                           {/* Detalhes do Item com Imagem */}
                           <div className="flex min-w-0 items-center gap-3">
                             <div className="relative w-12 h-12 rounded-lg border border-border overflow-hidden bg-muted flex items-center justify-center shrink-0 shadow-xs">
-                              <img
+                              <Image
+                                unoptimized
+                                width={48}
+                                height={48}
                                 src={itemImage}
                                 alt={item.name}
                                 className="w-full h-full object-cover"
@@ -681,7 +685,10 @@ export function CardapioView() {
                 <Label>Imagem do Produto</Label>
                 <div className="flex items-center gap-4">
                   <div className="relative w-16 h-16 rounded-lg border border-border overflow-hidden bg-muted flex items-center justify-center shrink-0 shadow-xs">
-                    <img
+                    <Image
+                      unoptimized
+                      width={64}
+                      height={64}
                       src={imagePreview || DEFAULT_EMPANADA_IMAGE}
                       alt="Preview"
                       className="w-full h-full object-cover"

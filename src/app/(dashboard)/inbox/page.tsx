@@ -18,7 +18,6 @@ import { ConversationList } from '@/components/inbox/conversation-list';
 import { MessageThread } from '@/components/inbox/message-thread';
 import { ContactSidebar } from '@/components/inbox/contact-sidebar';
 import { useAuth } from '@/hooks/use-auth'; // <- Consumido corretamente agora
-import { toast } from 'sonner';
 import { WifiOff } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -35,7 +34,7 @@ export default function InboxPage() {
   // Consumimos diretamente o estado global que já carregou o perfil
   // e o accountId, eliminando queries redundantes e lentas de autenticação.
   // ------------------------------------------------------------------
-  const { user, accountId, profileLoading } = useAuth();
+  const { accountId, profileLoading } = useAuth();
 
   /**
    * `?c=<id>` deep-link support. Used when landing here from the

@@ -95,8 +95,6 @@ export function formatCurrencyShort(
   const code = currency || DEFAULT_CURRENCY;
   const symbol = CURRENCIES.find((c) => c.code === code)?.symbol ?? `${code} `;
   const v = Number(value || 0);
-  // Use comma as decimal separator for pt-BR
-  const decimalSeparator = code === 'BRL' ? ',' : '.';
   const toFixedValue = (num: number, digits: number) => {
     const fixed = num.toFixed(digits);
     if (code === 'BRL') {

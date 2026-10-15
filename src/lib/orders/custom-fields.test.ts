@@ -3,7 +3,6 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   STANDARD_DELIVERY_CUSTOM_FIELDS,
   parseAddressComponents,
-  getSavedCustomerAddress,
   saveContactOrderFields,
 } from './custom-fields';
 
