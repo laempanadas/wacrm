@@ -1,10 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireRole, toErrorResponse } from '@/lib/auth/account';
 import { supabaseAdmin } from '@/lib/automations/admin-client';
-import {
-  ORDERS_PIPELINE_NAME,
-  markContactPaymentConfirmed,
-} from '@/lib/orders/create-order';
+import { ORDERS_PIPELINE_NAME } from '@/lib/orders/create-order';
 import { markDealPaid } from '@/lib/orders/mark-deal-paid';
 import { ORDER_STATUS_PAID } from '@/lib/payments/mercado-pago-webhook';
 
@@ -45,18 +42,52 @@ export async function POST(
     if (!deal)
       return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
-    const { data: pipeline } = await admin
+    const { data: pipeline, error: pipelineErr } = await admin
       .from('pipelines')
       .select('name')
       .eq('id', deal.pipeline_id)
+      .eq('account_id', ctx.accountId)
       .maybeSingle();
+    if (pipelineErr) {
+      console.error('[mark-paid] pipeline lookup error:', pipelineErr);
+      return NextResponse.json(
+        { error: 'Internal server error' },
+        { status: 500 }
+      );
+    }
+    if (!pipeline)
+      return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
-    if (pipeline?.name !== ORDERS_PIPELINE_NAME) {
-      const { error } = await admin
+    if (deal.contact_id) {
+      const { data: contact, error: contactErr } = await admin
+        .from('contacts')
+        .select('id')
+        .eq('id', deal.contact_id)
+        .eq('account_id', ctx.accountId)
+        .maybeSingle();
+      if (contactErr) {
+        console.error('[mark-paid] contact lookup error:', contactErr);
+        return NextResponse.json(
+          { error: 'Internal server error' },
+          { status: 500 }
+        );
+      }
+      if (!contact)
+        return NextResponse.json({ error: 'Not found' }, { status: 404 });
+    }
+
+    if (pipeline.name !== ORDERS_PIPELINE_NAME) {
+      let update = admin
         .from('deals')
         .update({ status: 'won', updated_at: new Date().toISOString() })
-        .eq('id', deal.id);
-      if (error) {
+        .eq('id', deal.id)
+        .eq('account_id', ctx.accountId)
+        .eq('pipeline_id', deal.pipeline_id);
+      update = deal.contact_id
+        ? update.eq('contact_id', deal.contact_id)
+        : update.is('contact_id', null);
+      const { data: updated, error } = await update.select('id').maybeSingle();
+      if (error || !updated) {
         console.error('[mark-paid] deal update error:', error);
         return NextResponse.json(
           { error: 'Internal server error' },
@@ -78,17 +109,7 @@ export async function POST(
       );
     }
 
-    // Best-effort: o card já está em "Pago"; falhas aqui só vão para o log.
-    try {
-      await markContactPaymentConfirmed(
-        admin,
-        { accountId: ctx.accountId, userId: ctx.userId },
-        deal.contact_id
-      );
-    } catch (err) {
-      console.error('[mark-paid] tag error:', err);
-    }
-
+    // Tagging is handled once by markDealPaid after relationship validation.
     const { error: orderErr } = await admin
       .from('orders')
       .update({ status: ORDER_STATUS_PAID })

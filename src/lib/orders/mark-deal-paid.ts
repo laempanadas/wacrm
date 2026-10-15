@@ -20,7 +20,10 @@ export type MarkDealPaidResult =
       moved: false;
       reason:
         | 'invalid_deal_id'
+        | 'lookup_failed'
         | 'deal_not_found'
+        | 'pipeline_not_found'
+        | 'contact_not_found'
         | 'stage_unavailable'
         | 'update_failed';
     };
@@ -39,18 +42,40 @@ export async function markDealPaid(
   if (!UUID_RE.test(args.dealId))
     return { moved: false, reason: 'invalid_deal_id' };
 
-  const { data: deal } = await db
+  const { data: deal, error: dealErr } = await db
     .from('deals')
     .select('id, pipeline_id, contact_id, user_id')
     .eq('id', args.dealId)
     .eq('account_id', args.accountId)
     .maybeSingle();
+  if (dealErr) return { moved: false, reason: 'lookup_failed' };
   if (!deal) return { moved: false, reason: 'deal_not_found' };
 
-  const { data: stages } = await db
+  const { data: pipeline, error: pipelineErr } = await db
+    .from('pipelines')
+    .select('id')
+    .eq('id', deal.pipeline_id)
+    .eq('account_id', args.accountId)
+    .maybeSingle();
+  if (pipelineErr) return { moved: false, reason: 'lookup_failed' };
+  if (!pipeline) return { moved: false, reason: 'pipeline_not_found' };
+
+  if (deal.contact_id) {
+    const { data: contact, error: contactErr } = await db
+      .from('contacts')
+      .select('id')
+      .eq('id', deal.contact_id)
+      .eq('account_id', args.accountId)
+      .maybeSingle();
+    if (contactErr) return { moved: false, reason: 'lookup_failed' };
+    if (!contact) return { moved: false, reason: 'contact_not_found' };
+  }
+
+  const { data: stages, error: stagesErr } = await db
     .from('pipeline_stages')
     .select('id, name, position')
     .eq('pipeline_id', deal.pipeline_id);
+  if (stagesErr) return { moved: false, reason: 'stage_unavailable' };
 
   let stageId = (stages ?? []).find(
     (s: { name: string }) =>
@@ -81,15 +106,24 @@ export async function markDealPaid(
     stageCreated = true;
   }
 
-  const { error: updateErr } = await db
+  // Bind the write to the account and relationship snapshot we validated.
+  let update = db
     .from('deals')
     .update({
       stage_id: stageId,
       status: 'won',
       updated_at: new Date().toISOString(),
     })
-    .eq('id', deal.id);
-  if (updateErr) {
+    .eq('id', deal.id)
+    .eq('account_id', args.accountId)
+    .eq('pipeline_id', deal.pipeline_id);
+  update = deal.contact_id
+    ? update.eq('contact_id', deal.contact_id)
+    : update.is('contact_id', null);
+  const { data: updated, error: updateErr } = await update
+    .select('id')
+    .maybeSingle();
+  if (updateErr || !updated) {
     console.error('[markDealPaid] Could not update deal:', updateErr);
     return { moved: false, reason: 'update_failed' };
   }

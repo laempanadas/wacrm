@@ -2,10 +2,22 @@ import { describe, it, expect, vi } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { getSavedCustomerAddress } from './text-order-flow';
 
+function ownedContactQuery() {
+  return {
+    select: vi.fn().mockReturnThis(),
+    eq: vi.fn().mockReturnThis(),
+    maybeSingle: vi.fn().mockResolvedValue({
+      data: { id: 'contact_1' },
+      error: null,
+    }),
+  };
+}
+
 describe('getSavedCustomerAddress', () => {
   it('retrieves address from contact_custom_values when available', async () => {
     const mockSupabase = {
       from: vi.fn((table: string) => {
+        if (table === 'contacts') return ownedContactQuery();
         if (table === 'custom_fields') {
           return {
             select: vi.fn().mockReturnThis(),
@@ -41,6 +53,7 @@ describe('getSavedCustomerAddress', () => {
   it('falls back to orders.delivery_address if not in custom values', async () => {
     const mockSupabase = {
       from: vi.fn((table: string) => {
+        if (table === 'contacts') return ownedContactQuery();
         if (table === 'custom_fields') {
           return {
             select: vi.fn().mockReturnThis(),
@@ -76,6 +89,7 @@ describe('getSavedCustomerAddress', () => {
   it('falls back to deals.notes if neither custom values nor orders have address', async () => {
     const mockSupabase = {
       from: vi.fn((table: string) => {
+        if (table === 'contacts') return ownedContactQuery();
         if (table === 'custom_fields') {
           return {
             select: vi.fn().mockReturnThis(),
@@ -124,6 +138,7 @@ describe('getSavedCustomerAddress', () => {
   it('returns null if no address is found in any source', async () => {
     const mockSupabase = {
       from: vi.fn((table: string) => {
+        if (table === 'contacts') return ownedContactQuery();
         if (table === 'custom_fields') {
           return {
             select: vi.fn().mockReturnThis(),

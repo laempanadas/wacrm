@@ -106,8 +106,17 @@ export async function getSavedCustomerAddress(
   contactId: string
 ): Promise<string | null> {
   try {
+    // Validate ownership before reading any contact address sources.
+    const { data: contact, error: contactError } = await supabase
+      .from('contacts')
+      .select('id')
+      .eq('id', contactId)
+      .eq('account_id', accountId)
+      .maybeSingle();
+    if (contactError || !contact) return null;
+
     // 1. Tenta buscar em contact_custom_values (endereco_completo prioritário + compatibilidade)
-    const { data: defs } = await supabase
+    const { data: defs, error: defsError } = await supabase
       .from('custom_fields')
       .select('id, field_name')
       .eq('account_id', accountId)
@@ -119,16 +128,18 @@ export async function getSavedCustomerAddress(
         'Endereço de entrega',
         'Endereco',
       ]);
+    if (defsError) return null;
 
     if (defs && defs.length > 0) {
       const fieldIds = defs.map((d: { id: string }) => d.id);
-      const { data: val } = await supabase
+      const { data: val, error: valueError } = await supabase
         .from('contact_custom_values')
         .select('value')
         .eq('contact_id', contactId)
         .in('custom_field_id', fieldIds)
         .limit(1)
         .maybeSingle();
+      if (valueError) return null;
 
       if (val?.value && val.value.trim().length > 5) {
         return val.value.trim();
@@ -136,15 +147,17 @@ export async function getSavedCustomerAddress(
     }
 
     // 2. Tenta buscar no último pedido da tabela orders
-    const { data: lastOrder } = await supabase
+    const { data: lastOrder, error: orderError } = await supabase
       .from('orders')
       .select('delivery_address')
+      .eq('account_id', accountId)
       .eq('contact_id', contactId)
       .not('delivery_address', 'is', null)
       .neq('delivery_address', '')
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();
+    if (orderError) return null;
 
     if (
       lastOrder?.delivery_address &&
@@ -154,12 +167,14 @@ export async function getSavedCustomerAddress(
     }
 
     // 3. Tenta buscar nas anotações dos últimos deals
-    const { data: lastDeals } = await supabase
+    const { data: lastDeals, error: dealsError } = await supabase
       .from('deals')
       .select('notes')
+      .eq('account_id', accountId)
       .eq('contact_id', contactId)
       .order('created_at', { ascending: false })
       .limit(3);
+    if (dealsError) return null;
 
     if (lastDeals && lastDeals.length > 0) {
       for (const d of lastDeals) {

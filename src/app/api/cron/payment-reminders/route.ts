@@ -2,6 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { decrypt } from '@/lib/whatsapp/encryption';
+import { normalizePhone } from '@/lib/whatsapp/phone-utils';
 import type { WhatsAppConfig } from '@/types';
 
 export const dynamic = 'force-dynamic';
@@ -9,6 +10,7 @@ export const dynamic = 'force-dynamic';
 interface ReminderOrder {
   id: string;
   account_id: string | null;
+  contact_id: string | null;
   payer_phone: string | null;
   payment_url: string | null;
   payer_name: string | null;
@@ -103,31 +105,8 @@ export async function GET(request: Request) {
       });
     }
 
-    const { data: allConfigs } = await supabaseAdmin()
-      .from('whatsapp_config')
-      .select('*')
-      .limit(5)
-      .returns<ReminderConfig[]>();
-
-    if (!allConfigs || allConfigs.length === 0) {
-      return NextResponse.json(
-        {
-          error:
-            'Nenhuma conta do WhatsApp encontrada na tabela whatsapp_config.',
-        },
-        { status: 500 }
-      );
-    }
-
     // Envia uma vez por telefone e conta em cada rodada (o pedido mais recente).
     const seenPhones = new Set<string>();
-    const uniqueOrders = pendingOrders.filter((order) => {
-      const raw = String(order.payer_phone || '').replace(/\D/g, '');
-      const key = JSON.stringify([order.account_id, raw]);
-      if (seenPhones.has(key)) return false;
-      seenPhones.add(key);
-      return true;
-    });
 
     const results: Array<{
       orderId: string;
@@ -137,7 +116,7 @@ export async function GET(request: Request) {
       error?: unknown;
     }> = [];
 
-    for (const order of uniqueOrders) {
+    for (const order of pendingOrders) {
       if (!order.payer_phone || !order.payment_url) {
         results.push({
           orderId: order.id,
@@ -147,10 +126,7 @@ export async function GET(request: Request) {
         continue;
       }
 
-      const config = order.account_id
-        ? allConfigs.find((c) => c.account_id === order.account_id)
-        : undefined;
-      if (!config) {
+      if (!order.account_id) {
         results.push({
           orderId: order.id,
           phone: order.payer_phone,
@@ -159,13 +135,55 @@ export async function GET(request: Request) {
         continue;
       }
 
+      const { data: contact, error: contactError } = await supabaseAdmin()
+        .from('contacts')
+        .select('id, account_id, phone')
+        .eq('id', order.contact_id)
+        .eq('account_id', order.account_id)
+        .maybeSingle();
+      if (contactError || !contact) {
+        results.push({
+          orderId: order.id,
+          phone: order.payer_phone,
+          status: 'skipped_invalid_contact',
+        });
+        continue;
+      }
+
+      const rawPhone = normalizePhone(order.payer_phone);
+      if (!rawPhone || rawPhone !== normalizePhone(contact.phone)) {
+        results.push({
+          orderId: order.id,
+          phone: order.payer_phone,
+          status: 'skipped_phone_mismatch',
+        });
+        continue;
+      }
+
+      // Invalid orders must not consume the recipient's deduplication slot.
+      const key = JSON.stringify([order.account_id, rawPhone]);
+      if (seenPhones.has(key)) continue;
+
+      const { data: config, error: configError } = await supabaseAdmin()
+        .from('whatsapp_config')
+        .select('account_id, access_token, phone_number_id')
+        .eq('account_id', order.account_id)
+        .maybeSingle<ReminderConfig>();
+      if (configError || !config) {
+        results.push({
+          orderId: order.id,
+          phone: order.payer_phone,
+          status: configError
+            ? 'skipped_config_error'
+            : 'skipped_no_account_config',
+        });
+        continue;
+      }
+
+      seenPhones.add(key);
+
       const accessToken = decrypt(config.access_token);
       const phoneNumberId = config.phone_number_id;
-
-      let rawPhone = String(order.payer_phone).replace(/\D/g, '');
-      if (rawPhone.length <= 11 && !rawPhone.startsWith('55')) {
-        rawPhone = '55' + rawPhone;
-      }
 
       const valorFormatado = Number(order.total || 0)
         .toFixed(2)
