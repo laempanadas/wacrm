@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getPaymentById, getPaymentStatusForOrder } from './mercado-pago';
+import {
+  getExistingPaymentLink,
+  getPaymentById,
+  getPaymentStatusForOrder,
+} from './mercado-pago';
 
 // Exercise installed SDK 3.2.1, mocking ONLY HTTP transport (never the SDK).
 const records = () => ({
@@ -52,6 +56,55 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 describe('installed SDK payment identity transport', () => {
+  const existingOrder = {
+    account_id: 'A',
+    preference_id: 'pref-A',
+    external_reference: 'SAME28',
+    total: 28,
+    payment_url: 'https://payments.example/existing',
+  };
+  it('validates an existing pending preference and returns its exact persisted URL using GET only', async () => {
+    data['/checkout/preferences/pref-A'].init_point = existingOrder.payment_url;
+    data['/merchant_orders/456'].payments = [];
+    expect(await getExistingPaymentLink(existingOrder)).toBe(
+      existingOrder.payment_url
+    );
+    expect(
+      transport.mock.calls.every(([, options]) => options.method === 'GET')
+    ).toBe(true);
+  });
+  it.each([
+    { id: 'foreign' },
+    { external_reference: 'foreign' },
+    { collector_id: 0 },
+    { init_point: 'https://payments.example/other' },
+    { items: [{ quantity: 1, unit_price: 28, currency_id: 'USD' }] },
+    { items: [{ quantity: 2, unit_price: 15, currency_id: 'BRL' }] },
+    { expires: true, expiration_date_to: '2000-01-01T00:00:00Z' },
+  ])(
+    'blocks an existing preference with mismatched or expired gateway data: %j',
+    async (patch) => {
+      Object.assign(
+        data['/checkout/preferences/pref-A'],
+        { init_point: existingOrder.payment_url },
+        patch
+      );
+      data['/merchant_orders/456'].payments = [];
+      await expect(getExistingPaymentLink(existingOrder)).rejects.toThrow();
+      expect(
+        transport.mock.calls.every(([, options]) => options.method === 'GET')
+      ).toBe(true);
+    }
+  );
+  it.each(['approved', 'authorized', 'rejected'])(
+    'never resends a checkout with payment status %s',
+    async (status) => {
+      data['/checkout/preferences/pref-A'].init_point =
+        existingOrder.payment_url;
+      data['/v1/payments/123'].status = status;
+      await expect(getExistingPaymentLink(existingOrder)).rejects.toThrow();
+    }
+  );
   it('uses supported Payment.get -> MerchantOrder.get -> Preference.get URLs for linked legacy payments', async () => {
     expect(await getPaymentById('123')).toMatchObject({
       ok: true,

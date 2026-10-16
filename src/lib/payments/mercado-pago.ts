@@ -234,6 +234,86 @@ export async function createPaymentLink(
   };
 }
 
+/** Read-only resend validation. Never create a preference or choose a newer payment. */
+export async function getExistingPaymentLink(order: {
+  account_id: string;
+  preference_id: string;
+  external_reference: string;
+  total: unknown;
+  payment_url: string;
+}): Promise<string> {
+  const expectedTotal = exactBrlCents(order.total);
+  if (
+    !order.account_id ||
+    !order.preference_id ||
+    !order.external_reference ||
+    expectedTotal === null
+  )
+    throw new Error(
+      'Existing checkout identity is incomplete; reconciliation required.'
+    );
+  const preference = await new Preference(getClient()).get({
+    preferenceId: order.preference_id,
+  });
+  if (
+    preference.id !== order.preference_id ||
+    preference.external_reference !== order.external_reference ||
+    !Number.isSafeInteger(preference.collector_id) ||
+    (preference.collector_id ?? 0) <= 0 ||
+    !preference.init_point ||
+    preference.init_point !== order.payment_url
+  )
+    throw new Error(
+      'Existing checkout does not match its persisted gateway binding.'
+    );
+  const url = new URL(preference.init_point);
+  if (
+    url.protocol !== 'https:' ||
+    url.username ||
+    url.password ||
+    /\s/.test(preference.init_point)
+  )
+    throw new Error('Invalid existing checkout URL.');
+  const items = preference.items ?? [];
+  let totalCents = 0;
+  for (const item of items) {
+    const cents = exactBrlCents(item.unit_price);
+    if (
+      item.currency_id !== 'BRL' ||
+      cents === null ||
+      !Number.isSafeInteger(item.quantity) ||
+      item.quantity <= 0
+    )
+      throw new Error('Invalid existing checkout items.');
+    totalCents += cents * item.quantity;
+  }
+  if (
+    !items.length ||
+    !Number.isSafeInteger(totalCents) ||
+    totalCents !== expectedTotal
+  )
+    throw new Error('Existing checkout amount does not match the order.');
+  if (preference.expires) {
+    const end = Date.parse(preference.expiration_date_to ?? '');
+    const start = preference.expiration_date_from
+      ? Date.parse(preference.expiration_date_from)
+      : 0;
+    if (
+      !Number.isFinite(end) ||
+      !Number.isFinite(start) ||
+      Date.now() >= end ||
+      Date.now() < start
+    )
+      throw new Error('Existing checkout is expired or not yet available.');
+  }
+  const payment = await getPaymentStatusForOrder(order);
+  if (!payment.ok || payment.identityError || payment.status !== 'pending')
+    throw new Error(
+      'Existing payment is not safely pending; reconciliation required.'
+    );
+  return preference.init_point;
+}
+
 export async function getPaymentById(
   paymentId: string | number
 ): Promise<PaymentStatusResult> {

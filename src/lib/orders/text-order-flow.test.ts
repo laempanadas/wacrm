@@ -5,14 +5,21 @@ import {
   type TextOrderFlowContext,
 } from './text-order-flow';
 import { createOrderWithMercadoPago } from './create-order-with-mercado-pago';
-import { loadOrderCatalog } from './order-catalog';
+import { catalogEntries, loadOrderCatalog } from './order-catalog';
 import { applyContactTag } from './create-order';
 import type { OrderDraft } from './order-draft';
+import { getExistingPaymentLink } from '@/lib/payments/mercado-pago';
 
 vi.mock('./create-order-with-mercado-pago', () => ({
   createOrderWithMercadoPago: vi.fn(),
 }));
-vi.mock('./order-catalog', () => ({ loadOrderCatalog: vi.fn() }));
+vi.mock('./order-catalog', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./order-catalog')>()),
+  loadOrderCatalog: vi.fn(),
+}));
+vi.mock('@/lib/payments/mercado-pago', () => ({
+  getExistingPaymentLink: vi.fn(),
+}));
 vi.mock('./custom-fields', () => ({
   getSavedCustomerAddress: vi.fn(async () => null),
   saveContactOrderFields: vi.fn(async () => undefined),
@@ -28,6 +35,23 @@ function fixture() {
   const events = new Set<string>();
   const outbox = new Set<string>();
   const messages: Record<string, unknown>[] = [];
+  let storedOrder: Record<string, unknown> | null = {
+    id: 'order-1',
+    account_id: 'account-1',
+    contact_id: 'contact-1',
+    preference_id: 'preference-1',
+    external_reference: 'TEXT-draft-1-2',
+    total: 28,
+    payment_url:
+      'https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=test',
+    status: 'pending',
+  };
+  let storedBinding: Record<string, unknown> | null = {
+    id: 'order-1',
+    account_id: 'account-1',
+  };
+  let orderReadError = false;
+  let conversationDisabled = false;
   let failMessages = false;
   let activeFlow: {
     id: string;
@@ -78,6 +102,19 @@ function fixture() {
       let payload: Record<string, unknown> = {};
       const filters: Record<string, unknown> = {};
       const result = () => {
+        if (table === 'conversations') {
+          if (operation === 'update' && payload.ai_autoreply_disabled === true)
+            conversationDisabled = true;
+          return {
+            data: { ai_autoreply_disabled: conversationDisabled },
+            error: null,
+          };
+        }
+        if (table === 'orders')
+          return {
+            data: filters.preference_id ? storedBinding : storedOrder,
+            error: orderReadError ? { message: 'order read failed' } : null,
+          };
         if (table === 'flow_runs') {
           if (operation === 'select') return { data: activeFlow, error: null };
           flowUpdates.push(payload);
@@ -175,8 +212,18 @@ function fixture() {
       };
     },
     state: () => state!,
+    conversationDisabled: () => conversationDisabled,
     setFailMessages: () => {
       failMessages = true;
+    },
+    setOrder: (patch: Record<string, unknown> | null) => {
+      storedOrder = patch === null ? null : { ...storedOrder, ...patch };
+    },
+    setBinding: (binding: Record<string, unknown> | null) => {
+      storedBinding = binding;
+    },
+    failOrderRead: () => {
+      orderReadError = true;
     },
     turn: (inboundText: string, inboundMessageId: string) =>
       processFreeTextOrderInbound({
@@ -218,9 +265,215 @@ beforeEach(() => {
     link_mercado_pago:
       'https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=test',
   });
+  vi.mocked(getExistingPaymentLink).mockReset();
+  vi.mocked(getExistingPaymentLink).mockResolvedValue(
+    'https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=test'
+  );
 });
 
 describe('text order pipeline (all external effects mocked)', () => {
+  it('keeps the exact 5/2/2 order through address, free delivery, confirmation and one real CTA payload', async () => {
+    vi.mocked(loadOrderCatalog).mockResolvedValue(
+      catalogEntries([
+        {
+          id: 'ham',
+          name: 'Empanada de Presunto e Queijo',
+          price: 11,
+          is_available: true,
+        },
+        {
+          id: 'tuna',
+          name: 'Empanada de Atum com Queijo',
+          price: 13,
+          is_available: true,
+        },
+        {
+          id: 'caprese',
+          name: 'Empanada de Queijo, Tomate, Manjericão e Orégano',
+          price: 17.25,
+          is_available: true,
+        },
+      ])
+    );
+    const f = fixture();
+    expect(
+      (
+        await f.turn(
+          '5 presunto e queijo, 2 atum, 2 queijo tomate e manjericão',
+          'reported-items'
+        )
+      ).outcome
+    ).toBe('address_requested');
+    expect(f.state().items.map((item) => item.quantity)).toEqual([5, 2, 2]);
+    expect(f.state().total).toBe(5 * 11 + 2 * 13 + 2 * 17.25);
+    expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+    expect((await f.turn('Rua Flores, 10 Centro', 'address')).outcome).toBe(
+      'confirmation_requested'
+    );
+    expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+    await f.turn('confirmo o pedido', 'confirm');
+    expect(createOrderWithMercadoPago).toHaveBeenCalledTimes(1);
+    expect(createOrderWithMercadoPago).toHaveBeenCalledWith(
+      expect.objectContaining({ accountId: 'account-1' }),
+      expect.objectContaining({
+        items: [
+          expect.objectContaining({ id: 'ham', quantity: 5, unitPrice: 11 }),
+          expect.objectContaining({ id: 'tuna', quantity: 2, unitPrice: 13 }),
+          expect.objectContaining({
+            id: 'caprese',
+            quantity: 2,
+            unitPrice: 17.25,
+          }),
+        ],
+        deliveryAddress: 'Rua Flores, 10 Centro',
+      })
+    );
+    const payload = JSON.parse(
+      vi.mocked(fetch).mock.calls.at(-1)![1]!.body as string
+    );
+    expect(payload.type).toBe('interactive');
+    expect(payload.interactive.type).toBe('cta_url');
+    expect(payload.interactive.body.text).not.toContain('[Botão:');
+    expect(payload.interactive.body.text).not.toContain('https://');
+    expect(payload.interactive.action.parameters.url).toBe(
+      'https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=test'
+    );
+    await f.turn('ok', 'later-ok');
+    expect(createOrderWithMercadoPago).toHaveBeenCalledTimes(1);
+    expect(
+      f.messages.filter((message) => message.content_type === 'interactive')
+    ).toHaveLength(1);
+  });
+  it('preserves the five unrecognized ham items and blocks even confirmation of the partial order', async () => {
+    const f = fixture();
+    await f.turn('5 presunto e queijo, 2 carne', 'missing-product');
+    expect(f.state().unresolved.join(' ')).toContain('5 presunto e queijo');
+    expect(f.messages[0].content_text).toContain('5 presunto e queijo');
+    await f.turn('confirmo o pedido', 'confirm');
+    expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+  });
+  it('rejects the reported food text as an address without checkout', async () => {
+    const f = fixture();
+    await f.turn('2 carne', 'items');
+    await f.turn('3 hambúrguer...', 'bad-address');
+    expect(f.state().deliveryAddress).toBeUndefined();
+    expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+  });
+  it('does not restart or repeat a payment on a later ok', async () => {
+    const f = fixture();
+    await f.turn('2 carne, entregar na Rua Flores, 10 Centro', 'items');
+    await f.turn('confirmo o pedido', 'confirm');
+    const before = structuredClone(f.state());
+    await f.turn('ok', 'later-ok');
+    expect(f.state()).toEqual(before);
+    expect(f.conversationDisabled()).toBe(false);
+    expect(createOrderWithMercadoPago).toHaveBeenCalledTimes(1);
+    expect(
+      f.messages.filter((message) => message.content_type === 'interactive')
+    ).toHaveLength(1);
+  });
+  it('resends an explicitly requested existing payment without creating another checkout', async () => {
+    const f = fixture();
+    await f.turn('2 carne, entregar na Rua Flores, 10 Centro', 'items');
+    await f.turn('confirmo o pedido', 'confirm');
+    await f.turn('ok', 'ack');
+    await f.turn('reenvie o link de pagamento', 'resend');
+    expect(getExistingPaymentLink).toHaveBeenCalledWith(
+      expect.objectContaining({
+        account_id: 'account-1',
+        external_reference: 'TEXT-draft-1-2',
+        preference_id: 'preference-1',
+        total: 28,
+      })
+    );
+    expect(createOrderWithMercadoPago).toHaveBeenCalledTimes(1);
+    expect(
+      f.messages.filter((message) => message.content_type === 'interactive')
+    ).toHaveLength(2);
+    await f.turn('reenvie o link de pagamento', 'resend');
+    expect(
+      f.messages.filter((message) => message.content_type === 'interactive')
+    ).toHaveLength(2);
+    expect(getExistingPaymentLink).toHaveBeenCalledTimes(1);
+    expect(f.state().stage).toBe('payment_created');
+  });
+  it.each([
+    null,
+    { account_id: 'other' },
+    { contact_id: 'other' },
+    { external_reference: 'other' },
+    { preference_id: null },
+    { total: 1 },
+    { status: 'paid' },
+    { status: 'checkout_uncertain' },
+  ])(
+    'blocks resend for missing or mismatched canonical order %j',
+    async (patch) => {
+      const f = fixture();
+      await f.turn('2 carne, entregar na Rua Flores, 10 Centro', 'items');
+      await f.turn('confirmo o pedido', 'confirm');
+      f.setOrder(patch);
+      expect(
+        (await f.turn('reenvie o link de pagamento', 'resend')).outcome
+      ).toBe('needs_human');
+      expect(getExistingPaymentLink).not.toHaveBeenCalled();
+      expect(createOrderWithMercadoPago).toHaveBeenCalledTimes(1);
+      expect(
+        f.messages.filter((message) => message.content_type === 'interactive')
+      ).toHaveLength(1);
+    }
+  );
+  it.each([
+    null,
+    { id: 'other', account_id: 'account-1' },
+    { id: 'order-1', account_id: 'other' },
+  ])('blocks ambiguous or foreign preference binding %j', async (binding) => {
+    const f = fixture();
+    await f.turn('2 carne, entregar na Rua Flores, 10 Centro', 'items');
+    await f.turn('confirmo o pedido', 'confirm');
+    f.setBinding(binding);
+    await f.turn('reenvie o link de pagamento', 'resend');
+    expect(getExistingPaymentLink).not.toHaveBeenCalled();
+    expect(createOrderWithMercadoPago).toHaveBeenCalledTimes(1);
+    expect(
+      f.messages.filter((message) => message.content_type === 'interactive')
+    ).toHaveLength(1);
+  });
+  it.each(['database', 'gateway'])(
+    'blocks resend after a %s validation failure without creating a checkout',
+    async (failure) => {
+      const f = fixture();
+      await f.turn('2 carne, entregar na Rua Flores, 10 Centro', 'items');
+      await f.turn('confirmo o pedido', 'confirm');
+      if (failure === 'database') f.failOrderRead();
+      else
+        vi.mocked(getExistingPaymentLink).mockRejectedValueOnce(
+          new Error('gateway unavailable')
+        );
+      expect(
+        (await f.turn('reenvie o link de pagamento', 'resend')).outcome
+      ).toBe('needs_human');
+      expect(createOrderWithMercadoPago).toHaveBeenCalledTimes(1);
+      expect(
+        f.messages.filter((message) => message.content_type === 'interactive')
+      ).toHaveLength(1);
+    }
+  );
+  it.each([
+    'não reenvie o pagamento',
+    'já paguei, obrigado',
+    'quero alterar o pedido',
+  ])('does not interpret %s as a resend request', async (text) => {
+    const f = fixture();
+    await f.turn('2 carne, entregar na Rua Flores, 10 Centro', 'items');
+    await f.turn('confirmo o pedido', 'confirm');
+    await f.turn(text, 'after-payment');
+    expect(getExistingPaymentLink).not.toHaveBeenCalled();
+    expect(createOrderWithMercadoPago).toHaveBeenCalledTimes(1);
+    expect(
+      f.messages.filter((message) => message.content_type === 'interactive')
+    ).toHaveLength(1);
+  });
   it('invalidates active catalog correction through the locked consent RPC, not a direct vars overwrite', async () => {
     const f = fixture();
     f.setActiveCatalog();

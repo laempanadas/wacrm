@@ -15,6 +15,8 @@ import {
 import { applyContactTag, TAG_HUMANO } from './create-order';
 import { sendTextMessage } from '@/lib/whatsapp/meta-api';
 import { sendWhatsAppPaymentMessage } from '@/lib/whatsapp/payment-message';
+import { getExistingPaymentLink } from '@/lib/payments/mercado-pago';
+import { exactBrlCents } from '@/lib/payments/payment-identity';
 
 export {
   STANDARD_DELIVERY_CUSTOM_FIELDS,
@@ -45,6 +47,8 @@ export interface TextOrderFlowResult {
     | 'order_created'
     | 'address_requested'
     | 'confirmation_requested'
+    | 'payment_resent'
+    | 'payment_already_created'
     | 'needs_human'
     | 'duplicate';
   error?: string;
@@ -164,6 +168,68 @@ async function sendAndRecord(
   }
 }
 
+async function completeTurn(
+  ctx: TextOrderFlowContext,
+  draft: OrderDraft
+): Promise<void> {
+  const { error } = await ctx.supabase
+    .from('order_inbound_events')
+    .update({ status: 'completed' })
+    .eq('account_id', ctx.accountId)
+    .eq('meta_message_id', ctx.inboundMessageId);
+  if (error) throw error;
+  await saveDraft(ctx, draft, true);
+}
+
+async function resendExistingPayment(
+  ctx: TextOrderFlowContext,
+  draft: OrderDraft
+): Promise<void> {
+  const reference = `TEXT-${draft.id}-${draft.version}`;
+  const { data: order, error } = await ctx.supabase
+    .from('orders')
+    .select(
+      'id, account_id, contact_id, preference_id, external_reference, total, payment_url, status'
+    )
+    .eq('account_id', ctx.accountId)
+    .eq('contact_id', ctx.contactRecord.id)
+    .eq('external_reference', reference)
+    .maybeSingle();
+  if (
+    error ||
+    !order?.id ||
+    order.account_id !== ctx.accountId ||
+    order.contact_id !== ctx.contactRecord.id ||
+    order.external_reference !== reference ||
+    !order.preference_id ||
+    !order.payment_url ||
+    order.status !== 'pending' ||
+    exactBrlCents(order.total) === null ||
+    exactBrlCents(order.total) !== exactBrlCents(draft.total)
+  )
+    throw new Error(
+      'Pedido existente não validado; um atendente deve reconciliar o pagamento.'
+    );
+  const binding = await ctx.supabase
+    .from('orders')
+    .select('id, account_id')
+    .eq('preference_id', order.preference_id)
+    .maybeSingle();
+  if (
+    binding.error ||
+    binding.data?.id !== order.id ||
+    binding.data?.account_id !== ctx.accountId
+  )
+    throw new Error('Vínculo do pagamento existente inválido ou ambíguo.');
+  const url = await getExistingPaymentLink(order);
+  await sendAndRecord(
+    ctx,
+    `payment-resend:${ctx.inboundMessageId}`,
+    `La Empanadas — Pedido ${order.id}\nTotal: R$ ${draft.total.toFixed(2).replace('.', ',')}\nEste é o mesmo pagamento do seu pedido.`,
+    url
+  );
+}
+
 export async function processFreeTextOrderInbound(
   ctx: TextOrderFlowContext
 ): Promise<TextOrderFlowResult> {
@@ -257,6 +323,41 @@ export async function processFreeTextOrderInbound(
       total: 0,
     };
     const previous = claim.state?.id ? (claim.state as OrderDraft) : initial;
+    if (previous.stage === 'payment_created') {
+      const text = ctx.inboundText
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .trim()
+        .replace(/[.!?]+$/, '')
+        .trim();
+      const resend =
+        /^(?:(?:por favor|pode|poderia)\s+)?(?:reenvie|reenviar|reenvia|manda|mande|envia|envie)\s+(?:o\s+)?(?:link(?:\s+de\s+pagamento)?|pagamento|botao(?:\s+de\s+pagamento)?)(?:\s+(?:de novo|novamente))?(?:\s+por favor)?$/.test(
+          text
+        );
+      const acknowledgement =
+        /^(?:ok|okay|sim|certo|beleza|obrigado|obrigada|valeu|entendi)$/.test(
+          text
+        );
+      if (resend) await resendExistingPayment(ctx, previous);
+      else if (!acknowledgement) {
+        await handoff(ctx);
+        await sendAndRecord(
+          ctx,
+          `turn:${ctx.inboundMessageId}`,
+          advanceOrderDraft(previous, ctx.inboundText, []).reply
+        );
+      }
+      await completeTurn(ctx, previous);
+      return {
+        handled: true,
+        outcome: resend
+          ? 'payment_resent'
+          : acknowledgement
+            ? 'payment_already_created'
+            : 'needs_human',
+      };
+    }
     const catalog = await loadOrderCatalog(db, ctx.accountId);
     const savedAddress = await getSavedCustomerAddress(
       db,
@@ -320,13 +421,7 @@ export async function processFreeTextOrderInbound(
           : transition.reply;
       await sendAndRecord(ctx, `turn:${ctx.inboundMessageId}`, reply);
     }
-    const { error: eventError } = await db
-      .from('order_inbound_events')
-      .update({ status: 'completed' })
-      .eq('account_id', ctx.accountId)
-      .eq('meta_message_id', ctx.inboundMessageId);
-    if (eventError) throw eventError;
-    await saveDraft(ctx, draft, true);
+    await completeTurn(ctx, draft);
     return {
       handled: true,
       outcome: transition.checkout

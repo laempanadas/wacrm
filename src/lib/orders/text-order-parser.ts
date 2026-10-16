@@ -273,6 +273,7 @@ const CATALOG_PRODUCTS: ProductCatalogEntry[] = [
     aliases: [
       'queijo tomate manjericao e oregano',
       'queijo tomate manjericao',
+      'queijo tomate e manjericao',
       'queijo com tomate e manjericao',
       'queijo e tomate',
       'queijo com tomate',
