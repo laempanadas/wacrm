@@ -45,14 +45,28 @@ export function orderSummary(draft: OrderDraft): string {
     .join('\n');
 }
 
-function summaryReply(draft: OrderDraft): string {
+function summaryReply(draft: OrderDraft, previous: OrderDraft): string {
   const summary = `La Empanadas — Resumo do pedido\n${orderSummary(draft)}`;
   if (draft.stage === 'needs_human')
     return `${summary}\n${draft.unresolved.length ? `Não confirmado: ${draft.unresolved.join('; ')}\n` : ''}As observações/itens precisam de esclarecimento ou aprovação da cozinha. Um atendente deve revisar. Nenhuma cobrança foi gerada.`;
   const total = `Total: R$ ${draft.total.toFixed(2).replace('.', ',')}`;
-  if (!isCompleteDeliveryAddress(draft.deliveryAddress || ''))
-    return `${summary}\n${total}\n${draft.deliveryAddress ? `Endereço informado: ${draft.deliveryAddress}\n` : ''}Envie o endereço completo (Rua, Número e Bairro).`;
-  return `${summary}\n${total}\nEntrega: ${draft.deliveryAddress}\nConfira todas as linhas e observações. Responda CONFIRMO O PEDIDO para gerar o pagamento, ou envie uma correção.`;
+  if (!isCompleteDeliveryAddress(draft.deliveryAddress || '')) {
+    const quantity = draft.items.reduce((sum, item) => sum + item.quantity, 0);
+    const noun = draft.items.every((item) => /^empanada\b/i.test(item.title))
+      ? quantity === 1
+        ? 'empanada'
+        : 'empanadas'
+      : quantity === 1
+        ? 'item'
+        : 'itens';
+    return `Anotado! Temos ${quantity} ${noun} no seu pedido. Gostaria de adicionar mais alguma coisa ou podemos fechar? Para fechar, envie o endereço completo (Rua, Número e Bairro).`;
+  }
+  if (
+    previous.stage === 'awaiting_confirmation' &&
+    previous.version === draft.version
+  )
+    return 'Seu pedido continua salvo. Responda CONFIRMO O PEDIDO para gerar o pagamento, ou envie uma correção.';
+  return `${summary}\n🚚 Entrega: *GRÁTIS*\n${total}\nEndereço: ${draft.deliveryAddress}\nConfira todas as linhas e observações. Responda CONFIRMO O PEDIDO para gerar o pagamento, ou envie uma correção.`;
 }
 
 /** Pure transition: no gateway, messages or inferred state from bot prose. */
@@ -81,12 +95,41 @@ export function advanceOrderDraft(
     removeLine ? '' : editLine ? editLine[2] : text,
     catalog
   );
-  const isAddition =
-    /\b(?:adicione|adicionar|acrescente|acrescentar|mais)\b/.test(input);
+  // Match complete conversational replies only; kitchen notes and item changes
+  // must still be preserved for review, never discarded as small talk.
+  const conversationalInput = input.replace(/[.!?]+$/, '').trim();
+  let conversationalReply: string | undefined;
+  if (
+    !parsed.hasItems &&
+    !parsed.unresolved?.length &&
+    !parsed.deliveryAddress
+  ) {
+    if (
+      /^(?:vixi(?: esta)?(?: meio)? confuso|(?:esta|ficou)(?: meio)? confuso|nao entendi|seria (?:este|esse|o) pedido)$/.test(
+        conversationalInput
+      )
+    )
+      conversationalReply =
+        'Sem problema! Seu pedido continua salvo, sem alterações.';
+    else if (
+      /^(?:qual (?:o )?(?:valor|preco|taxa)(?: da| de)? entrega|(?:a )?entrega e gratis|tem taxa de entrega)$/.test(
+        conversationalInput
+      )
+    )
+      conversationalReply = 'A entrega é GRÁTIS, sem taxa adicional.';
+    else if (
+      /^(?:ok|okay|certo|beleza|obrigado|obrigada|podemos fechar|pode fechar|fechar|finalizar|so isso|e so isso)$/.test(
+        conversationalInput
+      )
+    )
+      conversationalReply = 'Certo! Seu pedido está salvo.';
+  }
+  const isCorrection = /^na verdade\b/.test(input);
   const hadItems = draft.items.length > 0;
   const ambiguousChange =
     !removeLine &&
     !editLine &&
+    !conversationalReply &&
     /\b(?:nao|troque|substitua|remova|retire|tire|cancele)\b/.test(input);
   if (removeLine) {
     const index = Number(removeLine[1]) - 1;
@@ -109,8 +152,7 @@ export function advanceOrderDraft(
           'Informe uma linha válida e um único item para a correção.'
         );
       else draft.items[index] = parsed.items[0];
-    } else if (isAddition) draft.items.push(...parsed.items);
-    else {
+    } else {
       const incomingLineCounts = new Map<string, number>();
       for (const item of parsed.items) {
         const key = orderLineKey(item);
@@ -126,6 +168,7 @@ export function advanceOrderDraft(
         // Resolve the whole inbound group before applying any correction,
         // including no-op quantities. Reusing a target would drop a line.
         if (
+          isCorrection &&
           targets.length &&
           (incomingLineCounts.get(orderLineKey(item)) ?? 0) > 1
         ) {
@@ -134,17 +177,23 @@ export function advanceOrderDraft(
           );
           continue;
         }
-        if (targets.length > 1)
+        if (isCorrection && targets.length > 1)
           draft.unresolved.push(
             `Qual linha deve ser alterada: ${item.requestedText || item.title}?`
           );
-        else if (targets.length === 1) {
+        else if (
+          targets.length === 1 &&
+          (incomingLineCounts.get(orderLineKey(item)) ?? 0) === 1
+        ) {
           const target = targets[0];
-          if (previous.items[target].quantity === item.quantity) continue;
-          if (/^na verdade\b/.test(input)) draft.items[target] = item;
-          else
+          if (isCorrection) draft.items[target] = item;
+          else if (
+            Number.isSafeInteger(draft.items[target].quantity + item.quantity)
+          ) {
+            draft.items[target].quantity += item.quantity;
+          } else
             draft.unresolved.push(
-              `Deseja adicionar ou substituir a quantidade: ${item.requestedText || item.title}? Use "adicione" ou "altere linha ${target + 1} para ...".`
+              `Quantidade fora do limite: ${item.requestedText || item.title}`
             );
         } else draft.items.push(item);
       }
@@ -154,8 +203,10 @@ export function advanceOrderDraft(
   }
   const address = parsed.deliveryAddress || extractAddressFromText(text);
   if (address) {
-    draft.deliveryAddress = address;
-    draft.version += 1;
+    if (address !== draft.deliveryAddress) {
+      draft.deliveryAddress = address;
+      draft.version += 1;
+    }
   } else if (
     previous.stage === 'awaiting_address' &&
     isAddressConfirmation(text) &&
@@ -168,6 +219,7 @@ export function advanceOrderDraft(
     !confirms &&
     !removeLine &&
     !ambiguousChange &&
+    !conversationalReply &&
     !parsed.hasItems &&
     !parsed.unresolved?.length
   ) {
@@ -212,5 +264,15 @@ export function advanceOrderDraft(
     draft.stage === 'awaiting_confirmation' &&
     draft.version === previous.version &&
     draft.items.length > 0;
-  return { draft, checkout, reply: summaryReply(draft) };
+  const reply =
+    conversationalReply &&
+    draft.stage !== 'needs_human' &&
+    previous.version === draft.version
+      ? `${conversationalReply} ${
+          draft.stage === 'awaiting_address'
+            ? 'Por favor, envie o endereço completo (Rua, Número e Bairro).'
+            : 'Para gerar o pagamento, responda CONFIRMO O PEDIDO, ou envie uma correção.'
+        }`
+      : summaryReply(draft, previous);
+  return { draft, checkout, reply };
 }

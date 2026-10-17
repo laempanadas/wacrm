@@ -1,6 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { correctFlowCheckout } from '@/lib/flows/checkout-consent';
-import { hasOrderIntent } from './text-order-parser';
+import { hasOrderIntent, isCompleteDeliveryAddress } from './text-order-parser';
 import { loadOrderCatalog } from './order-catalog';
 import {
   advanceOrderDraft,
@@ -225,7 +225,7 @@ async function resendExistingPayment(
   await sendAndRecord(
     ctx,
     `payment-resend:${ctx.inboundMessageId}`,
-    `La Empanadas — Pedido ${order.id}\nTotal: R$ ${draft.total.toFixed(2).replace('.', ',')}\nEste é o mesmo pagamento do seu pedido.`,
+    `La Empanadas — Pedido ${order.id}\nTotal: R$ ${draft.total.toFixed(2).replace('.', ',')}\nEste é o mesmo pagamento do seu pedido.\nPara obter o Pix Copia e Cola, escolha Pix no checkout.`,
     url
   );
 }
@@ -375,7 +375,9 @@ export async function processFreeTextOrderInbound(
     const customerName = ctx.contactRecord.name || ctx.contactName || 'Cliente';
     await saveContactOrderFields(db, ctx.accountId, ctx.contactRecord.id, {
       itens: orderSummary(draft),
-      endereco: draft.deliveryAddress,
+      endereco: isCompleteDeliveryAddress(draft.deliveryAddress || '')
+        ? draft.deliveryAddress
+        : undefined,
       nomeCliente: customerName,
     });
     if (transition.checkout) {
@@ -409,7 +411,7 @@ export async function processFreeTextOrderInbound(
       await sendAndRecord(
         ctx,
         `payment:${reference}`,
-        `La Empanadas — Pedido ${result.orderId || result.dealId || draft.id}\nTotal: R$ ${draft.total.toFixed(2).replace('.', ',')}\nPague com segurança pelo Mercado Pago.`,
+        `La Empanadas — Pedido ${result.orderId || result.dealId || draft.id}\nTotal: R$ ${draft.total.toFixed(2).replace('.', ',')}\nPague com segurança pelo Mercado Pago.\nPara obter o Pix Copia e Cola, escolha Pix no checkout.`,
         result.link_mercado_pago
       );
     } else {

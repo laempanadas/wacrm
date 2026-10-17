@@ -686,7 +686,6 @@ export function parseCatalogOrder(
 export function extractAddressFromText(text: string): string | null {
   if (!text) return null;
   const trimmed = text.trim();
-  const lower = normalize(trimmed);
 
   // Prefixos comuns de endereço no Brasil
   const addressPrefixMatch = trimmed.match(
@@ -695,13 +694,27 @@ export function extractAddressFromText(text: string): string | null {
 
   if (addressPrefixMatch && addressPrefixMatch[1]) {
     let candidate = addressPrefixMatch[1].trim();
+    if (/^bairro\b/i.test(candidate)) return null;
     // After the house number, quantity and kitchen-note clauses are not address
     // locality. Preserve their full suffix for item extraction or clarification.
     // A number immediately after the street type belongs to its name (Rua 7
     // de Setembro), not the house. A later comma may introduce an order item.
     const houseNumber = Array.from(
-      candidate.matchAll(/,\s*\d+\b|\s+\d+\b/g)
-    ).find((match) => /\s/.test(candidate.slice(0, match.index).trim()));
+      candidate.matchAll(/,\s*\d+[a-z]?\b|\s+\d+[a-z]?\b/gi)
+    ).find((match) => {
+      const before = normalize(candidate.slice(0, match.index));
+      const after = candidate.slice(match.index + match[0].length);
+      // CEPs and complement numbers cannot stand in for the house number.
+      return (
+        /\s/.test(before.trim()) &&
+        !/\b(?:cep|apto|apartamento|bloco|casa|lote|quadra|andar|sala|km)\s*\.?\s*$/.test(
+          before
+        ) &&
+        !/\d{8}/.test(match[0]) &&
+        !/^-\d/.test(after)
+      );
+    });
+    if (!houseNumber) return null;
     if (houseNumber) {
       const numberEnd = houseNumber.index + houseNumber[0].length;
       // Once locality text is present, a new separated clause is NOT address
@@ -722,6 +735,15 @@ export function extractAddressFromText(text: string): string | null {
           )
           .trim();
         if (!clause) return false;
+        // A numbered apartment may precede the locality. Only accept an
+        // explicit locality marker here, never arbitrary text after a complement.
+        if (
+          /^\s*(?:apto|apartamento)\s*\.?\s*\d+(?:\s*[a-z])?\s*$/i.test(
+            tail.slice(0, separator.index)
+          ) &&
+          /^(?:centro|bairro\s+[a-z\s]+)$/i.test(normalize(clause))
+        )
+          return false;
         return !(
           /^(?:(?:(?:apto|apartamento|bloco|casa|lote|quadra|andar|sala|km)\s*\.?\s*[a-z0-9]+|\d+\s*(?:andar|bloco|apartamento|apto|casa|lote|quadra|sala)|cep\s*\d{5}-?\d{3}|sem\s+(?:numero(?:\s+no\s+portao)?|saida)|com\s+(?:portaria|acesso|entrada))\s*)+$/.test(
             normalize(clause)
@@ -772,27 +794,6 @@ export function extractAddressFromText(text: string): string | null {
     }
   }
 
-  // Padrão estruturado "Nome da Rua, Número, Bairro/Cidade"
-  // Ex: "Rua das Palmeiras, 150, Centro" ou "Av Paulista, 1000"
-  const streetPattern =
-    /\b(?:rua|r\.?|avenida|av\.?|alameda|al\.?|travessa|tv\.?)\s+[a-z0-9À-ÿ\s.'-]+,\s*\d+/i;
-  if (streetPattern.test(trimmed)) {
-    return trimmed;
-  }
-
-  // Se o cliente respondeu diretamente com tipo de logradouro + nome + número
-  // Ex: "Rua dos Pinheiros 123" ou "Av Brasil 450 apto 12"
-  const directAddressPattern =
-    /^(?:rua|r\.?|avenida|av\.?|alameda|travessa|estrada)\s+[a-z0-9À-ÿ\s.'-]+\s+\d+/i;
-  if (directAddressPattern.test(trimmed)) {
-    return trimmed;
-  }
-
-  // CEP (ex: 01310-100 ou 01310100)
-  if (/\b\d{5}-?\d{3}\b/.test(lower) && trimmed.length > 15) {
-    return trimmed;
-  }
-
   return null;
 }
 
@@ -830,10 +831,5 @@ export function isAddressConfirmation(text: string): boolean {
     'o mesmo',
   ];
 
-  return confirmationPatterns.some(
-    (pattern) =>
-      normalized === pattern ||
-      normalized.startsWith(`${pattern} `) ||
-      normalized.endsWith(` ${pattern}`)
-  );
+  return confirmationPatterns.includes(normalized);
 }

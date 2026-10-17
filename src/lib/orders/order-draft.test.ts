@@ -16,6 +16,45 @@ const initial = (): OrderDraft => ({
 });
 
 describe('structured order draft', () => {
+  it('shows a revised summary when an acknowledgement coincides with a catalog price change', () => {
+    const first = advanceOrderDraft(
+      initial(),
+      '2 carne\nRua Flores, 10 Centro',
+      catalog
+    );
+    const repriced = advanceOrderDraft(first.draft, 'ok', [
+      { ...catalog[0], preco: 15 },
+    ]);
+    expect(repriced.checkout).toBe(false);
+    expect(repriced.reply).toContain('Resumo do pedido');
+    expect(repriced.reply).toContain('Total: R$ 30,00');
+  });
+  it('acknowledges item selection briefly and shows the full summary only after the address', () => {
+    const first = advanceOrderDraft(initial(), '2 carne', catalog);
+    expect(first.reply).toContain('Anotado!');
+    expect(first.reply).toContain('2 itens');
+    expect(first.reply).not.toContain('Resumo do pedido');
+    expect(first.reply).not.toContain('1. 2x');
+    expect(first.reply).not.toContain('Total:');
+    const addressed = advanceOrderDraft(
+      first.draft,
+      'Rua Flores, 10 Centro',
+      catalog
+    );
+    expect(addressed.reply).toContain('Resumo do pedido');
+    expect(addressed.reply).toContain('1. 2x Carne');
+    expect(addressed.reply).toContain('🚚 Entrega: *GRÁTIS*');
+    expect(addressed.reply).toContain('Total: R$ 28,00');
+    expect(addressed.checkout).toBe(false);
+    const repeatedAddress = advanceOrderDraft(
+      addressed.draft,
+      'Rua Flores, 10 Centro',
+      catalog
+    );
+    expect(repeatedAddress.reply).not.toContain('Resumo do pedido');
+    expect(repeatedAddress.draft.version).toBe(addressed.draft.version);
+    expect(repeatedAddress.checkout).toBe(false);
+  });
   it.each([
     '2 carne\n3 carne',
     '2 carne\n2 carne',
@@ -48,14 +87,15 @@ describe('structured order draft', () => {
       ).toBe(false);
     }
   );
-  it('asks whether a bare changed quantity is an addition or replacement without mutating the line', () => {
+  it('adds a bare quantity to the existing cart instead of replacing or ignoring it', () => {
     const first = advanceOrderDraft(initial(), '2 carne', catalog).draft;
     const changed = advanceOrderDraft(first, '5 carne', catalog);
-    expect(changed.draft.items.map((item) => item.quantity)).toEqual([2]);
-    expect(changed.draft.unresolved.join(' ')).toContain('5 carne');
-    expect(changed.reply).toMatch(/adicionar|substituir/i);
+    expect(changed.draft.items.map((item) => item.quantity)).toEqual([7]);
+    expect(changed.draft.total).toBe(98);
+    expect(changed.draft.unresolved).toEqual([]);
+    expect(changed.reply).toContain('7 itens');
     expect(changed.checkout).toBe(false);
-    expect(changed.draft.stage).toBe('needs_human');
+    expect(changed.draft.stage).toBe('awaiting_address');
     expect(
       advanceOrderDraft(changed.draft, 'confirmo o pedido', catalog).checkout
     ).toBe(false);
@@ -69,15 +109,55 @@ describe('structured order draft', () => {
     ).draft;
     expect(followup.items.map((item) => item.quantity)).toEqual([1, 2, 5]);
     const next = advanceOrderDraft(followup, '1 calabresa', catalog).draft;
-    expect(next.items.map((item) => item.quantity)).toEqual([1, 2, 5]);
+    expect(next.items.map((item) => item.quantity)).toEqual([2, 2, 5]);
     expect(next.unresolved).toEqual([]);
   });
-  it.each(['Rua Flores', 'Rua Flores, 10', 'Rua Flores Centro'])(
+  it.each([
+    'Rua Flores',
+    'Rua Flores Centro',
+    'Rua Flores bem passada',
+    'Rua Flores tudo separado',
+  ])(
+    'retains ambiguous address input for review instead of silently discarding it: %s',
+    (text) => {
+      const first = advanceOrderDraft(initial(), '2 carne', catalog).draft;
+      const pending = advanceOrderDraft(first, text, catalog);
+      expect(pending.draft.deliveryAddress).toBeUndefined();
+      expect(pending.draft.unresolved).toContain(text);
+      expect(pending.draft.stage).toBe('needs_human');
+      expect(pending.reply).toContain(text);
+      expect(pending.reply).toContain('esclarecimento');
+      expect(pending.draft.items).toEqual(first.items);
+      expect(pending.draft.version).toBeGreaterThan(first.version);
+      expect(first.unresolved).toEqual([]);
+      const restored = JSON.parse(JSON.stringify(pending.draft)) as OrderDraft;
+      const addressed = advanceOrderDraft(
+        restored,
+        'Rua Flores, 10 Centro',
+        catalog
+      );
+      expect(addressed.draft.deliveryAddress).toBe('Rua Flores, 10 Centro');
+      expect(addressed.draft.unresolved).toContain(text);
+      expect(addressed.draft.stage).toBe('needs_human');
+      expect(addressed.checkout).toBe(false);
+      const confirmed = advanceOrderDraft(
+        addressed.draft,
+        'confirmo o pedido',
+        catalog
+      );
+      expect(confirmed.draft.unresolved).toContain(text);
+      expect(confirmed.reply).toContain(text);
+      expect(confirmed.checkout).toBe(false);
+    }
+  );
+  it.each(['Rua Flores, 10'])(
     'blocks checkout until a complete delivery address is provided: %s',
     (address) => {
       const first = advanceOrderDraft(initial(), '2 carne', catalog).draft;
       const addressed = advanceOrderDraft(first, address, catalog);
-      expect(addressed.draft.deliveryAddress).toBe(address);
+      expect(addressed.draft.deliveryAddress).toBe(
+        address === 'Rua Flores, 10' ? address : undefined
+      );
       expect(addressed.draft.stage).toBe('awaiting_address');
       expect(addressed.reply).toContain('Número e Bairro');
       expect(
@@ -96,6 +176,62 @@ describe('structured order draft', () => {
       ).toBe(true);
     }
   );
+  it.each(['10A', '10a'])(
+    'requires confirmation of the summary for an address with suffix %s',
+    (number) => {
+      const first = advanceOrderDraft(initial(), '2 carne', catalog).draft;
+      const address = `Rua Flores,${number} Centro`;
+      const addressed = advanceOrderDraft(first, address, catalog);
+      expect(addressed.draft.deliveryAddress).toBe(address);
+      expect(addressed.draft.unresolved).toEqual([]);
+      expect(addressed.draft.stage).toBe('awaiting_confirmation');
+      expect(addressed.reply).toContain(address);
+      expect(addressed.reply).toContain('Resumo do pedido');
+      expect(addressed.draft.version).toBeGreaterThan(first.version);
+      expect(addressed.checkout).toBe(false);
+      expect(
+        advanceOrderDraft(addressed.draft, 'confirmo o pedido', catalog)
+          .checkout
+      ).toBe(true);
+      const withNote = advanceOrderDraft(
+        first,
+        `${address}, tudo separado`,
+        catalog
+      );
+      expect(withNote.draft.unresolved.join('\n')).toContain('tudo separado');
+      expect(withNote.draft.stage).toBe('needs_human');
+      expect(
+        advanceOrderDraft(withNote.draft, 'confirmo o pedido', catalog).checkout
+      ).toBe(false);
+    }
+  );
+  it.each([
+    'Rua Flores, 55 apto 123 C, Centro',
+    'Rua Flores 55 apto 123 C Centro',
+  ])('keeps apartment letters separate from order items: %s', (address) => {
+    const first = advanceOrderDraft(initial(), '2 carne', catalog).draft;
+    const addressed = advanceOrderDraft(first, address, catalog);
+    expect(addressed.draft.deliveryAddress).toBe(address);
+    expect(addressed.draft.unresolved).toEqual([]);
+    expect(addressed.draft.items).toEqual(first.items);
+    expect(addressed.draft.stage).toBe('awaiting_confirmation');
+    expect(addressed.reply).toContain(address);
+    expect(addressed.checkout).toBe(false);
+    expect(
+      advanceOrderDraft(addressed.draft, 'confirmo o pedido', catalog).checkout
+    ).toBe(true);
+    const noted = advanceOrderDraft(
+      first,
+      `${address}, tudo separado`,
+      catalog
+    );
+    expect(noted.draft.deliveryAddress).toBe(address);
+    expect(noted.draft.unresolved.join('\n')).toContain('tudo separado');
+    expect(noted.draft.stage).toBe('needs_human');
+    expect(
+      advanceOrderDraft(noted.draft, 'confirmo o pedido', catalog).checkout
+    ).toBe(false);
+  });
   it('validates a saved address before requesting order confirmation', () => {
     const first = advanceOrderDraft(initial(), '2 carne', catalog).draft;
     const addressed = advanceOrderDraft(
@@ -109,7 +245,7 @@ describe('structured order draft', () => {
       advanceOrderDraft(addressed.draft, 'confirmo o pedido', catalog).checkout
     ).toBe(false);
   });
-  it('preserves an ambiguous quantity after an address on the same line for clarification', () => {
+  it('adds items after the address and requires confirmation of the new total', () => {
     const first = advanceOrderDraft(initial(), '2 carne', catalog).draft;
     const corrected = advanceOrderDraft(
       first,
@@ -117,13 +253,13 @@ describe('structured order draft', () => {
       catalog
     );
     expect(corrected.draft.deliveryAddress).toBe('Rua Flores, 10 Centro');
-    expect(corrected.draft.items.map((item) => item.quantity)).toEqual([2]);
-    expect(corrected.draft.total).toBe(28);
-    expect(corrected.draft.unresolved.join(' ')).toContain('3 carne');
+    expect(corrected.draft.items.map((item) => item.quantity)).toEqual([5]);
+    expect(corrected.draft.total).toBe(70);
+    expect(corrected.draft.unresolved).toEqual([]);
     expect(corrected.checkout).toBe(false);
     expect(
       advanceOrderDraft(corrected.draft, 'confirmo o pedido', catalog).checkout
-    ).toBe(false);
+    ).toBe(true);
   });
   it.each([
     'sem pimentão',
@@ -176,7 +312,7 @@ describe('structured order draft', () => {
         .deliveryAddress
     ).toBeUndefined();
   });
-  it('applies additions and corrections without dropping other lines or doubling repeats', () => {
+  it('preserves explicit corrections and cumulatively merges later additions', () => {
     const first = advanceOrderDraft(
       initial(),
       '2 carne, 1 calabresa',
@@ -189,15 +325,15 @@ describe('structured order draft', () => {
     ).draft;
     expect(corrected.items.map((item) => item.quantity)).toEqual([3, 1]);
     const repeated = advanceOrderDraft(corrected, '3 carne', catalog).draft;
-    expect(repeated.items.map((item) => item.quantity)).toEqual([3, 1]);
+    expect(repeated.items.map((item) => item.quantity)).toEqual([6, 1]);
     const added = advanceOrderDraft(
       repeated,
       'adicione mais 2 carne',
       catalog
     ).draft;
-    expect(added.items.map((item) => item.quantity)).toEqual([3, 1, 2]);
+    expect(added.items.map((item) => item.quantity)).toEqual([8, 1]);
     const removed = advanceOrderDraft(added, 'remova linha 2', catalog).draft;
-    expect(removed.items.map((item) => item.id)).toEqual(['meat', 'meat']);
+    expect(removed.items.map((item) => item.id)).toEqual(['meat']);
   });
   it('requires confirmation of the addressed summary before checkout', () => {
     const captured = advanceOrderDraft(

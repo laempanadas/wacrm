@@ -9,6 +9,7 @@ import { catalogEntries, loadOrderCatalog } from './order-catalog';
 import { applyContactTag } from './create-order';
 import type { OrderDraft } from './order-draft';
 import { getExistingPaymentLink } from '@/lib/payments/mercado-pago';
+import { saveContactOrderFields } from './custom-fields';
 
 vi.mock('./create-order-with-mercado-pago', () => ({
   createOrderWithMercadoPago: vi.fn(),
@@ -272,6 +273,104 @@ beforeEach(() => {
 });
 
 describe('text order pipeline (all external effects mocked)', () => {
+  it('saves only complete addresses to the customer profile and explains where to copy the real Pix code', async () => {
+    const f = fixture();
+    await f.turn('2 carne', 'items');
+    await f.turn('Rua Flores, 10', 'incomplete-address');
+    expect(saveContactOrderFields).toHaveBeenLastCalledWith(
+      expect.anything(),
+      'account-1',
+      'contact-1',
+      expect.objectContaining({ endereco: undefined })
+    );
+    await f.turn('Rua Flores, 10 Centro', 'address');
+    expect(saveContactOrderFields).toHaveBeenLastCalledWith(
+      expect.anything(),
+      'account-1',
+      'contact-1',
+      expect.objectContaining({ endereco: 'Rua Flores, 10 Centro' })
+    );
+    await f.turn('confirmo o pedido', 'confirm');
+    const payment = f.messages.at(-1)!;
+    expect(payment.content_text).toContain('Pix Copia e Cola');
+    expect(payment.content_text).toContain('checkout');
+    expect(payment.content_text).not.toContain('[Botão:');
+    expect(payment.interactive_payload).toMatchObject({
+      type: 'cta_url',
+      action: {
+        parameters: {
+          url: 'https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=test',
+        },
+      },
+    });
+  });
+  it.each([
+    'Vixi está meio confuso',
+    'Seria este pedido',
+    'não entendi',
+    'qual o valor da entrega?',
+    'podemos fechar',
+  ])(
+    'answers "%s" without treating it as an address or abandoning the cart',
+    async (comment) => {
+      const f = fixture();
+      await f.turn('2 carne', 'items');
+      const snapshot = structuredClone(f.state());
+      expect((await f.turn(comment, 'comment')).outcome).toBe(
+        'address_requested'
+      );
+      expect(f.state()).toEqual(snapshot);
+      expect(f.conversationDisabled()).toBe(false);
+      expect(f.messages.at(-1)?.content_text).toContain('Rua, Número e Bairro');
+      expect(f.messages.at(-1)?.content_text).not.toContain('Resumo do pedido');
+      expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+      await f.turn('Rua Flores, 10 Centro', 'address');
+      expect(f.state().stage).toBe('awaiting_confirmation');
+      expect(f.messages.at(-1)?.content_text).toContain('2x Carne');
+    }
+  );
+  it('accumulates repeated products from the durable cart without summary spam or duplicate retry additions', async () => {
+    const f = fixture();
+    await f.turn('2 carne', 'first-items');
+    await f.turn('2 carne', 'more-items');
+    expect(f.state().items).toEqual([
+      expect.objectContaining({ id: 'meat', quantity: 4 }),
+    ]);
+    expect(f.state().total).toBe(56);
+    await f.turn('1 calabresa', 'new-flavor');
+    expect(f.state().items.map((item) => item.quantity)).toEqual([4, 1]);
+    expect(f.state().total).toBe(70);
+    await f.turn('2 carne', 'more-items');
+    expect(f.state().items.map((item) => item.quantity)).toEqual([4, 1]);
+    expect(f.messages).toHaveLength(3);
+    expect(
+      f.messages.every(
+        (message) => !String(message.content_text).includes('Resumo do pedido')
+      )
+    ).toBe(true);
+    await f.turn('Rua Flores, 10 Centro', 'address');
+    expect(f.messages.at(-1)?.content_text).toContain('4x Carne');
+    expect(f.messages.at(-1)?.content_text).toContain('1x Calabresa');
+    expect(f.messages.at(-1)?.content_text).toContain('🚚 Entrega: *GRÁTIS*');
+    expect(f.messages.at(-1)?.content_text).toContain('R$ 70,00');
+    expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+    await f.turn('confirmo o pedido', 'confirmation');
+    expect(createOrderWithMercadoPago).toHaveBeenCalledTimes(1);
+    expect(createOrderWithMercadoPago).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        items: [
+          expect.objectContaining({ id: 'meat', quantity: 4 }),
+          expect.objectContaining({ id: 'sausage', quantity: 1 }),
+        ],
+      })
+    );
+    expect(
+      f.messages.filter((message) =>
+        String(message.content_text).includes('Resumo do pedido')
+      )
+    ).toHaveLength(1);
+  });
   it('keeps the exact 5/2/2 order through address, free delivery, confirmation and one real CTA payload', async () => {
     vi.mocked(loadOrderCatalog).mockResolvedValue(
       catalogEntries([
