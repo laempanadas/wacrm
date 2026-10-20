@@ -15,6 +15,7 @@ import { toast } from 'sonner';
 // (conversation_assigned) but this keeps future types a one-line add.
 const TYPE_ICON: Record<Notification['type'], typeof Bell> = {
   conversation_assigned: UserPlus,
+  human_attention_required: Bell,
 };
 
 export default function NotificationsPage() {
@@ -170,7 +171,7 @@ export default function NotificationsPage() {
         <div>
           <h1 className="text-foreground text-2xl font-bold">Notifications</h1>
           <p className="text-muted-foreground mt-1 text-sm">
-            Conversations other teammates assign to you show up here.
+            Atribuições e solicitações de atendimento humano aparecem aqui.
           </p>
         </div>
         <Button

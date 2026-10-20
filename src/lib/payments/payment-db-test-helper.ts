@@ -103,7 +103,13 @@ export function paymentDatabase(
             all.some(
               (r) =>
                 r.account_id === payload!.account_id &&
-                r.external_reference === payload!.external_reference
+                (r.external_reference === payload!.external_reference ||
+                  (payload!.payment_fingerprint != null &&
+                    payload!.contact_id != null &&
+                    payload!.status !== 'paid' &&
+                    r.status !== 'paid' &&
+                    r.contact_id === payload!.contact_id &&
+                    r.payment_fingerprint === payload!.payment_fingerprint))
             )
           ) {
             return Promise.resolve({

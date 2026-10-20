@@ -10,9 +10,10 @@ import { runAutomationsForTrigger } from '@/lib/automations/engine';
 import { dispatchInboundToFlows } from '@/lib/flows/engine';
 import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply';
 import { dispatchWebhookEvent } from '@/lib/webhooks/deliver';
-import { ensureAutoDealForConversation } from '@/lib/deals/auto-deal-lifecycle';
-import { hasOrderIntent } from '@/lib/orders/text-order-parser';
-import { processFreeTextOrderInbound } from '@/lib/orders/text-order-flow';
+import {
+  processFreeTextOrderInbound,
+  processInboundHandoff,
+} from '@/lib/orders/text-order-flow';
 import {
   handleTemplateWebhookChange,
   isTemplateWebhookField,
@@ -209,18 +210,34 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }
 
-  after(async () => {
-    try {
-      await processWebhook(body);
-    } catch (error) {
-      console.error('Error processing webhook:', error);
+  const pendingEffects: Array<() => Promise<void>> = [];
+  try {
+    // History is durable before acknowledging Meta. Slow business effects are
+    // scheduled only after their separate at-most-once receipt is claimed.
+    await processWebhook(body, pendingEffects);
+  } catch (error) {
+    console.error('Error persisting webhook:', error);
+    return NextResponse.json(
+      { error: 'Unable to persist webhook' },
+      { status: 500 }
+    );
+  } finally {
+    // after callbacks may run concurrently. Keep this payload's turns in one
+    // ordered worker, including receipts claimed before a later persistence error.
+    if (pendingEffects.length) {
+      after(async () => {
+        for (const effect of pendingEffects) await effect();
+      });
     }
-  });
+  }
 
   return NextResponse.json({ status: 'received' }, { status: 200 });
 }
 
-async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
+async function processWebhook(
+  body: { entry?: WhatsAppWebhookEntry[] },
+  pendingEffects: Array<() => Promise<void>>
+) {
   if (!body.entry) return;
 
   for (const entry of body.entry) {
@@ -252,7 +269,7 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
 
       if (configError || !configRows || configRows.length === 0) {
         console.error('No config found for phone_number_id:', phoneNumberId);
-        continue;
+        throw new Error('Unable to route inbound account');
       }
 
       const config = configRows[0];
@@ -268,7 +285,8 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
           config.account_id,
           config.user_id,
           decryptedAccessToken,
-          phoneNumberId
+          phoneNumberId,
+          pendingEffects
         );
       }
     }
@@ -431,7 +449,8 @@ async function processMessage(
   accountId: string,
   configOwnerUserId: string,
   accessToken: string,
-  phoneNumberId: string
+  phoneNumberId: string,
+  pendingEffects: Array<() => Promise<void>>
 ) {
   const senderPhone = normalizePhone(message.from);
   const contactName = contact.profile.name;
@@ -442,7 +461,7 @@ async function processMessage(
     senderPhone,
     contactName
   );
-  if (!contactOutcome) return;
+  if (!contactOutcome) throw new Error('Unable to persist inbound contact');
   const contactRecord = contactOutcome.contact;
 
   const convResult = await findOrCreateConversation(
@@ -450,40 +469,18 @@ async function processMessage(
     configOwnerUserId,
     contactRecord.id
   );
-  if (!convResult) return;
+  if (!convResult) throw new Error('Unable to persist inbound conversation');
   const conversation = convResult.conversation;
+  const conversationCreated = convResult.created;
+  const contactWasCreated = contactOutcome.wasCreated;
 
-  if (convResult.created) {
-    await dispatchWebhookEvent(
-      supabaseAdmin(),
-      accountId,
-      'conversation.created',
-      {
-        conversation_id: conversation.id,
-        contact_id: contactRecord.id,
-      }
-    );
-  }
-
+  // Reactions have no standalone inbound history row.
   if (message.type === 'reaction') {
     await handleReaction(message, conversation.id, contactRecord.id);
     return;
   }
 
-  // Reserve the Meta ID before inserting history or executing any business effect.
-  // An uncertain/crashed receipt is intentionally not replayed automatically.
-  const { error: receiptError } = await supabaseAdmin()
-    .from('whatsapp_inbound_receipts')
-    .insert({
-      account_id: accountId,
-      meta_message_id: message.id,
-      payload: message,
-    });
-  if (receiptError?.code === '23505') return;
-  if (receiptError) {
-    console.error('[webhook] Unable to reserve inbound receipt:', receiptError);
-    return;
-  }
+  // Persist history independently of the business-effect receipt.
 
   const { contentText, mediaUrl, interactiveReplyId, order } =
     await parseMessageContent(message, accessToken);
@@ -534,205 +531,261 @@ async function processMessage(
       interactive_reply_id: interactiveReplyId,
     });
 
-  if (msgError) {
+  if (msgError && msgError.code !== '23505') {
     console.error('Error inserting message:', msgError);
-    return;
+    throw new Error('Unable to persist inbound message');
   }
 
-  const conversationUpdate: Record<string, unknown> = {
-    last_message_text: contentText || `[${message.type}]`,
-    last_message_at: new Date().toISOString(),
-    unread_count: (conversation.unread_count || 0) + 1,
-    updated_at: new Date().toISOString(),
-  };
+  // Existing receipts (including legacy payloads) suppress effects, not repair.
+  const { error: receiptError } = await supabaseAdmin()
+    .from('whatsapp_inbound_receipts')
+    .insert({
+      account_id: accountId,
+      meta_message_id: message.id,
+      payload: message,
+    });
+  if (receiptError?.code === '23505') return;
+  if (receiptError) throw new Error('Unable to reserve inbound effects');
 
-  // Reabertura automática (Opção A): se o cliente já havia sido atendido e a
-  // conversa foi fechada (ex.: após pagamento aprovado), uma nova mensagem
-  // reabre a conversa e zera o contador de respostas da IA, para que a IA
-  // volte a atender do zero dentro do limite por conversa.
-  if (conversation.status === 'closed') {
-    conversationUpdate.status = 'open';
-    conversationUpdate.ai_reply_count = 0;
+  // This receipt winner owns conversation metadata, even if a previous
+  // delivery saved history but could not claim the receipt.
+  {
+    const conversationUpdate: Record<string, unknown> = {
+      last_message_text: contentText || `[${message.type}]`,
+      last_message_at: new Date().toISOString(),
+      unread_count: (conversation.unread_count || 0) + 1,
+      updated_at: new Date().toISOString(),
+    };
+
+    // Reabertura automática (Opção A): se o cliente já havia sido atendido e a
+    // conversa foi fechada (ex.: após pagamento aprovado), uma nova mensagem
+    // reabre a conversa e zera o contador de respostas da IA, para que a IA
+    // volte a atender do zero dentro do limite por conversa.
+    if (conversation.status === 'closed') {
+      conversationUpdate.status = 'open';
+      conversationUpdate.ai_reply_count = 0;
+    }
+
+    await supabaseAdmin()
+      .from('conversations')
+      .update(conversationUpdate)
+      .eq('id', conversation.id);
   }
 
-  await supabaseAdmin()
-    .from('conversations')
-    .update(conversationUpdate)
-    .eq('id', conversation.id);
-
-  await flagBroadcastReplyIfAny(accountId, contactRecord.id);
-
-  // ============================================================
-  // 🥟 PEDIDO POR TEXTO LIVRE NO WHATSAPP
-  // ============================================================
-  if (!order && (contentText || message.text?.body)) {
+  pendingEffects.push(async () => {
     try {
-      const textOrderResult = await processFreeTextOrderInbound({
-        supabase: supabaseAdmin(),
+      await runBusinessEffects();
+    } catch (error) {
+      // An uncertain business attempt must not be replayed automatically.
+      console.error('[webhook] inbound business effects failed:', error);
+    }
+  });
+
+  async function runBusinessEffects() {
+    if (conversationCreated) {
+      await dispatchWebhookEvent(
+        supabaseAdmin(),
         accountId,
-        userId: configOwnerUserId,
-        contactRecord: {
-          id: contactRecord.id,
-          name: contactRecord.name,
-          phone: senderPhone,
-        },
-        contactName: contactRecord.name || contactName,
-        senderPhone,
-        conversationId: conversation.id,
-        inboundText: contentText ?? message.text?.body ?? '',
-        inboundMessageId: message.id,
-        inboundTimestamp: new Date(
-          Number(message.timestamp) * 1000
-        ).toISOString(),
-        phoneNumberId,
-        accessToken,
-      });
+        'conversation.created',
+        {
+          conversation_id: conversation.id,
+          contact_id: contactRecord.id,
+        }
+      );
+    }
+    await flagBroadcastReplyIfAny(accountId, contactRecord.id);
 
-      if (textOrderResult.handled) {
-        console.log(
-          '[webhook] Mensagem processada pelo fluxo de pedido por texto livre:',
-          textOrderResult.outcome
-        );
-
-        await dispatchWebhookEvent(
-          supabaseAdmin(),
+    // ============================================================
+    // 🥟 PEDIDO POR TEXTO LIVRE NO WHATSAPP
+    // ============================================================
+    if (!order && (contentText || message.text?.body)) {
+      try {
+        const textOrderResult = await processFreeTextOrderInbound({
+          supabase: supabaseAdmin(),
           accountId,
-          'message.received',
-          {
-            conversation_id: conversation.id,
-            contact_id: contactRecord.id,
-            whatsapp_message_id: message.id,
-            content_type: contentType,
-            text: contentText,
-          }
-        );
+          userId: configOwnerUserId,
+          contactRecord: {
+            id: contactRecord.id,
+            name: contactRecord.name,
+            phone: senderPhone,
+          },
+          contactName: contactRecord.name || contactName,
+          senderPhone,
+          conversationId: conversation.id,
+          inboundText: contentText ?? message.text?.body ?? '',
+          inboundMessageId: message.id,
+          inboundTimestamp: new Date(
+            Number(message.timestamp) * 1000
+          ).toISOString(),
+          phoneNumberId,
+          accessToken,
+        });
 
+        if (textOrderResult.handled) {
+          console.log(
+            '[webhook] Mensagem processada pelo fluxo de pedido por texto livre:',
+            textOrderResult.outcome
+          );
+
+          await dispatchWebhookEvent(
+            supabaseAdmin(),
+            accountId,
+            'message.received',
+            {
+              conversation_id: conversation.id,
+              contact_id: contactRecord.id,
+              whatsapp_message_id: message.id,
+              content_type: contentType,
+              text: contentText,
+            }
+          );
+
+          return;
+        }
+      } catch (err) {
+        console.error(
+          '[webhook] Erro no fluxo de pedido por texto livre:',
+          err
+        );
+        // Never fall through to the LLM or a second payment path after a failed order turn.
+        await supabaseAdmin()
+          .from('conversations')
+          .update({ ai_autoreply_disabled: true })
+          .eq('id', conversation.id)
+          .eq('account_id', accountId);
         return;
       }
-    } catch (err) {
-      console.error('[webhook] Erro no fluxo de pedido por texto livre:', err);
-      // Never fall through to the LLM or a second payment path after a failed order turn.
-      await supabaseAdmin()
-        .from('conversations')
-        .update({ ai_autoreply_disabled: true })
-        .eq('id', conversation.id)
-        .eq('account_id', accountId);
-      return;
     }
-  }
 
-  // ============================================================
-  // 🤖 AUTOMAÇÃO: CRIAR DEAL AUTOMATICAMENTE
-  // ============================================================
-  // Garante que existe um deal aberto para a conversa quando é mensagem comum.
-  // Pedidos de catálogo e texto livre (inclusive mensagens do site) gerenciam seus
-  // próprios deals com os dados completos (itens, total, endereço).
-  if (!order && !hasOrderIntent(contentText || '')) {
-    try {
-      await ensureAutoDealForConversation(supabaseAdmin(), {
-        accountId,
-        userId: configOwnerUserId,
-        contactId: contactRecord.id,
-        contactName: contactRecord.name || contactName,
-        conversationId: conversation.id,
-      });
-    } catch (err) {
-      console.warn('[webhook] auto-deal creation failed (non-blocking):', err);
-    }
-  }
+    // Deals are created only by a catalog/order flow, never by incidental chat.
 
-  // Checkout is only authorized from a confirmed, catalog-grounded structured draft.
-  // Never charge a total extracted from AI prose or supplied by a website message.
-  // ============================================================
-  // 🔄 FLUXOS NORMAIS
-  // ============================================================
-  const flowResult = await dispatchInboundToFlows({
-    accountId,
-    userId: configOwnerUserId,
-    contactId: contactRecord.id,
-    conversationId: conversation.id,
-    message: order
-      ? {
-          kind: 'catalog_order',
-          text: contentText ?? '',
-          total: order.total,
-          items: order.items,
-          notes: order.notes,
-          meta_message_id: message.id,
-        }
-      : interactiveReplyId
-        ? {
-            kind: 'interactive_reply',
-            reply_id: interactiveReplyId,
-            reply_title: contentText ?? '',
-            meta_message_id: message.id,
-            context_message_id: message.context?.id,
-          }
-        : {
-            kind: 'text',
-            text: contentText ?? message.text?.body ?? '',
-            meta_message_id: message.id,
+    // Checkout is only authorized from a confirmed, catalog-grounded structured draft.
+    // Never charge a total extracted from AI prose or supplied by a website message.
+    // ============================================================
+    // 🔄 FLUXOS NORMAIS
+    // ============================================================
+    // A native cart must honor the same persisted human handoff as text orders.
+    if (order) {
+      try {
+        const blocked = await processInboundHandoff({
+          supabase: supabaseAdmin(),
+          accountId,
+          userId: configOwnerUserId,
+          contactRecord: {
+            id: contactRecord.id,
+            name: contactRecord.name,
+            phone: senderPhone,
           },
-    isFirstInboundMessage,
-  });
-  const flowConsumed = flowResult.consumed;
+          contactName: contactRecord.name || contactName,
+          senderPhone,
+          conversationId: conversation.id,
+          inboundText: contentText ?? '',
+          inboundMessageId: message.id,
+          inboundTimestamp: new Date(
+            Number(message.timestamp) * 1000
+          ).toISOString(),
+          phoneNumberId,
+          accessToken,
+        });
+        if (blocked) return;
+      } catch (error) {
+        console.error('[webhook] native order handoff failed:', error);
+        await supabaseAdmin()
+          .from('conversations')
+          .update({ ai_autoreply_disabled: true })
+          .eq('id', conversation.id)
+          .eq('account_id', accountId);
+        return;
+      }
+    }
 
-  const inboundText = contentText ?? message.text?.body ?? '';
-  const automationTriggers: (
-    | 'new_contact_created'
-    | 'first_inbound_message'
-    | 'new_message_received'
-    | 'keyword_match'
-  )[] = [];
-
-  if (!flowConsumed) {
-    automationTriggers.push('new_message_received', 'keyword_match');
-  }
-
-  if (contactOutcome.wasCreated)
-    automationTriggers.unshift('new_contact_created');
-  if (isFirstInboundMessage)
-    automationTriggers.unshift('first_inbound_message');
-  for (const triggerType of automationTriggers) {
-    runAutomationsForTrigger({
+    const flowResult = await dispatchInboundToFlows({
       accountId,
-      triggerType,
+      userId: configOwnerUserId,
       contactId: contactRecord.id,
-      context: {
-        message_text: inboundText,
-        conversation_id: conversation.id,
-        contact_name: contactRecord.name,
-      },
-    }).catch((err) => console.error('[automations] dispatch failed:', err));
-  }
-
-  // A cart the order flow already picked up (or a Meta retry of it) must
-  // not also get an AI reply — the customer would get two answers.
-  const shouldAttemptAi =
-    !(order && flowConsumed) &&
-    shouldAttemptAiReply({
-      flowConsumed,
-      outcome: flowResult.outcome,
-      interactiveReplyId,
-      inboundText,
-    });
-
-  if (shouldAttemptAi) {
-    await dispatchInboundToAiReply({
-      accountId,
       conversationId: conversation.id,
-      contactId: contactRecord.id,
-      configOwnerUserId,
+      message: order
+        ? {
+            kind: 'catalog_order',
+            text: contentText ?? '',
+            total: order.total,
+            items: order.items,
+            notes: order.notes,
+            meta_message_id: message.id,
+          }
+        : interactiveReplyId
+          ? {
+              kind: 'interactive_reply',
+              reply_id: interactiveReplyId,
+              reply_title: contentText ?? '',
+              meta_message_id: message.id,
+              context_message_id: message.context?.id,
+            }
+          : {
+              kind: 'text',
+              text: contentText ?? message.text?.body ?? '',
+              meta_message_id: message.id,
+            },
+      isFirstInboundMessage,
+    });
+    const flowConsumed = flowResult.consumed;
+
+    const inboundText = contentText ?? message.text?.body ?? '';
+    const automationTriggers: (
+      | 'new_contact_created'
+      | 'first_inbound_message'
+      | 'new_message_received'
+      | 'keyword_match'
+    )[] = [];
+
+    if (!flowConsumed) {
+      automationTriggers.push('new_message_received', 'keyword_match');
+    }
+
+    if (contactWasCreated) automationTriggers.unshift('new_contact_created');
+    if (isFirstInboundMessage)
+      automationTriggers.unshift('first_inbound_message');
+    for (const triggerType of automationTriggers) {
+      runAutomationsForTrigger({
+        accountId,
+        triggerType,
+        contactId: contactRecord.id,
+        context: {
+          message_text: inboundText,
+          conversation_id: conversation.id,
+          contact_name: contactRecord.name,
+        },
+      }).catch((err) => console.error('[automations] dispatch failed:', err));
+    }
+
+    // A cart the order flow already picked up (or a Meta retry of it) must
+    // not also get an AI reply — the customer would get two answers.
+    const shouldAttemptAi =
+      !(order && flowConsumed) &&
+      shouldAttemptAiReply({
+        flowConsumed,
+        outcome: flowResult.outcome,
+        interactiveReplyId,
+        inboundText,
+      });
+
+    if (shouldAttemptAi) {
+      await dispatchInboundToAiReply({
+        accountId,
+        conversationId: conversation.id,
+        contactId: contactRecord.id,
+        configOwnerUserId,
+      });
+    }
+
+    await dispatchWebhookEvent(supabaseAdmin(), accountId, 'message.received', {
+      conversation_id: conversation.id,
+      contact_id: contactRecord.id,
+      whatsapp_message_id: message.id,
+      content_type: contentType,
+      text: contentText,
     });
   }
-
-  await dispatchWebhookEvent(supabaseAdmin(), accountId, 'message.received', {
-    conversation_id: conversation.id,
-    contact_id: contactRecord.id,
-    whatsapp_message_id: message.id,
-    content_type: contentType,
-    text: contentText,
-  });
 }
 
 async function parseMessageContent(

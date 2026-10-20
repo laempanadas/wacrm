@@ -248,7 +248,7 @@ export async function POST(req: NextRequest) {
     const { data: order, error: orderError } = await db
       .from('orders')
       .select(
-        'id, total, status, contact_id, deal_id, account_id, preference_id, external_reference, items, delivery_address, payer_name'
+        'id, total, status, contact_id, deal_id, account_id, preference_id, external_reference, items, delivery_address, payer_name, created_at, payment_conversation_id'
       )
       .eq('preference_id', payment.preferenceId)
       .maybeSingle();
@@ -364,6 +364,31 @@ export async function POST(req: NextRequest) {
     }
 
     const paidAmount = payment.paidAmount!;
+    // Contact fields/tags and inbox closure describe the CURRENT purchase, not
+    // whichever historical preference happened to settle last. Unknown legacy
+    // timestamps are ambiguous: settle the bound order but leave the contact.
+    let hasNewerOpenOrder = false;
+    if (order.contact_id) {
+      const others = await db
+        .from('orders')
+        .select('id, created_at')
+        .eq('account_id', order.account_id)
+        .eq('contact_id', order.contact_id)
+        .neq('id', order.id)
+        .or('status.is.null,status.neq.paid');
+      if (others.error) throw others.error;
+      if (!others.data)
+        throw new Error('Could not verify current contact purchase');
+      const paidCreatedAt = Date.parse(order.created_at ?? '');
+      hasNewerOpenOrder = others.data.some((other) => {
+        const otherCreatedAt = Date.parse(other.created_at ?? '');
+        return (
+          !Number.isFinite(paidCreatedAt) ||
+          !Number.isFinite(otherCreatedAt) ||
+          otherCreatedAt >= paidCreatedAt
+        );
+      });
+    }
 
     // Só quem efetivamente muda o status confirma ao cliente — duas
     // notificações simultâneas não geram duas mensagens.
@@ -412,7 +437,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    if (order.account_id && order.contact_id) {
+    if (order.account_id && order.contact_id && !hasNewerOpenOrder) {
       await tagContactConfirmed(db, order.account_id, order.contact_id);
 
       await notifyCustomer({
@@ -457,20 +482,21 @@ export async function POST(req: NextRequest) {
         itensUltimoPedido: itensPedido,
       });
 
-      // Pedido pago = atendimento concluído: fecha a conversa do cliente.
-      // A IA respeita conversas fechadas (ver src/lib/ai/auto-reply.ts) e para
-      // de responder; a conversa reabre automaticamente se o cliente mandar
-      // uma nova mensagem (ver src/app/api/whatsapp/webhook/route.ts).
-      const { error: closeError } = await db
-        .from('conversations')
-        .update({ status: 'closed', updated_at: new Date().toISOString() })
-        .eq('account_id', order.account_id)
-        .eq('contact_id', order.contact_id);
-      if (closeError) {
-        console.error(
-          '[mp-webhook] Erro ao fechar conversa após pagamento:',
-          closeError
-        );
+      // Legacy orders have no originating conversation: do not guess the
+      // current inbox or close every conversation belonging to the contact.
+      if (order.payment_conversation_id) {
+        const { error: closeError } = await db
+          .from('conversations')
+          .update({ status: 'closed', updated_at: new Date().toISOString() })
+          .eq('account_id', order.account_id)
+          .eq('contact_id', order.contact_id)
+          .eq('id', order.payment_conversation_id);
+        if (closeError) {
+          console.error(
+            '[mp-webhook] Erro ao fechar conversa após pagamento:',
+            closeError
+          );
+        }
       }
     }
 

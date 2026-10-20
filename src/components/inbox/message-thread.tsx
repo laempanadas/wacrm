@@ -27,7 +27,8 @@ import {
   PanelRightOpen,
   PanelRightClose,
 } from 'lucide-react';
-import { format, isToday, isYesterday, differenceInHours } from 'date-fns';
+import { format, isToday, isYesterday } from 'date-fns';
+import { sessionWindow } from '@/lib/whatsapp/session-window';
 import { Badge } from '@/components/ui/badge';
 import {
   DropdownMenu,
@@ -222,36 +223,14 @@ export function MessageThread({
     };
   }, []);
 
-  // 24-hour session timer
+  // Free-form sends are authorized by customer history, not outbound activity.
   const sessionInfo = useMemo(() => {
-    if (!messages.length) return { expired: false, remaining: '' };
-
-    // Find last customer message
-    const lastCustomerMsg = [...messages]
-      .reverse()
-      .find((m) => m.sender_type === 'customer');
-
-    if (!lastCustomerMsg)
-      return { expired: true, remaining: 'No customer messages' };
-
-    const hoursSince = differenceInHours(
-      new Date(),
-      new Date(lastCustomerMsg.created_at)
-    );
-    const expired = hoursSince >= 24;
-
-    if (expired) {
-      return { expired: true, remaining: 'Expired' };
-    }
-
-    const hoursLeft = 24 - hoursSince;
-    const remaining =
-      hoursLeft >= 1
-        ? `${Math.floor(hoursLeft)}h remaining`
-        : `${Math.floor(hoursLeft * 60)}m remaining`;
-
-    return { expired, remaining };
-  }, [messages]);
+    const lastCustomerAt = messages
+      .filter((m) => m.sender_type === 'customer')
+      .map((m) => m.created_at)
+      .sort((a, b) => Date.parse(b) - Date.parse(a))[0];
+    return sessionWindow(lastCustomerAt, now);
+  }, [messages, now]);
 
   // Store latest callback in a ref so fetchMessages doesn't need to
   // depend on `onMessagesLoaded` — otherwise parent re-renders cause

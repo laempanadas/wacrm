@@ -1,6 +1,8 @@
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
+  // Tests use only explicit dummy values. Never load local application secrets.
+  envDir: false,
   resolve: {
     tsconfigPaths: true,
   },

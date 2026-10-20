@@ -29,6 +29,7 @@ import { PEDIDO_EMPANADAS_FLOW } from './pedido-empanadas-flow';
 import { loadOrderCatalog } from '@/lib/orders/order-catalog';
 import { isCompleteDeliveryAddress } from '@/lib/orders/text-order-parser';
 import { groundCatalogOrder } from './catalog-order';
+import { HANDOFF_WAITING, sendHandoffNotice } from '@/lib/whatsapp/handoff';
 import type { Item } from '@/lib/orders/create-order-with-mercado-pago';
 import {
   engineSendInteractiveButtons,
@@ -621,7 +622,8 @@ async function executeHandoff(
       status: 'handed_off',
       end_reason: 'handoff_node',
       ...(cfg.assign_to ? { assigned_agent_id: cfg.assign_to } : {}),
-    }))
+    })) &&
+    run.status !== 'handed_off'
   )
     return;
   const interpolatedNote = cfg.note
@@ -633,6 +635,24 @@ async function executeHandoff(
     note: interpolatedNote ?? null,
     assigned_to: cfg.assign_to ?? null,
   });
+  // A successful payment CTA already acknowledged checkout; do not append
+  // a redundant generic notice at the flow's final handoff node.
+  if (run.conversation_id && run.contact_id && !run.vars.link_mercado_pago)
+    await sendHandoffNotice(
+      db,
+      run.account_id,
+      run.conversation_id,
+      `handoff:${run.id}:waiting`,
+      HANDOFF_WAITING,
+      (text) =>
+        engineSendText({
+          accountId: run.account_id,
+          userId: run.user_id,
+          conversationId: run.conversation_id!,
+          contactId: run.contact_id!,
+          text,
+        })
+    );
 }
 
 async function evaluateConditionNode(

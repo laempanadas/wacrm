@@ -50,7 +50,8 @@ function database() {
     let op = 'select';
     let payload: Row = {};
     const filters: Array<[string, unknown]> = [];
-    const run = () => {
+    let excludePaid = false;
+    const run = (single = true) => {
       calls.push({ table, op, filters: [...filters] });
       if (failures[`${table}:${op}`])
         return { data: null, error: { message: failures[`${table}:${op}`] } };
@@ -79,15 +80,27 @@ function database() {
         rows.push(row);
         return { data: row, error: null };
       }
-      const matched = rows.filter((r) => filters.every(([k, v]) => r[k] === v));
+      const matched = rows.filter(
+        (r) =>
+          (!excludePaid || r.status !== 'paid') &&
+          filters.every(([k, v]) => r[k] === v)
+      );
       if (op === 'update')
         matched.forEach((r) => Object.assign(r, structuredClone(payload)));
       return {
-        data: matched[0] ? structuredClone(matched[0]) : null,
+        data: single
+          ? matched[0]
+            ? structuredClone(matched[0])
+            : null
+          : structuredClone(matched),
         error: null,
       };
     };
     const query = {
+      or: () => {
+        excludePaid = true;
+        return query;
+      },
       insert: (p: Row) => {
         op = 'insert';
         payload = p;
@@ -103,9 +116,10 @@ function database() {
         filters.push([k, v]);
         return query;
       },
-      maybeSingle: async () => run(),
-      single: async () => run(),
-      then: (resolve: (v: ReturnType<typeof run>) => void) => resolve(run()),
+      maybeSingle: async () => run(true),
+      single: async () => run(true),
+      then: (resolve: (v: ReturnType<typeof run>) => void) =>
+        resolve(run(false)),
     };
     return query;
   };
@@ -161,6 +175,314 @@ beforeEach(() => {
 });
 
 describe('durable checkout', () => {
+  it.each(['dinheiro', 'na_retirada'])(
+    'ignores only known unbound offline history (%s)',
+    async (payment_method) => {
+      db.tables.orders.push({
+        id: 'offline',
+        account_id: 'account',
+        contact_id: 'contact',
+        external_reference: 'OFFLINE',
+        payment_method,
+        status: 'pending',
+        items: 'old text',
+      });
+      expect((await createOrderWithMercadoPago(ctx, input)).ok).toBe(true);
+      expect(payment.createPaymentLink).toHaveBeenCalledTimes(1);
+    }
+  );
+  it.each([
+    { payment_method: 'mercado_pago' },
+    { payment_method: null },
+    { payment_method: 'unknown' },
+    { payment_method: 'dinheiro', preference_id: 'binding' },
+    { payment_method: 'na_retirada', payment_url: 'binding' },
+  ])('blocks incomplete potential MP history: %j', async (claim) => {
+    db.tables.orders.push({
+      id: 'legacy',
+      account_id: 'account',
+      contact_id: 'contact',
+      external_reference: 'LEGACY',
+      status: 'pending',
+      items: null,
+      ...claim,
+    });
+    const before = structuredClone(db.tables);
+    expect((await createOrderWithMercadoPago(ctx, input)).ok).toBe(false);
+    expect(db.tables).toEqual(before);
+    expect(payment.createPaymentLink).not.toHaveBeenCalled();
+    expect(deals.createOrderDeal).not.toHaveBeenCalled();
+  });
+  it.each(['ambiguous', 'uncertain', 'missing binding', 'frozen reference'])(
+    'never borrows a legacy snapshot with %s',
+    async (failure) => {
+      await createOrderWithMercadoPago(ctx, input);
+      const row = db.tables.orders[0];
+      row.payment_fingerprint = null;
+      if (failure === 'ambiguous')
+        db.tables.orders.push({
+          ...row,
+          id: 'other',
+          external_reference: 'OTHER',
+        });
+      if (failure === 'uncertain') row.status = 'checkout_uncertain';
+      if (failure === 'missing binding') row.preference_id = null;
+      if (failure === 'frozen reference')
+        db.tables.order_checkouts.push({
+          account_id: 'account',
+          external_reference: 'NEW',
+          status: 'uncertain',
+          input_fingerprint: 'frozen',
+        });
+      const before = structuredClone(db.tables);
+      expect(
+        (
+          await createOrderWithMercadoPago(ctx, {
+            ...input,
+            externalReference: 'NEW',
+          })
+        ).ok
+      ).toBe(false);
+      expect(payment.createPaymentLink).toHaveBeenCalledTimes(1);
+      expect(db.tables).toEqual(before);
+    }
+  );
+  it.each([
+    { id: 'other-sku' },
+    { id: ' sku-a ' },
+    { title: 'Other' },
+    { description: 'Other description' },
+    { description: 'Sem cebola ' },
+    { unitPrice: 10.02 },
+  ])(
+    'does not infer legacy cart identity from its total: %j',
+    async (change) => {
+      await createOrderWithMercadoPago(ctx, input);
+      db.tables.orders[0].payment_fingerprint = null;
+      const result = await createOrderWithMercadoPago(ctx, {
+        ...input,
+        externalReference: 'NEW',
+        items: [{ ...input.items[0], ...change }, input.items[1]],
+      });
+      expect(result.ok).toBe(true);
+      expect(payment.createPaymentLink).toHaveBeenCalledTimes(2);
+    }
+  );
+  it('reuses a complete legacy MP snapshot without a fingerprint and keeps its original reference', async () => {
+    const first = await createOrderWithMercadoPago(ctx, input);
+    db.tables.orders[0].payment_fingerprint = null;
+    const before = structuredClone(db.tables);
+    const result = await createOrderWithMercadoPago(ctx, {
+      ...input,
+      externalReference: 'TEXT-new-draft-1',
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      orderId: first.orderId,
+      externalReference: input.externalReference,
+    });
+    expect(payment.createPaymentLink).toHaveBeenCalledTimes(1);
+    expect(db.tables).toEqual(before);
+  });
+  it.each(['title', 'deliveryAddress'])(
+    'reuses legacy noted input with padded %s without changing frozen bindings',
+    async (field) => {
+      const noted = {
+        ...input,
+        observations: 'Portaria',
+        items: input.items.map((item) => ({
+          ...item,
+          title: field === 'title' ? `  ${item.title}  ` : item.title,
+        })),
+        deliveryAddress:
+          field === 'deliveryAddress'
+            ? `  ${input.deliveryAddress}  `
+            : input.deliveryAddress,
+      };
+      const first = await createOrderWithMercadoPago(ctx, noted);
+      expect(first.ok).toBe(true);
+      expect(db.tables.order_checkouts[0]).toMatchObject({
+        status: 'completed',
+        snapshot: { observations: 'Portaria', items: noted.items },
+      });
+      db.tables.orders[0].payment_fingerprint = null;
+      const before = structuredClone(db.tables);
+      const second = await createOrderWithMercadoPago(ctx, {
+        ...noted,
+        externalReference: 'NEW-PADDED-NOTED',
+      });
+      expect(payment.createPaymentLink).toHaveBeenCalledTimes(1);
+      expect(second).toMatchObject({
+        ok: true,
+        orderId: first.orderId,
+        dealId: first.dealId,
+        preferenceId: first.preferenceId,
+        link_mercado_pago: first.link_mercado_pago,
+        externalReference: input.externalReference,
+      });
+      expect(deals.createOrderDeal).toHaveBeenCalledTimes(1);
+      expect(db.tables).toEqual(before);
+    }
+  );
+  it.each([
+    { field: 'title', legacy: false },
+    { field: 'deliveryAddress', legacy: false },
+    { field: 'title', legacy: true },
+    { field: 'deliveryAddress', legacy: true },
+  ])('reuses boundary-space aliases across references (%j)', async ({
+    field,
+    legacy,
+  }) => {
+    const noted = {
+      ...input,
+      observations: 'Portaria',
+      items: input.items.map((item) => ({
+        ...item,
+        title: field === 'title' ? `  ${item.title}  ` : item.title,
+      })),
+      deliveryAddress:
+        field === 'deliveryAddress'
+          ? `  ${input.deliveryAddress}  `
+          : input.deliveryAddress,
+    };
+    const first = await createOrderWithMercadoPago(ctx, noted);
+    expect(first.ok).toBe(true);
+    if (legacy) db.tables.orders[0].payment_fingerprint = null;
+    const before = structuredClone(db.tables);
+    const second = await createOrderWithMercadoPago(ctx, {
+      ...input,
+      observations: noted.observations,
+      externalReference: 'NEW-SPACE-ALIAS',
+    });
+    expect(payment.createPaymentLink).toHaveBeenCalledTimes(1);
+    expect(second).toMatchObject({
+      ok: true,
+      orderId: first.orderId,
+      externalReference: input.externalReference,
+    });
+    expect(db.tables).toEqual(before);
+  });
+  it('reuses legacy observations from the bound frozen ledger without a second preference', async () => {
+    const noted = { ...input, observations: 'Entregar na portaria' };
+    const first = await createOrderWithMercadoPago(ctx, noted);
+    expect(first.ok).toBe(true);
+    db.tables.orders[0].payment_fingerprint = null;
+    const second = await createOrderWithMercadoPago(ctx, {
+      ...noted,
+      externalReference: 'NEW-NOTED',
+    });
+    expect(payment.createPaymentLink).toHaveBeenCalledTimes(1);
+    expect(second).toMatchObject({
+      ok: true,
+      orderId: first.orderId,
+      externalReference: input.externalReference,
+    });
+  });
+  it.each(['', 'Outras instruções', ' Portaria '])(
+    'does not borrow legacy notes for different observations (%j)',
+    async (observations) => {
+      await createOrderWithMercadoPago(ctx, {
+        ...input,
+        observations: 'Portaria',
+      });
+      db.tables.orders[0].payment_fingerprint = null;
+      const result = await createOrderWithMercadoPago(ctx, {
+        ...input,
+        observations,
+        externalReference: 'DIFFERENT-NOTES',
+      });
+      expect(result.ok).toBe(true);
+      expect(result.orderId).not.toBe(db.tables.orders[0].id);
+      expect(payment.createPaymentLink).toHaveBeenCalledTimes(2);
+    }
+  );
+  it.each([
+    'missing',
+    'duplicate',
+    'tenant',
+    'order',
+    'reference',
+    'contact',
+    'preference',
+    'url',
+    'uncertain',
+    'notes',
+    'items',
+  ])(
+    'blocks unrecoverable legacy observations (%s) before effects',
+    async (failure) => {
+      const noted = { ...input, observations: 'Portaria' };
+      await createOrderWithMercadoPago(ctx, noted);
+      db.tables.orders[0].payment_fingerprint = null;
+      const ledger = db.tables.order_checkouts[0];
+      if (failure === 'missing') db.tables.order_checkouts.length = 0;
+      if (failure === 'duplicate')
+        db.tables.order_checkouts.push(structuredClone(ledger));
+      if (failure === 'tenant') ledger.account_id = 'foreign';
+      if (failure === 'order') ledger.order_id = 'foreign';
+      if (failure === 'reference') ledger.external_reference = 'foreign';
+      if (failure === 'preference') ledger.preference_id = 'foreign';
+      if (failure === 'url') ledger.payment_url = 'foreign';
+      if (failure === 'uncertain') ledger.status = 'uncertain';
+      const frozen = ledger.snapshot as Row;
+      if (failure === 'contact') frozen.contactId = 'foreign';
+      if (failure === 'notes') delete frozen.observations;
+      if (failure === 'items')
+        frozen.items = [{ ...input.items[0], id: 'foreign' }];
+      const before = structuredClone(db.tables);
+      expect(
+        (
+          await createOrderWithMercadoPago(ctx, {
+            ...noted,
+            externalReference: 'NEW-NOTED',
+          })
+        ).ok
+      ).toBe(false);
+      expect(payment.createPaymentLink).toHaveBeenCalledTimes(1);
+      expect(deals.createOrderDeal).toHaveBeenCalledTimes(1);
+      expect(db.tables).toEqual(before);
+    }
+  );
+  it('reuses the same open cart across draft references without another gateway effect', async () => {
+    const first = await createOrderWithMercadoPago(ctx, input);
+    const second = await createOrderWithMercadoPago(ctx, {
+      ...input,
+      externalReference: 'TEXT-another-draft-1',
+    });
+    expect(second.ok).toBe(true);
+    expect(second.orderId).toBe(first.orderId);
+    expect(second.link_mercado_pago).toBe(first.link_mercado_pago);
+    expect(payment.createPaymentLink).toHaveBeenCalledTimes(1);
+    expect(deals.createOrderDeal).toHaveBeenCalledTimes(1);
+  });
+  it('does not bypass an uncertain frozen reference by borrowing another open cart', async () => {
+    await createOrderWithMercadoPago(ctx, input);
+    db.tables.order_checkouts.push({
+      account_id: 'account',
+      external_reference: 'TEXT-frozen-1',
+      input_fingerprint: 'frozen',
+      status: 'uncertain',
+    });
+    const result = await createOrderWithMercadoPago(ctx, {
+      ...input,
+      externalReference: 'TEXT-frozen-1',
+    });
+    expect(result.ok).toBe(false);
+    expect(payment.createPaymentLink).toHaveBeenCalledTimes(1);
+  });
+  it('allows another identical purchase once the first canonical order is paid', async () => {
+    await createOrderWithMercadoPago(ctx, input);
+    db.tables.orders[0].status = 'paid';
+    expect(
+      (
+        await createOrderWithMercadoPago(ctx, {
+          ...input,
+          externalReference: 'TEXT-new-paid-cart-1',
+        })
+      ).ok
+    ).toBe(true);
+    expect(payment.createPaymentLink).toHaveBeenCalledTimes(2);
+  });
   it.each(['contacts', 'conversations'])(
     'validates service-role %s ownership before claiming or CRM/gateway effects',
     async (table) => {
@@ -567,11 +889,13 @@ describe('durable checkout', () => {
     expect(db.tables.order_checkouts[0].external_reference).toMatch(
       /^LEGACY-[a-f0-9]{64}$/
     );
-    await createOrderWithMercadoPago(ctx, {
+    const fromAnotherConversation = await createOrderWithMercadoPago(ctx, {
       ...legacy,
       conversationId: 'another-conversation',
     });
-    expect(db.tables.order_checkouts).toHaveLength(2);
+    expect(fromAnotherConversation.orderId).toBe(first.orderId);
+    expect(db.tables.order_checkouts).toHaveLength(1);
+    expect(payment.createPaymentLink).toHaveBeenCalledTimes(1);
   });
 
   it('scopes lookups and all updates by account', async () => {

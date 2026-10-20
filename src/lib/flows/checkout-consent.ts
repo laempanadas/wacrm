@@ -70,7 +70,11 @@ export async function finishFlowCheckout(
     throw new Error(
       'Checkout evidence could not be persisted; claim remains blocking'
     );
-  if (!data[0].owned || !success) return false;
+  if (!data[0].owned) return false;
+  if (!success) {
+    run.status = 'handed_off';
+    return false;
+  }
   run.vars = data[0].vars;
   run.consent_revision = data[0].consent_revision;
   return true;

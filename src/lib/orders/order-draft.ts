@@ -19,6 +19,8 @@ export interface OrderDraft {
     | 'needs_human'
     | 'payment_created';
   deliveryAddress?: string;
+  paymentReference?: string;
+  cartUpdatedAt?: string;
   total: number;
 }
 
@@ -87,6 +89,13 @@ export function advanceOrderDraft(
       reply:
         'Este pedido já foi encaminhado para pagamento. Para alterar ou iniciar outro pedido, fale com um atendente; não geramos outra cobrança automaticamente.',
     };
+  if (/^(?:oi|ola|alo|bom dia|boa tarde|boa noite)[\s.!?]*$/.test(input))
+    return {
+      draft: previous,
+      checkout: false,
+      reply:
+        'Olá! Como posso ajudar com seu pedido? Seu carrinho continua salvo.',
+    };
   const draft: OrderDraft = structuredClone(previous);
   const removeLine = /^(?:remova|retire|tire) (?:a )?linha (\d+)$/.exec(input);
   const editLine =
@@ -126,9 +135,42 @@ export function advanceOrderDraft(
   }
   const isCorrection = /^na verdade\b/.test(input);
   const hadItems = draft.items.length > 0;
+  const replacement = /^(.+?) nao e (.+?),\s*e (?:o |a )?(.+?)[.!?]*$/.exec(
+    input
+  );
+  let naturalChange:
+    { index: number; product: ProductCatalogEntry } | undefined;
+  if (replacement) {
+    const [, subject, rejected, destination] = replacement;
+    const sourceNames = [
+      `${subject} ${rejected}`,
+      `${subject} com ${rejected}`,
+      `${subject} e ${rejected}`,
+    ];
+    const sources = catalog.filter((product) =>
+      [product.nome, ...product.aliases].some((alias) =>
+        sourceNames.includes(normalized(alias))
+      )
+    );
+    const destinations = catalog.filter((product) =>
+      [product.nome, ...product.aliases].some(
+        (alias) => normalized(alias) === destination
+      )
+    );
+    const targets = draft.items
+      .map((item, index) => (item.id === sources[0]?.id ? index : -1))
+      .filter((index) => index >= 0);
+    if (
+      sources.length === 1 &&
+      destinations.length === 1 &&
+      targets.length === 1
+    )
+      naturalChange = { index: targets[0], product: destinations[0] };
+  }
   const ambiguousChange =
     !removeLine &&
     !editLine &&
+    !naturalChange &&
     !conversationalReply &&
     /\b(?:nao|troque|substitua|remova|retire|tire|cancele)\b/.test(input);
   if (removeLine) {
@@ -140,7 +182,17 @@ export function advanceOrderDraft(
       draft.version += 1;
     }
   }
-  if (ambiguousChange)
+  if (naturalChange) {
+    const { index, product } = naturalChange;
+    draft.items[index] = {
+      ...draft.items[index],
+      id: product.id,
+      title: product.nome,
+      unitPrice: product.preco,
+      requestedText: text.trim(),
+    };
+    draft.version += 1;
+  } else if (ambiguousChange)
     draft.unresolved.push(`Esclarecer alteração: ${text.trim()}`);
   else if (parsed.hasItems || parsed.unresolved?.length) {
     // Only explicitly requested corrections may change a previous-turn quantity.
@@ -219,6 +271,7 @@ export function advanceOrderDraft(
     !confirms &&
     !removeLine &&
     !ambiguousChange &&
+    !naturalChange &&
     !conversationalReply &&
     !parsed.hasItems &&
     !parsed.unresolved?.length

@@ -17,6 +17,17 @@ import { sendTextMessage } from '@/lib/whatsapp/meta-api';
 import { sendWhatsAppPaymentMessage } from '@/lib/whatsapp/payment-message';
 import { getExistingPaymentLink } from '@/lib/payments/mercado-pago';
 import { exactBrlCents } from '@/lib/payments/payment-identity';
+import {
+  handleConversationHandoff,
+  hasActiveHuman,
+  isHumanRequest,
+  type HandoffReason,
+} from '@/lib/whatsapp/handoff';
+import {
+  isExplicitNewOrder,
+  newOrderText,
+  shouldStartNewDraft,
+} from './draft-lifecycle';
 
 export {
   STANDARD_DELIVERY_CUSTOM_FIELDS,
@@ -49,19 +60,60 @@ export interface TextOrderFlowResult {
     | 'confirmation_requested'
     | 'payment_resent'
     | 'payment_already_created'
+    | 'bot_resumed'
     | 'needs_human'
     | 'duplicate';
   error?: string;
 }
 
-async function handoff(ctx: TextOrderFlowContext): Promise<void> {
-  const { error } = await ctx.supabase
-    .from('conversations')
-    .update({ ai_autoreply_disabled: true })
-    .eq('id', ctx.conversationId)
-    .eq('account_id', ctx.accountId);
-  if (error) throw error;
+async function handoff(
+  ctx: TextOrderFlowContext,
+  reason: HandoffReason = 'order_review',
+  summary?: string
+): Promise<void> {
+  await handleConversationHandoff({
+    db: ctx.supabase,
+    accountId: ctx.accountId,
+    conversationId: ctx.conversationId,
+    contactId: ctx.contactRecord.id,
+    text: ctx.inboundText,
+    messageId: ctx.inboundMessageId,
+    reason,
+    send: async (key, text) => {
+      if (summary !== undefined)
+        await sendAndRecord(ctx, key, summary ? `${summary}\n${text}` : text);
+    },
+  });
   await applyContactTag(ctx.supabase, ctx, ctx.contactRecord.id, TAG_HUMANO);
+}
+
+/** Shared by text and native-catalog inbounds before automation or checkout. */
+export async function processInboundHandoff(
+  ctx: TextOrderFlowContext
+): Promise<boolean> {
+  const { data: conversation, error } = await ctx.supabase
+    .from('conversations')
+    .select('ai_autoreply_disabled, last_agent_message_at, status')
+    .eq('id', ctx.conversationId)
+    .eq('account_id', ctx.accountId)
+    .maybeSingle();
+  if (error) throw error;
+  if (
+    !isHumanRequest(ctx.inboundText) &&
+    !conversation?.ai_autoreply_disabled &&
+    !hasActiveHuman(conversation?.last_agent_message_at) &&
+    conversation?.status !== 'pending'
+  )
+    return false;
+  return handleConversationHandoff({
+    db: ctx.supabase,
+    accountId: ctx.accountId,
+    conversationId: ctx.conversationId,
+    contactId: ctx.contactRecord.id,
+    text: ctx.inboundText,
+    messageId: ctx.inboundMessageId,
+    send: (key, text) => sendAndRecord(ctx, key, text),
+  });
 }
 
 async function saveDraft(
@@ -185,7 +237,8 @@ async function resendExistingPayment(
   ctx: TextOrderFlowContext,
   draft: OrderDraft
 ): Promise<void> {
-  const reference = `TEXT-${draft.id}-${draft.version}`;
+  const reference =
+    draft.paymentReference || `TEXT-${draft.id}-${draft.version}`;
   const { data: order, error } = await ctx.supabase
     .from('orders')
     .select(
@@ -237,9 +290,27 @@ export async function processFreeTextOrderInbound(
   let ownsTurn = false;
   let catalogRunOwnsTurn = false;
   try {
+    const priorEvent = await db
+      .from('order_inbound_events')
+      .select('status')
+      .eq('account_id', ctx.accountId)
+      .eq('meta_message_id', ctx.inboundMessageId)
+      .maybeSingle();
+    if (priorEvent.error) throw priorEvent.error;
+    if (priorEvent.data) return { handled: true, outcome: 'duplicate' };
+    if (await processInboundHandoff(ctx))
+      return { handled: true, outcome: 'needs_human' };
+    if (/^continuar com o bot[.!?]*$/i.test(ctx.inboundText.trim())) {
+      await sendAndRecord(
+        ctx,
+        `resume:${ctx.inboundMessageId}`,
+        'Voltei! Posso ajudar com seu pedido. Nenhuma cobrança foi criada.'
+      );
+      return { handled: true, outcome: 'bot_resumed' };
+    }
     const { data: existing, error: readError } = await db
       .from('order_drafts')
-      .select('state')
+      .select('state, updated_at')
       .eq('account_id', ctx.accountId)
       .eq('conversation_id', ctx.conversationId)
       .maybeSingle();
@@ -264,23 +335,7 @@ export async function processFreeTextOrderInbound(
     // an old text draft remains persisted (including payment_created).
     if (catalogOwnsTurn && !hasOrderIntent(ctx.inboundText))
       return { handled: false };
-    const { data: conversation, error: conversationError } = await db
-      .from('conversations')
-      .select('assigned_agent_id, ai_autoreply_disabled, last_agent_message_at')
-      .eq('id', ctx.conversationId)
-      .eq('account_id', ctx.accountId)
-      .maybeSingle();
-    if (conversationError) throw conversationError;
-    const activeAgent =
-      conversation?.assigned_agent_id &&
-      conversation.last_agent_message_at &&
-      Date.now() - Date.parse(conversation.last_agent_message_at) <
-        30 * 60 * 1000;
-    if (
-      (conversation?.ai_autoreply_disabled || activeAgent) &&
-      !catalogOwnsTurn
-    )
-      return { handled: true, outcome: 'needs_human' };
+
     // Do not steal item corrections from an active catalog order into a new text draft.
     // The original cart remains intact; an attendant reviews the persisted inbound change.
     if (catalogOwnsTurn) {
@@ -306,7 +361,7 @@ export async function processFreeTextOrderInbound(
     if (claim?.outcome === 'duplicate')
       return { handled: true, outcome: 'duplicate' };
     if (claim?.outcome !== 'claimed') {
-      await handoff(ctx);
+      await handoff(ctx, 'technical_error', '');
       return {
         handled: true,
         outcome: 'needs_human',
@@ -322,7 +377,47 @@ export async function processFreeTextOrderInbound(
       stage: 'collecting',
       total: 0,
     };
-    const previous = claim.state?.id ? (claim.state as OrderDraft) : initial;
+    let previous = claim.state?.id ? (claim.state as OrderDraft) : initial;
+    if (
+      previous.items.length &&
+      hasOrderIntent(newOrderText(ctx.inboundText))
+    ) {
+      const { data: linkedOrder, error: linkedError } = await db
+        .from('orders')
+        .select('status')
+        .eq('account_id', ctx.accountId)
+        .eq('contact_id', ctx.contactRecord.id)
+        .eq(
+          'external_reference',
+          previous.paymentReference || `TEXT-${previous.id}-${previous.version}`
+        )
+        .maybeSingle();
+      if (linkedError) throw linkedError;
+      const activity = Date.parse(
+        (previous as OrderDraft & { cartUpdatedAt?: string }).cartUpdatedAt ||
+          existing?.updated_at ||
+          ''
+      );
+      if (
+        shouldStartNewDraft(
+          previous,
+          ctx.inboundText,
+          linkedOrder?.status ?? null,
+          activity
+        )
+      ) {
+        const rotated = await db.rpc('rotate_order_draft', {
+          p_account_id: ctx.accountId,
+          p_conversation_id: ctx.conversationId,
+          p_message_id: ctx.inboundMessageId,
+          p_snapshot: previous,
+          p_explicit_new: isExplicitNewOrder(ctx.inboundText),
+        });
+        if (rotated.error || !rotated.data?.id)
+          throw new Error(rotated.error?.message || 'Draft rotation failed');
+        previous = rotated.data as OrderDraft;
+      }
+    }
     if (previous.stage === 'payment_created') {
       const text = ctx.inboundText
         .toLowerCase()
@@ -341,10 +436,9 @@ export async function processFreeTextOrderInbound(
         );
       if (resend) await resendExistingPayment(ctx, previous);
       else if (!acknowledgement) {
-        await handoff(ctx);
-        await sendAndRecord(
+        await handoff(
           ctx,
-          `turn:${ctx.inboundMessageId}`,
+          'payment_review',
           advanceOrderDraft(previous, ctx.inboundText, []).reply
         );
       }
@@ -366,11 +460,20 @@ export async function processFreeTextOrderInbound(
     );
     const transition = advanceOrderDraft(
       previous,
-      ctx.inboundText,
+      newOrderText(ctx.inboundText),
       catalog,
       savedAddress
     );
     const draft = transition.draft;
+    if (
+      JSON.stringify(previous.items) !== JSON.stringify(draft.items) ||
+      previous.deliveryAddress !== draft.deliveryAddress
+    )
+      (draft as OrderDraft & { cartUpdatedAt: string }).cartUpdatedAt =
+        new Date().toISOString();
+    else if (!(draft as OrderDraft & { cartUpdatedAt?: string }).cartUpdatedAt)
+      (draft as OrderDraft & { cartUpdatedAt: string }).cartUpdatedAt =
+        existing?.updated_at || new Date().toISOString();
     await saveDraft(ctx, draft);
     const customerName = ctx.contactRecord.name || ctx.contactName || 'Cliente';
     await saveContactOrderFields(db, ctx.accountId, ctx.contactRecord.id, {
@@ -407,6 +510,8 @@ export async function processFreeTextOrderInbound(
           result.error || 'Falha ao criar pagamento; atendimento necessário.'
         );
       draft.stage = 'payment_created';
+      if (result.externalReference)
+        draft.paymentReference = result.externalReference;
       await saveDraft(ctx, draft);
       await sendAndRecord(
         ctx,
@@ -415,13 +520,13 @@ export async function processFreeTextOrderInbound(
         result.link_mercado_pago
       );
     } else {
-      if (draft.stage === 'needs_human' || draft.stage === 'payment_created')
-        await handoff(ctx);
       const reply =
         draft.stage === 'awaiting_address' && savedAddress
           ? `${transition.reply}\nOu responda SIM para usar o endereço cadastrado: ${savedAddress}`
           : transition.reply;
-      await sendAndRecord(ctx, `turn:${ctx.inboundMessageId}`, reply);
+      if (draft.stage === 'needs_human' || draft.stage === 'payment_created')
+        await handoff(ctx, 'order_review', reply);
+      else await sendAndRecord(ctx, `turn:${ctx.inboundMessageId}`, reply);
     }
     await completeTurn(ctx, draft);
     return {
@@ -445,7 +550,7 @@ export async function processFreeTextOrderInbound(
     try {
       // Catalog ownership is exclusively changed by the consent RPC. A failed
       // RPC/notice must not let this stale text worker hand off a newer run.
-      if (!catalogRunOwnsTurn) await handoff(ctx);
+      if (!catalogRunOwnsTurn) await handoff(ctx, 'technical_error');
     } catch (handoffError) {
       console.error(
         '[text-order-flow] handoff persistence failed',

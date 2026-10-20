@@ -38,6 +38,8 @@ vi.mock('@/lib/orders/custom-fields', () => ({
   saveContactOrderFields: vi.fn(),
 }));
 import { POST } from './route';
+import { saveContactOrderFields } from '@/lib/orders/custom-fields';
+import { markContactPaymentConfirmed } from '@/lib/orders/create-order';
 
 // Mock only the database boundary: filtering and conditional updates are real
 // in-memory operations, so global latest-reference queries reproduce the bug.
@@ -99,6 +101,102 @@ beforeEach(() => {
   mocks.db = database([order('B', 'pref-B'), order('A', 'pref-A')]);
 });
 describe('real Mercado Pago webhook POST: trusted payment ownership', () => {
+  it.each(['conversation', null])(
+    'closes only a bound originating conversation, never all contact inboxes (%s)',
+    async (bound) => {
+      mocks.db = database(
+        [
+          {
+            ...order('A', 'pref-A'),
+            contact_id: 'contact',
+            payment_conversation_id: bound,
+          },
+        ],
+        {
+          contacts: [{ id: 'contact', account_id: 'A', user_id: 'user' }],
+          conversations: [
+            {
+              id: 'conversation',
+              account_id: 'A',
+              contact_id: 'contact',
+              status: 'open',
+            },
+            {
+              id: 'other-conversation',
+              account_id: 'A',
+              contact_id: 'contact',
+              status: 'open',
+            },
+          ],
+        }
+      );
+      expect((await post()).status).toBe(200);
+      expect(mocks.db.tables.conversations.map((row) => row.status)).toEqual([
+        bound ? 'closed' : 'open',
+        'open',
+      ]);
+    }
+  );
+  it('settles the old order without overwriting or closing a newer open purchase', async () => {
+    mocks.db = database(
+      [
+        {
+          ...order('A', 'pref-A'),
+          contact_id: 'contact',
+          deal_id: 'old-deal',
+          created_at: '2026-10-17T12:00:00Z',
+          payment_conversation_id: 'old-conversation',
+        },
+        {
+          ...order('A', 'pref-new'),
+          id: 'new-order',
+          external_reference: 'NEW',
+          contact_id: 'contact',
+          created_at: '2026-10-18T12:00:00Z',
+        },
+      ],
+      {
+        contacts: [{ id: 'contact', account_id: 'A', user_id: 'user' }],
+        deals: [
+          {
+            id: 'old-deal',
+            account_id: 'A',
+            contact_id: 'contact',
+            pipeline_id: 'pipeline',
+          },
+        ],
+        pipelines: [{ id: 'pipeline', account_id: 'A' }],
+        pipeline_stages: [
+          { id: 'cooking', pipeline_id: 'pipeline', name: 'Na Cozinha' },
+        ],
+        conversations: [
+          {
+            id: 'old-conversation',
+            account_id: 'A',
+            contact_id: 'contact',
+            status: 'open',
+          },
+          {
+            id: 'current-conversation',
+            account_id: 'A',
+            contact_id: 'contact',
+            status: 'open',
+          },
+        ],
+      }
+    );
+    expect((await post()).status).toBe(200);
+    expect(mocks.db.orders[0].status).toBe('paid');
+    expect(mocks.db.orders[1].status).toBe('pending');
+    expect(mocks.db.tables.deals[0].stage_id).toBe('cooking');
+    expect(mocks.db.tables.conversations.map((row) => row.status)).toEqual([
+      'open',
+      'open',
+    ]);
+    expect(saveContactOrderFields).not.toHaveBeenCalled();
+    expect(markContactPaymentConfirmed).not.toHaveBeenCalled();
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
   it.each(['contact', 'deal', 'pipeline'])(
     'blocks foreign linked %s ownership before ANY mutation',
     async (kind) => {

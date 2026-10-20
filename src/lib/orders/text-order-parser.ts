@@ -532,7 +532,7 @@ export function parseCatalogOrder(
       ? source
           .slice(0, addressStart)
           .replace(
-            /(?:,?\s*(?:entregar|entrega|manda)\s*(?:na|no|em)?\s*)$/i,
+            /(?:,?\s*(?:entregar|entrega|manda)\s*(?:na|no|em)?\s*|vou\s+colocar\s+o\s+endere[cç]o\s+aqui:\s*)$/i,
             ''
           ) +
         '\n' +
@@ -735,6 +735,20 @@ export function extractAddressFromText(text: string): string | null {
           )
           .trim();
         if (!clause) return false;
+        // A repeated street locality after an explicit neighborhood is a
+        // bounded city label, not permission to consume arbitrary prose.
+        const streetLocality = normalize(candidate.slice(0, houseNumber.index))
+          .replace(/^\S+\s+/, '')
+          .replace(/,\s*$/, '')
+          .trim();
+        if (
+          separator[0] === ',' &&
+          /\b(?:bairro|vila|jardim|parque)\s+[a-z\s]+$/.test(
+            normalize(tail.slice(0, separator.index))
+          ) &&
+          normalize(clause) === streetLocality
+        )
+          return false;
         // A numbered apartment may precede the locality. Only accept an
         // explicit locality marker here, never arbitrary text after a complement.
         if (

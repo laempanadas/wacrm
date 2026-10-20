@@ -27,6 +27,14 @@ vi.mock('@/lib/flows/meta-send', () => ({ engineSendText: h.engineSendText }));
 vi.mock('./admin-client', () => ({
   supabaseAdmin: () => ({
     from: (table: string) => {
+      if (table === 'order_message_outbox') {
+        const q = {
+          eq: () => q,
+          then: (resolve: (value: unknown) => unknown) =>
+            Promise.resolve({ error: null }).then(resolve),
+        };
+        return { insert: async () => ({ error: null }), update: () => q };
+      }
       if (table === 'automations') {
         // .select().eq().eq().in().limit() → active auto-responders
         const chain = {
@@ -54,6 +62,11 @@ vi.mock('./admin-client', () => ({
     },
     rpc: (name: string, args: unknown) => {
       h.state.rpcCalls.push({ name, args });
+      if (name === 'handle_conversation_handoff')
+        return Promise.resolve({
+          data: { blocked: true, episode_id: 'episode', notice: 'waiting' },
+          error: null,
+        });
       return Promise.resolve({ data: h.state.claim, error: null });
     },
   }),
@@ -102,6 +115,22 @@ beforeEach(() => {
 });
 
 describe('dispatchInboundToAiReply — eligibility gates', () => {
+  it('does not bypass a paused conversation without an agent timestamp', async () => {
+    h.state.conv = { ai_autoreply_disabled: true, ai_reply_count: 0 };
+    await dispatchInboundToAiReply(ARGS);
+    expect(h.generateReply).not.toHaveBeenCalled();
+    expect(h.engineSendText).not.toHaveBeenCalled();
+  });
+  it('respects a recent human send even without assignment', async () => {
+    h.state.conv = {
+      ai_autoreply_disabled: false,
+      ai_reply_count: 0,
+      last_agent_message_at: new Date().toISOString(),
+    };
+    await dispatchInboundToAiReply(ARGS);
+    expect(h.generateReply).not.toHaveBeenCalled();
+    expect(h.engineSendText).not.toHaveBeenCalled();
+  });
   it('claims a slot and sends on the happy path', async () => {
     await dispatchInboundToAiReply(ARGS);
     expect(h.state.rpcCalls).toEqual([
@@ -193,11 +222,14 @@ describe('dispatchInboundToAiReply — eligibility gates', () => {
 });
 
 describe('dispatchInboundToAiReply — handoff', () => {
-  it('disables auto-reply and does not send on handoff', async () => {
+  it('persists the handoff, notifies the team and acknowledges the customer', async () => {
     h.generateReply.mockResolvedValue({ text: '', handoff: true });
     await dispatchInboundToAiReply(ARGS);
-    expect(h.engineSendText).not.toHaveBeenCalled();
-    expect(h.state.updatePayload).toEqual({ ai_autoreply_disabled: true });
-    expect(h.state.rpcCalls).toHaveLength(0);
+    expect(h.engineSendText).toHaveBeenCalledWith(
+      expect.objectContaining({ text: 'Um atendente já vai te responder.' })
+    );
+    expect(h.state.rpcCalls).toEqual([
+      expect.objectContaining({ name: 'handle_conversation_handoff' }),
+    ]);
   });
 });

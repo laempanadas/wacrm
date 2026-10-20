@@ -45,7 +45,8 @@ function database() {
     let op = 'select';
     let payload: Row = {};
     const filters: Array<[string, unknown]> = [];
-    const run = () => {
+    let excludePaid = false;
+    const run = (single = true) => {
       calls.push({
         table,
         op,
@@ -75,18 +76,24 @@ function database() {
         rows.push(row);
         return { data: structuredClone(row), error: null };
       }
-      const matched = rows.filter((r) =>
-        filters.every(([key, value]) => r[key] === value)
+      const matched = rows.filter(
+        (r) =>
+          (!excludePaid || r.status !== 'paid') &&
+          filters.every(([key, value]) => r[key] === value)
       );
       if (op === 'update')
         matched.forEach((r) => Object.assign(r, structuredClone(payload)));
       return {
-        data: matched[0] ? structuredClone(matched[0]) : null,
+        data: single
+          ? matched[0]
+            ? structuredClone(matched[0])
+            : null
+          : structuredClone(matched),
         error: null,
       };
     };
-    const execute = async () => {
-      const result = run();
+    const execute = async (single = true) => {
+      const result = run(single);
       if (table === 'deals' && op === 'insert' && barriers.afterDealInsert) {
         const barrier = barriers.afterDealInsert;
         barriers.afterDealInsert = undefined;
@@ -96,6 +103,12 @@ function database() {
     };
     const query = {
       select: () => query,
+      or: (expression: string) => {
+        if (expression !== 'status.is.null,status.neq.paid')
+          throw new Error(`Unsupported test filter: ${expression}`);
+        excludePaid = true;
+        return query;
+      },
       limit: () => query,
       eq: (key: string, value: unknown) => {
         filters.push([key, value]);
@@ -119,7 +132,7 @@ function database() {
       single: execute,
       maybeSingle: execute,
       then: (resolve: (result: ReturnType<typeof run>) => void) =>
-        execute().then(resolve),
+        execute(false).then(resolve),
     };
     return query;
   };

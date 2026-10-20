@@ -548,6 +548,9 @@ describe('catalog engine safety', () => {
     expect(
       mocks.text.mock.calls.some(([arg]) => arg.text?.includes('confirmado'))
     ).toBe(false);
+    expect(mocks.text).toHaveBeenCalledWith(
+      expect.objectContaining({ text: 'Um atendente já vai te responder.' })
+    );
     expect(mocks.mp).not.toHaveBeenCalled();
   });
   it('blocks checkout with an incomplete delivery address', async () => {

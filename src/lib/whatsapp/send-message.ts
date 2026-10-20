@@ -15,6 +15,7 @@ import {
 } from '@/lib/whatsapp/phone-utils';
 import type { MessageTemplate } from '@/types';
 import { isMessageTemplate } from '@/lib/whatsapp/template-row-guard';
+import { sessionWindow } from '@/lib/whatsapp/session-window';
 
 export const MEDIA_KINDS = ['image', 'video', 'document', 'audio'] as const;
 export const VALID_MESSAGE_TYPES = [
@@ -156,6 +157,31 @@ export async function sendMessageToConversation(
 
   if (convError || !conversation) {
     throw new SendMessageError('not_found', 'Conversation not found', 404);
+  }
+
+  if (messageType !== 'template') {
+    const { data: lastInbound, error: inboundError } = await db
+      .from('messages')
+      .select('created_at')
+      .eq('conversation_id', conversationId)
+      .eq('sender_type', 'customer')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (inboundError) {
+      throw new SendMessageError(
+        'db_error',
+        'Unable to verify customer session',
+        500
+      );
+    }
+    if (sessionWindow(lastInbound?.created_at).expired) {
+      throw new SendMessageError(
+        'session_expired',
+        'The 24-hour customer session has expired. Send an approved template instead.',
+        409
+      );
+    }
   }
 
   const contact = conversation.contact;
@@ -356,15 +382,23 @@ export async function sendMessageToConversation(
     );
   }
 
+  const humanActiveAt = new Date();
   await db
     .from('conversations')
     .update({
       last_message_text: contentText || `[${messageType}]`,
-      last_message_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      last_agent_message_at: new Date().toISOString(),
+      last_message_at: humanActiveAt.toISOString(),
+      updated_at: humanActiveAt.toISOString(),
+      last_agent_message_at: humanActiveAt.toISOString(),
+      ai_autoreply_disabled: true,
+      bot_pause_reason: 'human_active',
+      bot_paused_at: humanActiveAt.toISOString(),
+      bot_resume_after: new Date(
+        humanActiveAt.getTime() + 30 * 60 * 1000
+      ).toISOString(),
     })
-    .eq('id', conversationId);
+    .eq('id', conversationId)
+    .eq('account_id', accountId);
 
   try {
     const { error: pauseErr } = await supabaseAdmin()

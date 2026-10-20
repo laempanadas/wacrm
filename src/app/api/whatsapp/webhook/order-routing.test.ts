@@ -63,6 +63,8 @@ import { POST } from './route';
 type Row = Record<string, unknown>;
 let tables: Record<string, Row[]>;
 let oldDraft: Row;
+let failMessageInsert: boolean | string = false;
+let failReceiptInsert: boolean | string = false;
 function database() {
   return (table: string) => {
     let operation = 'select';
@@ -71,6 +73,27 @@ function database() {
     const result = () => {
       const rows = (tables[table] ??= []);
       if (operation === 'insert') {
+        if (
+          table === 'whatsapp_inbound_receipts' &&
+          (failReceiptInsert === true ||
+            failReceiptInsert === payload.meta_message_id)
+        )
+          return { data: null, error: { code: '08006' } };
+        if (
+          table === 'messages' &&
+          (failMessageInsert === true ||
+            failMessageInsert === payload.message_id)
+        )
+          return { data: null, error: { code: '08006' } };
+        if (
+          table === 'messages' &&
+          rows.some(
+            (r) =>
+              r.conversation_id === payload.conversation_id &&
+              r.message_id === payload.message_id
+          )
+        )
+          return { data: null, error: { code: '23505' } };
         if (
           table === 'whatsapp_inbound_receipts' &&
           rows.some(
@@ -114,7 +137,23 @@ function database() {
     return q;
   };
 }
-async function deliver(id: string, content: Row) {
+async function deliver(
+  id: string,
+  content: Row,
+  expectedStatus = 200,
+  flushEffects = true
+) {
+  await deliverBatch([{ id, ...content }], expectedStatus, flushEffects);
+}
+async function flushAfterConcurrently() {
+  while (mocks.deferred.length)
+    await Promise.all(mocks.deferred.splice(0).map((callback) => callback()));
+}
+async function deliverBatch(
+  messages: Row[],
+  expectedStatus = 200,
+  flushEffects = true
+) {
   const response = await POST(
     new Request('https://test.invalid/api/whatsapp/webhook', {
       method: 'POST',
@@ -134,14 +173,11 @@ async function deliver(id: string, content: Row) {
                   contacts: [
                     { profile: { name: 'Maria' }, wa_id: '5511999999999' },
                   ],
-                  messages: [
-                    {
-                      id,
-                      from: '5511999999999',
-                      timestamp: '1791856800',
-                      ...content,
-                    },
-                  ],
+                  messages: messages.map((message) => ({
+                    from: '5511999999999',
+                    timestamp: '1791856800',
+                    ...message,
+                  })),
                 },
               },
             ],
@@ -150,10 +186,17 @@ async function deliver(id: string, content: Row) {
       }),
     })
   );
-  expect(response.status).toBe(200);
-  while (mocks.deferred.length) await mocks.deferred.shift()!();
+  expect(response.status).toBe(expectedStatus);
+  if (expectedStatus === 200)
+    for (const message of messages)
+      expect(tables.messages.some((m) => m.message_id === message.id)).toBe(
+        true
+      );
+  if (flushEffects) await flushAfterConcurrently();
 }
 beforeEach(() => {
+  failMessageInsert = false;
+  failReceiptInsert = false;
   vi.clearAllMocks();
   mocks.deferred.length = 0;
   oldDraft = {
@@ -229,6 +272,241 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('real WhatsApp POST and text processor ownership', () => {
+  const media = {
+    type: 'image',
+    image: { id: 'media', mime_type: 'image/png' },
+  };
+  it('returns a retryable error when inbound account routing is unavailable', async () => {
+    tables.whatsapp_config = [];
+    await deliver('no-config', media, 500);
+    expect(tables.messages).toHaveLength(0);
+    expect(mocks.deferred).toHaveLength(0);
+  });
+  it('saves history before HTTP 200 while deferring slow business effects', async () => {
+    await deliver('before-ack', media, 200, false);
+    expect(tables.messages).toHaveLength(1);
+    expect(mocks.flow).not.toHaveBeenCalled();
+    expect(mocks.deferred).toHaveLength(1);
+    await deliver('before-ack', media);
+    expect(mocks.flow).toHaveBeenCalledTimes(1);
+    expect(tables.conversations[0].unread_count).toBe(1);
+  });
+  it('awaits each message in the same conversation even when after callbacks run concurrently', async () => {
+    tables.flow_runs.push({
+      account_id: 'account',
+      conversation_id: 'conversation',
+      status: 'active',
+      vars: { catalog_order_version: 1, itens: [] },
+    });
+    const messages = [
+      { id: 'batch-items', type: 'text', text: { body: 'Delivery' } },
+      {
+        id: 'batch-address',
+        type: 'text',
+        text: { body: 'Rua das Flores, 10' },
+      },
+    ];
+    let releaseFirst!: () => void;
+    const firstFinished = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let notifyStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      notifyStarted = resolve;
+    });
+    const events: string[] = [];
+    mocks.flow.mockImplementation(async (input) => {
+      const id = input.message.meta_message_id;
+      events.push(`start:${id}`);
+      if (id === 'batch-items') {
+        notifyStarted();
+        await firstFinished;
+      }
+      events.push(`end:${id}`);
+      return { consumed: true, outcome: 'advanced' };
+    });
+
+    await deliverBatch(messages, 200, false);
+    expect(tables.messages).toHaveLength(2);
+    expect(tables.whatsapp_inbound_receipts).toHaveLength(2);
+    expect(mocks.flow).not.toHaveBeenCalled();
+    const effects = flushAfterConcurrently();
+    await firstStarted;
+    // Drain the remaining ready callbacks while the first turn is blocked.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const eventsWhileFirstBlocked = [...events];
+    releaseFirst();
+    await effects;
+    expect(eventsWhileFirstBlocked).toEqual(['start:batch-items']);
+    expect(events).toEqual([
+      'start:batch-items',
+      'end:batch-items',
+      'start:batch-address',
+      'end:batch-address',
+    ]);
+    await deliverBatch(messages);
+    expect(mocks.flow).toHaveBeenCalledTimes(2);
+    expect(tables.messages).toHaveLength(2);
+    expect(tables.conversations[0].unread_count).toBe(2);
+  });
+  it.each(['history', 'receipt'])(
+    'still runs earlier reserved effects when a later message fails %s persistence',
+    async (failure) => {
+      const messages = [
+        { id: 'batch-saved', ...media },
+        { id: 'batch-failed', ...media },
+      ];
+      if (failure === 'history') failMessageInsert = 'batch-failed';
+      else failReceiptInsert = 'batch-failed';
+      await deliverBatch(messages, 500, false);
+      expect(tables.whatsapp_inbound_receipts).toHaveLength(1);
+      expect(mocks.flow).not.toHaveBeenCalled();
+      expect(mocks.deferred).toHaveLength(1);
+      await flushAfterConcurrently();
+      expect(mocks.flow).toHaveBeenCalledTimes(1);
+      expect(mocks.flow.mock.calls[0][0].message.meta_message_id).toBe(
+        'batch-saved'
+      );
+
+      failMessageInsert = false;
+      failReceiptInsert = false;
+      await deliverBatch(messages);
+      await deliverBatch(messages);
+      expect(tables.messages).toHaveLength(2);
+      expect(tables.whatsapp_inbound_receipts).toHaveLength(2);
+      expect(tables.conversations[0].unread_count).toBe(2);
+      expect(
+        mocks.flow.mock.calls.map(([input]) => input.message.meta_message_id)
+      ).toEqual(['batch-saved', 'batch-failed']);
+    }
+  );
+  it('continues the batch after an uncertain business effect without replaying it on retry', async () => {
+    mocks.flow.mockRejectedValueOnce(new Error('first turn stopped'));
+    const messages = [
+      { id: 'batch-uncertain', ...media },
+      { id: 'batch-next', ...media },
+    ];
+    await deliverBatch(messages);
+    await deliverBatch(messages);
+    expect(
+      mocks.flow.mock.calls.map(([input]) => input.message.meta_message_id)
+    ).toEqual(['batch-uncertain', 'batch-next']);
+    expect(tables.messages).toHaveLength(2);
+  });
+  it('recovers a failed receipt claim without duplicating persisted history', async () => {
+    failReceiptInsert = true;
+    await deliver('receipt-retry', media, 500);
+    expect(tables.messages).toHaveLength(1);
+    expect(mocks.flow).not.toHaveBeenCalled();
+    failReceiptInsert = false;
+    await deliver('receipt-retry', media);
+    await deliver('receipt-retry', media);
+    expect(tables.messages).toHaveLength(1);
+    expect(tables.conversations[0].unread_count).toBe(1);
+    expect(mocks.flow).toHaveBeenCalledTimes(1);
+  });
+  it('claims only one business attempt for concurrent deliveries', async () => {
+    await Promise.all([
+      deliver('racing', media, 200, false),
+      deliver('racing', media, 200, false),
+    ]);
+    expect(tables.messages).toHaveLength(1);
+    expect(tables.whatsapp_inbound_receipts).toHaveLength(1);
+    expect(mocks.deferred).toHaveLength(1);
+    await mocks.deferred.shift()!();
+    expect(mocks.flow).toHaveBeenCalledTimes(1);
+  });
+  it('does not replay an uncertain business effect after it throws', async () => {
+    mocks.flow.mockRejectedValueOnce(new Error('worker stopped'));
+    await deliver('uncertain', media);
+    await deliver('uncertain', media);
+    expect(mocks.flow).toHaveBeenCalledTimes(1);
+    expect(tables.messages).toHaveLength(1);
+  });
+  it.each([false, true])(
+    'blocks native catalog automation for a human episode (RPC fails: %s)',
+    async (fails) => {
+      tables.conversations[0].status = 'pending';
+      mocks.db.rpc.mockImplementation(async () => {
+        if (fails) throw new Error('handoff unavailable');
+        return { data: { blocked: true }, error: null };
+      });
+      await deliver('human-cart', {
+        type: 'order',
+        order: {
+          product_items: [
+            {
+              product_retailer_id: 'emp_hamburguer',
+              quantity: 1,
+              item_price: 14,
+            },
+          ],
+        },
+      });
+      expect(mocks.db.rpc).toHaveBeenCalledWith(
+        'handle_conversation_handoff',
+        expect.objectContaining({
+          p_account_id: 'account',
+          p_conversation_id: 'conversation',
+        })
+      );
+      expect(mocks.flow).not.toHaveBeenCalled();
+      expect(mocks.ai).not.toHaveBeenCalled();
+      expect(tables.messages).toHaveLength(1);
+    }
+  );
+  it('repairs history behind a legacy receipt without repeating business effects', async () => {
+    const legacyPayload = { id: 'legacy-original', text: { body: 'Evidence' } };
+    tables.whatsapp_inbound_receipts.push({
+      account_id: 'account',
+      meta_message_id: 'legacy',
+      payload: legacyPayload,
+    });
+    tables.conversations[0].status = 'closed';
+    tables.conversations[0].ai_reply_count = 7;
+    const priorConversation = structuredClone(tables.conversations[0]);
+    await deliver('legacy', {
+      type: 'interactive',
+      interactive: { button_reply: { id: 'x', title: 'Hi' } },
+    });
+    expect(tables.messages).toHaveLength(1);
+    expect(tables.whatsapp_inbound_receipts[0].payload).toEqual(legacyPayload);
+    expect(tables.conversations[0]).toEqual(priorConversation);
+    expect(mocks.flow).not.toHaveBeenCalled();
+    await deliver('legacy', {
+      type: 'interactive',
+      interactive: { button_reply: { id: 'x', title: 'Hi' } },
+    });
+    expect(tables.messages).toHaveLength(1);
+  });
+  it('returns retryable failure when history cannot persist, then recovers once', async () => {
+    const content = {
+      type: 'image',
+      image: { id: 'retry-media', mime_type: 'image/png' },
+    };
+    failMessageInsert = true;
+    await deliver('retry', content, 500);
+    expect(tables.whatsapp_inbound_receipts).toHaveLength(0);
+    failMessageInsert = false;
+    await deliver('retry', content);
+    await deliver('retry', content);
+    expect(tables.messages).toHaveLength(1);
+    expect(mocks.flow).toHaveBeenCalledTimes(1);
+  });
+  it('does not create a deal for a greeting without order intent', async () => {
+    await deliver('greeting', {
+      type: 'interactive',
+      interactive: { button_reply: { id: 'hello', title: 'Bom dia' } },
+    });
+    expect(mocks.autoDeal).not.toHaveBeenCalled();
+  });
+  it('does not create a deal for non-order media', async () => {
+    await deliver('non-order', {
+      type: 'image',
+      image: { id: 'media', mime_type: 'image/png' },
+    });
+    expect(mocks.autoDeal).not.toHaveBeenCalled();
+  });
   it.each(['button_reply', 'list_reply'])(
     'passes the original Meta prompt id to the engine for %s even without an internal message row',
     async (type) => {

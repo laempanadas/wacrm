@@ -10,11 +10,16 @@ describe('formatCurrency', () => {
   it('formats whole amounts with two decimal places', () => {
     // Always show 2 decimal places for consistency (especially for BRL).
     const out = formatCurrency(1234, 'USD');
-    expect(out).toContain('1,234');
-    expect(out).toContain('.00');
+    const expected = new Intl.NumberFormat(undefined, {
+      style: 'currency',
+      currency: 'USD',
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(1234);
+    expect(out).toBe(expected);
   });
 
-  it('defaults to USD when no currency is given', () => {
+  it('uses the configured fallback when no currency is given', () => {
     expect(formatCurrency(10)).toBe(formatCurrency(10, DEFAULT_CURRENCY));
   });
 
@@ -30,13 +35,17 @@ describe('formatCurrency', () => {
     // Intl is lenient here — it uses the code as the symbol.
     const out = formatCurrency(1234, 'ZZZ');
     expect(out).toContain('ZZZ');
-    expect(out).toContain('1,234');
+    expect(out.replace(/\D/g, '')).toBe('123400');
   });
 
   it('never throws on a structurally invalid code (no DB CHECK on deals.currency)', () => {
     for (const bad of ['United States', 'US', 'USDD', '12', 'u$d']) {
       expect(() => formatCurrency(1234, bad)).not.toThrow();
-      expect(formatCurrency(1234, bad)).toContain('1,234');
+      const expected = new Intl.NumberFormat(undefined, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      }).format(1234);
+      expect(formatCurrency(1234, bad)).toBe(`${bad} ${expected}`);
     }
   });
 

@@ -134,6 +134,9 @@ export function QuickPixButton({
             {
               title:
                 title.length > 120 ? title.substring(0, 117) + '...' : title,
+              // Preserve the full cart identity; a shortened display title can
+              // otherwise collapse different long descriptions at equal totals.
+              description: title,
               quantity: 1,
               unitPrice: parsedAmount,
             },

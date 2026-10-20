@@ -10,6 +10,10 @@ import {
   type PaymentLinkItem,
 } from '@/lib/payments/mercado-pago';
 import { exactBrlCents } from '@/lib/payments/payment-identity';
+import {
+  openPaymentFingerprint,
+  matchOpenPayment,
+} from '@/lib/payments/open-payment-identity';
 
 let adminClient: SupabaseClient | null = null;
 function supabaseAdmin() {
@@ -185,6 +189,72 @@ export async function POST(request: Request) {
         reused: true,
       });
     }
+    const paymentFingerprint = contactId
+      ? openPaymentFingerprint(snapshot)
+      : null;
+    if (paymentFingerprint) {
+      const open = await db
+        .from('orders')
+        .select('*')
+        .eq('account_id', accountId)
+        .eq('contact_id', contactId)
+        .or('status.is.null,status.neq.paid');
+      if (open.error) throw open.error;
+      if (!open.data) throw new Error('Open payment lookup missing');
+      // Older writers did not store a fingerprint. Reuse only a complete,
+      // canonical snapshot; ambiguous legacy claims require reconciliation.
+      const matched = await matchOpenPayment(
+        open.data,
+        paymentFingerprint,
+        db,
+        accountId
+      );
+      if (matched.ambiguous) {
+        return NextResponse.json(
+          { error: 'Ambiguous open payment; reconciliation required' },
+          { status: 409 }
+        );
+      }
+      const existingOpen = matched.match;
+      if (existingOpen) {
+        const priorClaim = await db
+          .from('order_checkouts')
+          .select('id')
+          .eq('account_id', accountId)
+          .eq('external_reference', externalReference)
+          .maybeSingle();
+        if (priorClaim.error) throw priorClaim.error;
+        if (priorClaim.data)
+          return NextResponse.json(
+            {
+              error:
+                'Checkout reference already reserved; reconciliation required',
+            },
+            { status: 409 }
+          );
+        if (
+          existingOpen.status !== 'pending' ||
+          !existingOpen.id ||
+          !existingOpen.preference_id ||
+          !existingOpen.payment_url ||
+          !existingOpen.external_reference ||
+          exactBrlCents(existingOpen.total) !== totalCents
+        ) {
+          return NextResponse.json(
+            { error: 'Open payment already claimed; reconciliation required' },
+            { status: 409 }
+          );
+        }
+        return NextResponse.json({
+          ok: true,
+          paymentUrl: existingOpen.payment_url,
+          preferenceId: existingOpen.preference_id,
+          orderId: existingOpen.id,
+          externalReference: existingOpen.external_reference,
+          reused: true,
+        });
+      }
+    }
     if (!isMercadoPagoConfigured())
       return NextResponse.json(
         { error: MP_NOT_CONFIGURED_MESSAGE },
@@ -195,7 +265,12 @@ export async function POST(request: Request) {
     // Mark uncertainty before remote I/O; retries cannot duplicate a preference.
     const claim = await db
       .from('orders')
-      .insert({ ...snapshot, status: 'checkout_uncertain' })
+      .insert({
+        ...snapshot,
+        payment_fingerprint: paymentFingerprint,
+        payment_conversation_id: body.conversationId ?? null,
+        status: 'checkout_uncertain',
+      })
       .select('id')
       .single();
     if (claim.error?.code === '23505')

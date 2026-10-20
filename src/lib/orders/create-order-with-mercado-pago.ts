@@ -2,6 +2,11 @@ import { createHash } from 'node:crypto';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { buildOrderNotes, createOrderDeal } from './create-order';
 import {
+  matchOpenPayment,
+  openPaymentFingerprint,
+} from '@/lib/payments/open-payment-identity';
+import { exactBrlCents } from '@/lib/payments/payment-identity';
+import {
   createPaymentLink,
   isMercadoPagoConfigured,
 } from '@/lib/payments/mercado-pago';
@@ -30,6 +35,7 @@ export interface CreateOrderWithMpInput {
 
 export interface CreateOrderWithMpResult {
   ok: boolean;
+  externalReference?: string;
   dealId?: string;
   orderId?: string;
   link_mercado_pago?: string;
@@ -167,6 +173,63 @@ export async function createOrderWithMercadoPago(
       .eq('external_reference', externalReference)
       .maybeSingle();
     if (canonical.error) throw canonical.error;
+    const paymentFingerprint = openPaymentFingerprint({
+      items: snapshot.items,
+      observations: snapshot.observations,
+      delivery_kind: snapshot.deliveryKind,
+      delivery_address: snapshot.deliveryAddress,
+    });
+    if (!canonical.data) {
+      const open = await admin
+        .from('orders')
+        .select('*')
+        .eq('account_id', ctx.accountId)
+        .eq('contact_id', input.contactId)
+        .or('status.is.null,status.neq.paid');
+      if (open.error) throw open.error;
+      if (!open.data) throw new Error('Open payment lookup missing.');
+      const matched = await matchOpenPayment(
+        open.data,
+        paymentFingerprint,
+        admin,
+        ctx.accountId
+      );
+      if (matched.ambiguous)
+        throw new Error('Ambiguous open payment; reconciliation required.');
+      const existingOpen = matched.match;
+      if (existingOpen) {
+        const priorClaim = await admin
+          .from('order_checkouts')
+          .select('id')
+          .eq('account_id', ctx.accountId)
+          .eq('external_reference', externalReference)
+          .maybeSingle();
+        if (priorClaim.error) throw priorClaim.error;
+        if (priorClaim.data)
+          throw new Error(
+            'Checkout reference already reserved; reconciliation required.'
+          );
+        if (
+          existingOpen.status !== 'pending' ||
+          !existingOpen.id ||
+          !existingOpen.preference_id ||
+          !existingOpen.payment_url ||
+          !existingOpen.external_reference ||
+          exactBrlCents(existingOpen.total) !== totalCents
+        )
+          throw new Error(
+            'Open payment requires reconciliation; no new checkout was started.'
+          );
+        return {
+          ok: true,
+          orderId: existingOpen.id,
+          dealId: existingOpen.deal_id,
+          preferenceId: existingOpen.preference_id,
+          link_mercado_pago: existingOpen.payment_url,
+          externalReference: existingOpen.external_reference,
+        };
+      }
+    }
     const claim = await admin
       .from('order_checkouts')
       .insert({
@@ -252,6 +315,8 @@ export async function createOrderWithMercadoPago(
         external_reference: externalReference,
         total,
         total_amount: total,
+        payment_fingerprint: paymentFingerprint,
+        payment_conversation_id: input.conversationId ?? null,
         items: snapshot.items,
         delivery_kind: snapshot.deliveryKind,
         delivery_address: snapshot.deliveryAddress,

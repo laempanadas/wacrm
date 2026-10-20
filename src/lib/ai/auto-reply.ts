@@ -8,6 +8,11 @@ import { latestUserMessage } from './query';
 import { engineSendText } from '@/lib/flows/meta-send';
 import { checkZeroTokenMatch } from './fast-path';
 import { TEMPLATE_LIMIT_REACHED } from '@/lib/orders/delivery-templates';
+import {
+  handleConversationHandoff,
+  hasActiveHuman,
+  sendHandoffNotice,
+} from '@/lib/whatsapp/handoff';
 
 interface DispatchArgs {
   /** Tenancy key — drives config, contact, and whatsapp_config lookups. */
@@ -46,9 +51,6 @@ export async function dispatchInboundToAiReply(
 
   try {
     const db = supabaseAdmin();
-
-    const AGENT_INACTIVITY_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutos
-    const CUSTOMER_INACTIVITY_THRESHOLD_MS = 4 * 60 * 60 * 1000; // 4 horas
 
     const config = await loadAiConfig(db, accountId);
     if (!config || !config.autoReplyEnabled) {
@@ -104,35 +106,6 @@ export async function dispatchInboundToAiReply(
       return;
     }
 
-    // FEATURE: Reset automático de handoff após 2 horas de inatividade do agente
-    // Se ai_autoreply_disabled=true mas passaram 2h desde a última mensagem do agente,
-    // a conversa é reaberta para a IA responder novamente (clientes recorrentes).
-    const HANDOFF_RESET_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 horas
-    if (conv.ai_autoreply_disabled && conv.last_agent_message_at) {
-      const lastAgentAt = new Date(conv.last_agent_message_at);
-      const now = new Date();
-      const timeSinceLastAgent = now.getTime() - lastAgentAt.getTime();
-
-      if (timeSinceLastAgent > HANDOFF_RESET_THRESHOLD_MS) {
-        console.log('[ai auto-reply] resetting handoff after 2h inactivity', {
-          accountId,
-          conversationId,
-          timeSinceLastAgentMs: timeSinceLastAgent,
-        });
-        // Reativa a IA e zera o contador de respostas
-        await db
-          .from('conversations')
-          .update({
-            ai_autoreply_disabled: false,
-            ai_reply_count: 0,
-          })
-          .eq('id', conversationId);
-        // Usa os valores resetados para o resto da lógica
-        conv.ai_autoreply_disabled = false;
-        conv.ai_reply_count = 0;
-      }
-    }
-
     // Closed conversations are intentionally left for a human to reopen
     // when a fresh inbound arrives from the customer.
     if (conv.status === 'closed') {
@@ -144,77 +117,13 @@ export async function dispatchInboundToAiReply(
       return;
     }
 
-    const now = new Date();
-    const lastAgentMessageAt = conv.last_agent_message_at
-      ? new Date(conv.last_agent_message_at)
-      : null;
-    const agentInactive =
-      !lastAgentMessageAt ||
-      now.getTime() - lastAgentMessageAt.getTime() >
-        AGENT_INACTIVITY_THRESHOLD_MS;
-
-    if (conv.assigned_agent_id && !agentInactive) {
-      console.log('[ai auto-reply] blocked: human assigned and active', {
-        accountId,
-        conversationId,
-        assigned_agent_id: conv.assigned_agent_id,
-      });
-      return;
-    }
-    if (conv.ai_autoreply_disabled && !agentInactive) {
-      console.log(
-        '[ai auto-reply] blocked: auto-reply disabled for conversation while agent is active',
-        {
-          accountId,
-          conversationId,
-        }
-      );
-      return;
-    }
-
-    // If the agent is active but the customer has been quiet for a long time,
-    // we can re-engage the thread even with a human assignment still present.
-    let customerInactive = false;
-    if (conv.assigned_agent_id && !agentInactive) {
-      const { data: lastCustomerMsg } = await db
-        .from('messages')
-        .select('created_at')
-        .eq('conversation_id', conversationId)
-        .eq('sender_type', 'customer')
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      if (lastCustomerMsg?.created_at) {
-        const lastCustomerAt = new Date(lastCustomerMsg.created_at);
-        const customerInactiveMs = now.getTime() - lastCustomerAt.getTime();
-        customerInactive =
-          customerInactiveMs > CUSTOMER_INACTIVITY_THRESHOLD_MS;
-      } else {
-        customerInactive = true;
-      }
-    }
-
-    const shouldReengage = customerInactive;
-    if (conv.assigned_agent_id && !agentInactive && !shouldReengage) {
-      console.log(
-        '[ai auto-reply] blocked: human assigned and customer is active',
-        {
-          accountId,
-          conversationId,
-          assigned_agent_id: conv.assigned_agent_id,
-        }
-      );
-      return;
-    }
-    if (conv.ai_autoreply_disabled && !agentInactive && !shouldReengage) {
-      console.log(
-        '[ai auto-reply] blocked: auto-reply disabled and customer is active',
-        {
-          accountId,
-          conversationId,
-        }
-      );
+    // Only the locked inbound handoff policy can resume a paused conversation.
+    // A missing agent timestamp must never override the disabled flag.
+    if (
+      conv.ai_autoreply_disabled ||
+      conv.status === 'pending' ||
+      hasActiveHuman(conv.last_agent_message_at)
+    ) {
       return;
     }
 
@@ -343,13 +252,31 @@ export async function dispatchInboundToAiReply(
     });
 
     if (handoff || !text) {
-      // The model can't (or shouldn't) answer — stop auto-replying on
-      // this thread and leave the inbound unanswered so it surfaces in
-      // the inbox for a human. Sticky until an admin re-enables.
-      await db
-        .from('conversations')
-        .update({ ai_autoreply_disabled: true })
-        .eq('id', conversationId);
+      await handleConversationHandoff({
+        db,
+        accountId,
+        conversationId,
+        contactId,
+        text: latestText,
+        messageId: `ai:${conversationId}`,
+        reason: 'order_review',
+        send: (key, notice) =>
+          sendHandoffNotice(
+            db,
+            accountId,
+            conversationId,
+            key,
+            notice,
+            (body) =>
+              engineSendText({
+                accountId,
+                userId: configOwnerUserId,
+                conversationId,
+                contactId,
+                text: body,
+              })
+          ),
+      });
       return;
     }
 

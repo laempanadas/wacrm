@@ -53,6 +53,9 @@ function fixture() {
   };
   let orderReadError = false;
   let conversationDisabled = false;
+  let conversationReason: string | null = null;
+  let humanAt: string | null = null;
+  let draftUpdatedAt = '2026-10-11T02:00:00Z';
   let failMessages = false;
   let activeFlow: {
     id: string;
@@ -64,6 +67,31 @@ function fixture() {
   const flowUpdates: Record<string, unknown>[] = [];
   const db = {
     rpc: vi.fn(async (name: string, args: Record<string, string>) => {
+      if (name === 'handle_conversation_handoff') {
+        if (args.p_request) {
+          conversationDisabled = true;
+          conversationReason = args.p_reason;
+        }
+        return {
+          data: {
+            blocked: conversationDisabled || Boolean(humanAt),
+            episode_id: 'episode-1',
+            notice: 'waiting',
+          },
+          error: null,
+        };
+      }
+      if (name === 'rotate_order_draft') {
+        state = {
+          id: 'draft-2',
+          version: 0,
+          items: [],
+          unresolved: [],
+          stage: 'collecting',
+          total: 0,
+        };
+        return { data: state, error: null };
+      }
       if (name === 'flow_checkout_correct') {
         if (
           !activeFlow ||
@@ -103,11 +131,22 @@ function fixture() {
       let payload: Record<string, unknown> = {};
       const filters: Record<string, unknown> = {};
       const result = () => {
+        if (table === 'order_inbound_events' && operation === 'select')
+          return {
+            data: events.has(String(filters.meta_message_id))
+              ? { status: 'completed' }
+              : null,
+            error: null,
+          };
         if (table === 'conversations') {
           if (operation === 'update' && payload.ai_autoreply_disabled === true)
             conversationDisabled = true;
           return {
-            data: { ai_autoreply_disabled: conversationDisabled },
+            data: {
+              ai_autoreply_disabled: conversationDisabled,
+              bot_pause_reason: conversationReason,
+              last_agent_message_at: humanAt,
+            },
             error: null,
           };
         }
@@ -124,10 +163,14 @@ function fixture() {
         }
         if (table === 'order_drafts') {
           if (operation === 'select')
-            return { data: state ? { state } : null, error: null };
+            return {
+              data: state ? { state, updated_at: draftUpdatedAt } : null,
+              error: null,
+            };
           if (filters.processing_message_id !== processing)
             return { data: null, error: { message: 'claim mismatch' } };
           state = structuredClone(payload.state) as OrderDraft;
+          draftUpdatedAt = String(payload.updated_at);
           if (payload.processing_message_id === null) processing = null;
           return { data: { id: 'draft-1' }, error: null };
         }
@@ -214,6 +257,16 @@ function fixture() {
     },
     state: () => state!,
     conversationDisabled: () => conversationDisabled,
+    pause: () => {
+      conversationDisabled = true;
+    },
+    setHumanActive: () => {
+      humanAt = new Date().toISOString();
+    },
+    seedDraft: (draft: OrderDraft, updatedAt = draftUpdatedAt) => {
+      state = structuredClone(draft);
+      draftUpdatedAt = updatedAt;
+    },
     setFailMessages: () => {
       failMessages = true;
     },
@@ -273,6 +326,109 @@ beforeEach(() => {
 });
 
 describe('text order pipeline (all external effects mocked)', () => {
+  it.each(['Oi', 'Alô', 'Pix feito', 'Falar com atendente'])(
+    'acknowledges paused inbound %s once per handoff episode without a payment',
+    async (text) => {
+      const f = fixture();
+      await f.turn('2 carne', 'items');
+      f.pause();
+      const before = f.messages.length;
+      expect((await f.turn(text, 'paused')).outcome).toBe('needs_human');
+      expect(f.messages.at(-1)?.content_text).toBe(
+        'Um atendente já vai te responder.'
+      );
+      expect(f.messages).toHaveLength(before + 1);
+      await f.turn(text, 'paused-again');
+      expect(f.messages).toHaveLength(before + 1);
+      expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+    }
+  );
+  it('handles an explicit human request even without a text draft', async () => {
+    const f = fixture();
+    expect((await f.turn('Falar com atendente', 'human')).outcome).toBe(
+      'needs_human'
+    );
+    expect(f.conversationDisabled()).toBe(true);
+    expect(f.messages.at(-1)?.content_text).toBe(
+      'Um atendente já vai te responder.'
+    );
+    expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+  });
+  it('does not turn bot resumption consent into an unresolved order instruction', async () => {
+    const f = fixture();
+    await f.turn('2 carne', 'items');
+    const snapshot = structuredClone(f.state());
+    expect((await f.turn('Continuar com o bot', 'resume')).outcome).toBe(
+      'bot_resumed'
+    );
+    expect(f.state()).toEqual(snapshot);
+    expect(f.conversationDisabled()).toBe(false);
+  });
+  it('keeps legacy cart age through greetings so an old uncharged draft can expire', async () => {
+    const f = fixture();
+    const old = '2026-10-09T02:00:00.000Z';
+    f.setOrder(null);
+    f.seedDraft(
+      {
+        id: 'old',
+        version: 1,
+        stage: 'awaiting_address',
+        items: [
+          {
+            id: 'meat',
+            title: 'Carne',
+            quantity: 2,
+            unitPrice: 14,
+            totalPrice: 28,
+          },
+        ],
+        unresolved: [],
+        total: 28,
+      },
+      old
+    );
+    await f.turn('Oi', 'greeting');
+    expect(f.state()).toMatchObject({ cartUpdatedAt: old });
+    await f.turn('Quero 3 calabresa', 'fresh');
+    expect(f.state().items).toEqual([
+      expect.objectContaining({ id: 'sausage', quantity: 3 }),
+    ]);
+  });
+  it('remembers the canonical reference when a matching open payment is reused', async () => {
+    const f = fixture();
+    vi.mocked(createOrderWithMercadoPago).mockResolvedValueOnce({
+      ok: true,
+      orderId: 'order-1',
+      dealId: 'deal-1',
+      externalReference: 'TEXT-earlier-9',
+      link_mercado_pago:
+        'https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=test',
+    });
+    f.setOrder({ external_reference: 'TEXT-earlier-9' });
+    await f.turn('2 carne, entregar na Rua Flores, 10 Centro', 'items');
+    await f.turn('confirmo o pedido', 'confirm');
+    expect(f.state().paymentReference).toBe('TEXT-earlier-9');
+    expect(
+      (await f.turn('reenvie o link de pagamento', 'resend')).outcome
+    ).toBe('payment_resent');
+    expect(getExistingPaymentLink).toHaveBeenCalledWith(
+      expect.objectContaining({ external_reference: 'TEXT-earlier-9' })
+    );
+    expect(createOrderWithMercadoPago).toHaveBeenCalledTimes(1);
+  });
+  it('starts a new cart after a paid order rather than inheriting payment_created', async () => {
+    const f = fixture();
+    await f.turn('2 carne, entregar na Rua Flores, 10 Centro', 'items');
+    await f.turn('confirmo o pedido', 'confirm');
+    f.setOrder({ status: 'paid' });
+    await f.turn('Quero 3 calabresa', 'new-order');
+    expect(f.state().id).toBe('draft-2');
+    expect(f.state().items).toEqual([
+      expect.objectContaining({ id: 'sausage', quantity: 3 }),
+    ]);
+    expect(f.state().stage).toBe('awaiting_address');
+    expect(createOrderWithMercadoPago).toHaveBeenCalledTimes(1);
+  });
   it('saves only complete addresses to the customer profile and explains where to copy the real Pix code', async () => {
     const f = fixture();
     await f.turn('2 carne', 'items');
