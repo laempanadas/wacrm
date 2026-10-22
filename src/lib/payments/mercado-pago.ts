@@ -193,6 +193,8 @@ export async function createPaymentLink(
     ...(requestOptions ? { requestOptions } : {}),
     body: {
       items: validItems,
+      // La Empanadas: free delivery in every channel, with no minimum order.
+      shipments: { cost: 0 },
       external_reference: extRef,
       payer: {
         name: firstName,

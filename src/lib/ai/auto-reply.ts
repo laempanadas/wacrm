@@ -5,7 +5,12 @@ import { retrieveKnowledge } from './knowledge';
 import { generateReply } from './generate';
 import { buildSystemPrompt } from './defaults';
 import { latestUserMessage } from './query';
-import { engineSendText } from '@/lib/flows/meta-send';
+import { engineSendText, engineSendPayment } from '@/lib/flows/meta-send';
+import {
+  AI_PAYMENT_CLARIFICATION,
+  parseAiTotal,
+  resolveAiPayment,
+} from './auto-payment';
 import { checkZeroTokenMatch } from './fast-path';
 import { TEMPLATE_LIMIT_REACHED } from '@/lib/orders/delivery-templates';
 import {
@@ -93,7 +98,7 @@ export async function dispatchInboundToAiReply(
     const { data: conv, error: convErr } = await db
       .from('conversations')
       .select(
-        'status, assigned_agent_id, ai_autoreply_disabled, ai_reply_count, last_agent_message_at'
+        'status, assigned_agent_id, ai_autoreply_disabled, ai_reply_count, last_agent_message_at, bot_order_resumed_at'
       )
       .eq('id', conversationId)
       .maybeSingle();
@@ -122,7 +127,11 @@ export async function dispatchInboundToAiReply(
     if (
       conv.ai_autoreply_disabled ||
       conv.status === 'pending' ||
-      hasActiveHuman(conv.last_agent_message_at)
+      hasActiveHuman(
+        conv.last_agent_message_at,
+        Date.now(),
+        conv.bot_order_resumed_at
+      )
     ) {
       return;
     }
@@ -239,11 +248,13 @@ export async function dispatchInboundToAiReply(
       latestText
     );
 
-    const systemPrompt = buildSystemPrompt({
-      userPrompt: config.systemPrompt,
-      mode: 'auto_reply',
-      knowledge,
-    });
+    const systemPrompt =
+      buildSystemPrompt({
+        userPrompt: config.systemPrompt,
+        mode: 'auto_reply',
+        knowledge,
+      }) +
+      '\n\nPayment control: when an existing confirmed order total is explicitly available, you may append exactly one [TOTAL:xxx.xx] using positive BRL with two decimal digits and no spaces. This is only a validation request, never authorization or proof of payment. Never invent totals, checkout URLs, items, address or customer consent. For missing items, address or confirmation, ask one clarifying question instead of handing off solely for missing order information. Never mark payment as approved from customer prose. The server alone validates and sends the real payment button.';
 
     const { text, handoff } = await generateReply({
       config,
@@ -251,7 +262,8 @@ export async function dispatchInboundToAiReply(
       messages,
     });
 
-    if (handoff || !text) {
+    const totalControl = parseAiTotal(text);
+    if (totalControl.kind === 'none' && (handoff || !totalControl.text)) {
       await handleConversationHandoff({
         db,
         accountId,
@@ -293,6 +305,40 @@ export async function dispatchInboundToAiReply(
       }
     );
     if (claimErr || claimed !== true) return;
+
+    if (totalControl.kind !== 'none') {
+      const resolution =
+        totalControl.kind === 'valid' && !handoff
+          ? await resolveAiPayment(
+              db,
+              { accountId, conversationId, contactId },
+              totalControl.cents
+            )
+          : { kind: 'clarify' as const, text: AI_PAYMENT_CLARIFICATION };
+      if (resolution.kind === 'payment') {
+        // Stable canonical reference + deterministic body allow exact outbox replay
+        // across model retries without generating another checkout or send.
+        await engineSendPayment({
+          accountId,
+          userId: configOwnerUserId,
+          conversationId,
+          contactId,
+          bodyText: `Total: R$ ${(resolution.cents / 100).toFixed(2).replace('.', ',')}\nEste é o mesmo pagamento do seu pedido. Escolha Pix ou cartão no checkout.`,
+          buttonUrl: resolution.url,
+          buttonText: 'Pagar pedido',
+          effectKey: `ai-payment:${conversationId}:${resolution.reference}`,
+        });
+      } else {
+        await engineSendText({
+          accountId,
+          userId: configOwnerUserId,
+          conversationId,
+          contactId,
+          text: resolution.text,
+        });
+      }
+      return;
+    }
 
     await engineSendText({
       accountId,

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   processFreeTextOrderInbound,
+  processInboundHandoff,
   type TextOrderFlowContext,
 } from './text-order-flow';
 import { createOrderWithMercadoPago } from './create-order-with-mercado-pago';
@@ -55,6 +56,8 @@ function fixture() {
   let conversationDisabled = false;
   let conversationReason: string | null = null;
   let humanAt: string | null = null;
+  let resumedAt: string | null = null;
+  let conversationStatus = 'open';
   let draftUpdatedAt = '2026-10-11T02:00:00Z';
   let failMessages = false;
   let activeFlow: {
@@ -68,13 +71,25 @@ function fixture() {
   const db = {
     rpc: vi.fn(async (name: string, args: Record<string, string>) => {
       if (name === 'handle_conversation_handoff') {
+        if (args.p_new_order && !args.p_request) {
+          conversationDisabled = false;
+          conversationReason = null;
+          conversationStatus = 'open';
+          resumedAt = new Date().toISOString();
+        }
         if (args.p_request) {
           conversationDisabled = true;
           conversationReason = args.p_reason;
         }
         return {
           data: {
-            blocked: conversationDisabled || Boolean(humanAt),
+            blocked:
+              conversationDisabled ||
+              conversationStatus === 'pending' ||
+              Boolean(
+                humanAt &&
+                (!resumedAt || Date.parse(humanAt) >= Date.parse(resumedAt))
+              ),
             episode_id: 'episode-1',
             notice: 'waiting',
           },
@@ -146,6 +161,8 @@ function fixture() {
               ai_autoreply_disabled: conversationDisabled,
               bot_pause_reason: conversationReason,
               last_agent_message_at: humanAt,
+              bot_order_resumed_at: resumedAt,
+              status: conversationStatus,
             },
             error: null,
           };
@@ -260,6 +277,21 @@ function fixture() {
     pause: () => {
       conversationDisabled = true;
     },
+    pending: () => {
+      conversationStatus = 'pending';
+    },
+    native: (items: Parameters<typeof processInboundHandoff>[1]) =>
+      processInboundHandoff(
+        {
+          ...context,
+          inboundText: 'Carrinho nativo',
+          inboundMessageId: 'native',
+        },
+        items
+      ),
+    setPriorHuman: () => {
+      humanAt = new Date(Date.now() - 60000).toISOString();
+    },
     setHumanActive: () => {
       humanAt = new Date().toISOString();
     },
@@ -326,6 +358,175 @@ beforeEach(() => {
 });
 
 describe('text order pipeline (all external effects mocked)', () => {
+  it.each(
+    ['paused', 'pending', 'recent human'].flatMap((pause) =>
+      [
+        '2 carne',
+        'quero pedir 2 carne',
+        'gostaria de pedir 2 carne',
+        'por favor 2 carne',
+      ].map((text) => [pause, text])
+    )
+  )(
+    'resumes a validated quantified order over %s (%s) through address and confirmation, not a prior human timestamp',
+    async (pause, text) => {
+      const f = fixture();
+      if (pause === 'paused') f.pause();
+      if (pause === 'pending') f.pending();
+      if (pause !== 'pending') f.setPriorHuman();
+      expect((await f.turn(text, 'priority')).outcome).toBe(
+        'address_requested'
+      );
+      expect(f.db.rpc).toHaveBeenCalledWith(
+        'handle_conversation_handoff',
+        expect.objectContaining({ p_new_order: true, p_request: false })
+      );
+      expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+      expect((await f.turn('Rua Flores, 10 Centro', 'address')).outcome).toBe(
+        'confirmation_requested'
+      );
+      expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+      expect((await f.turn('confirmo o pedido', 'confirm')).outcome).toBe(
+        'order_created'
+      );
+      await f.turn('confirmo o pedido', 'confirm');
+      expect(createOrderWithMercadoPago).toHaveBeenCalledTimes(1);
+    }
+  );
+  it.each([
+    'quero carne',
+    '1 lagosta',
+    'não quero 2 carne',
+    'quanto custa 2 carne?',
+    'quero 2 carne e 1 lagosta',
+    'Rua Flores, 10 Centro',
+    'Pix feito',
+    'Oi',
+    'atendente',
+  ])(
+    'never grants priority to unvalidated/unquantified text: %s',
+    async (text) => {
+      const f = fixture();
+      f.pause();
+      expect((await f.turn(text, 'not-priority')).outcome).toBe('needs_human');
+      expect(f.db.rpc).toHaveBeenCalledWith(
+        'handle_conversation_handoff',
+        expect.objectContaining({ p_new_order: false })
+      );
+      expect(f.conversationDisabled()).toBe(true);
+      expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+    }
+  );
+  it('keeps a genuinely new human send after resumption active', async () => {
+    const f = fixture();
+    f.pause();
+    f.setPriorHuman();
+    await f.turn('2 carne', 'priority');
+    vi.advanceTimersByTime(1000);
+    f.setHumanActive();
+    expect((await f.turn('Rua Flores, 10 Centro', 'address')).outcome).toBe(
+      'needs_human'
+    );
+    expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+  });
+  it('retains ordinary waiting notices when the catalog is unavailable, without attempting order priority', async () => {
+    const f = fixture();
+    f.pause();
+    vi.mocked(loadOrderCatalog).mockRejectedValue(
+      new Error('catalog unavailable')
+    );
+    expect((await f.turn('Oi', 'waiting-no-catalog')).outcome).toBe(
+      'needs_human'
+    );
+    expect(f.messages.at(-1)?.content_text).toBe(
+      'Um atendente já vai te responder.'
+    );
+    expect(loadOrderCatalog).not.toHaveBeenCalled();
+    expect(f.db.rpc).toHaveBeenCalledWith(
+      'handle_conversation_handoff',
+      expect.objectContaining({ p_new_order: false, p_request: false })
+    );
+  });
+  it('resumes routing but still escalates an active catalog correction without stealing or charging its cart', async () => {
+    const f = fixture();
+    f.pause();
+    f.setPriorHuman();
+    f.setActiveCatalog();
+    expect(
+      (await f.turn('2 carne', 'priority-catalog-correction')).outcome
+    ).toBe('needs_human');
+    expect(f.db.rpc).toHaveBeenCalledWith(
+      'handle_conversation_handoff',
+      expect.objectContaining({ p_new_order: true })
+    );
+    expect(f.db.rpc).toHaveBeenCalledWith(
+      'flow_checkout_correct',
+      expect.objectContaining({ p_text: '2 carne' })
+    );
+    expect(
+      f.db.rpc.mock.calls.some(([name]) => name === 'claim_order_turn')
+    ).toBe(false);
+    expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+  });
+  it('accepts explicit plus additions using the validated live catalog', async () => {
+    vi.mocked(loadOrderCatalog).mockResolvedValue(
+      catalogEntries([
+        {
+          id: 'chicken',
+          name: 'Empanada de Frango',
+          price: 15,
+          is_available: true,
+        },
+        {
+          id: 'ricotta',
+          name: 'Empanada de Ricota',
+          price: 16,
+          is_available: true,
+        },
+      ])
+    );
+    const f = fixture();
+    f.pause();
+    expect((await f.turn('+1frango,+1ricota', 'plus')).outcome).toBe(
+      'address_requested'
+    );
+    expect(f.state().items.map((i) => [i.id, i.quantity])).toEqual([
+      ['chicken', 1],
+      ['ricotta', 1],
+    ]);
+    expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+  });
+  it('validates native lines before prioritizing and retains notes for downstream review', async () => {
+    const f = fixture();
+    f.pause();
+    const items = [
+      { retailer_id: 'carne', name: 'Carne', quantity: 2, unit_price: 0.01 },
+    ];
+    expect(await f.native({ items, notes: 'sem pimentão' })).toBe(false);
+    expect(f.db.rpc).toHaveBeenCalledWith(
+      'handle_conversation_handoff',
+      expect.objectContaining({ p_new_order: true })
+    );
+    expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+  });
+  it.each([0, -1, 1.5])(
+    'does not prioritize invalid native quantity %s',
+    async (quantity) => {
+      const f = fixture();
+      f.pause();
+      expect(
+        await f.native({
+          items: [
+            { retailer_id: 'carne', name: 'Carne', quantity, unit_price: 14 },
+          ],
+        })
+      ).toBe(true);
+      expect(f.db.rpc).toHaveBeenCalledWith(
+        'handle_conversation_handoff',
+        expect.objectContaining({ p_new_order: false })
+      );
+    }
+  );
   it.each(['Oi', 'Alô', 'Pix feito', 'Falar com atendente'])(
     'acknowledges paused inbound %s once per handoff episode without a payment',
     async (text) => {

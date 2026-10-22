@@ -322,6 +322,8 @@ const CATALOG_PRODUCTS: ProductCatalogEntry[] = [
       'espinafre e ricota',
       'espinafre ricota',
       'ricota com espinafre',
+      'ricota e tomate seco',
+      'ricota',
       'espinafre',
     ],
   },
@@ -516,7 +518,13 @@ function rangesOverlap(
  * Extrai itens e quantidades, calculando o valor total oficial.
  */
 export function parseTextOrder(text: string): ParsedOrderResult {
-  return parseCatalogOrder(text, CATALOG_PRODUCTS);
+  return parseCatalogOrder(
+    text,
+    CATALOG_PRODUCTS.map((product) => ({
+      ...product,
+      aliases: [product.nome, ...product.aliases],
+    }))
+  );
 }
 
 /** Production callers must supply the tenant's live catalog, never mock prices. */
@@ -538,7 +546,15 @@ export function parseCatalogOrder(
         '\n' +
         source.slice(addressStart + address!.length)
       : source
-  ).trim();
+  )
+    // Replace only addition signs adjacent to an explicit quantity. Keep the
+    // character width so matched spans still refer to the original wording;
+    // literal '+' inside combo names and genuine kitchen notes stay intact.
+    .replace(
+      /(^|[\s,;])\+(?=\s*(?:\d+|um|uma|dois|duas|tres|quatro|cinco|seis|sete|oito|nove|dez|onze|doze|meia\s+duzia|uma\s+duzia)\s*(?:x\s*)?(?:de\s*)?[a-z])/gi,
+      '$1 '
+    )
+    .trim();
   const normalized = normalize(orderText);
   const matches: Array<{
     start: number;
@@ -556,12 +572,15 @@ export function parseCatalogOrder(
   for (const { alias, product } of aliases) {
     const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const regex = new RegExp(
-      `\\b(${numPattern})\\s*(?:x\\s*)?(?:de\\s*)?(?:empanadas?\\s*(?:de\\s*)?)?${escaped}\\b`,
+      `\\b(${numPattern})\\s*(?:x\\s*)?(?:de\\s*)?(?:empanadas?\\s*(?:de\\s*)?)?${escaped}(?!\\w)`,
       'gi'
     );
     for (const match of normalized.matchAll(regex)) {
       const start = match.index!;
       const end = start + match[0].length;
+      // A minus belongs to the requested amount, never an order-list separator.
+      // Leave the clause unresolved rather than silently selling its magnitude.
+      if (/[-−–—]\s*$/.test(normalized.slice(0, start))) continue;
       if (matches.some((range) => rangesOverlap(range, { start, end })))
         continue;
       const rawQty = match[1].trim();
@@ -581,7 +600,7 @@ export function parseCatalogOrder(
   ) {
     for (const { alias, product } of aliases) {
       const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const match = new RegExp(`\\b${escaped}\\b`).exec(normalized);
+      const match = new RegExp(`\\b${escaped}(?!\\w)`).exec(normalized);
       if (!match) continue;
       const start = match.index;
       const end = start + match[0].length;
@@ -611,7 +630,7 @@ export function parseCatalogOrder(
   if (firstSpan < orderText.length) {
     const prefix = orderText.slice(0, firstSpan).trim();
     const filler =
-      /^(?:[\s,;.!]+|(?:boa noite|bom dia|boa tarde|oi|ola|vou querer|quero|gostaria(?: de)?|manda|envia|me ve|na verdade|adicione|adicionar|acrescente|acrescentar|mais|e)\b\s*)/;
+      /^(?:[\s,;.!]+|(?:boa noite|bom dia|boa tarde|oi|ola|vou querer|quero(?: pedir)?|gostaria(?: de)?(?: pedir)?|por favor|manda|envia|me ve|na verdade|adicione|adicionar|acrescente|acrescentar|mais|e)\b\s*)/;
     let remaining = normalize(prefix);
     while (filler.test(remaining)) remaining = remaining.replace(filler, '');
     if (remaining) unresolved.push(prefix);

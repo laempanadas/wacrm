@@ -272,6 +272,98 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('real WhatsApp POST and text processor ownership', () => {
+  it('routes a catalog-validated native order over a manual/recent-human pause once, preserving notes and the old payment', async () => {
+    const sku = '00000000-0000-0000-0000-000000000009';
+    tables.menu_items = [
+      {
+        id: sku,
+        account_id: 'account',
+        name: 'Carne',
+        price: 14,
+        is_available: true,
+      },
+    ];
+    Object.assign(tables.conversations[0], {
+      ai_autoreply_disabled: true,
+      bot_pause_reason: 'manual',
+      last_agent_message_at: new Date(Date.now() - 60000).toISOString(),
+    });
+    mocks.db.rpc.mockImplementation(async (name, args) => {
+      expect(name).toBe('handle_conversation_handoff');
+      if (args.p_new_order === true && args.p_request === false) {
+        Object.assign(tables.conversations[0], {
+          ai_autoreply_disabled: false,
+          bot_pause_reason: null,
+          status: 'open',
+          bot_order_resumed_at: new Date().toISOString(),
+        });
+        return { data: { blocked: false, resumed: true }, error: null };
+      }
+      return { data: { blocked: true }, error: null };
+    });
+    const cart = {
+      type: 'order',
+      order: {
+        text: 'sem pimentão',
+        product_items: [
+          {
+            product_retailer_id: sku,
+            quantity: 2,
+            item_price: 0.01,
+            currency: 'BRL',
+          },
+        ],
+      },
+    };
+    await deliver('priority-native', cart);
+    await deliver('priority-native', cart);
+    expect(mocks.db.rpc).toHaveBeenCalledWith(
+      'handle_conversation_handoff',
+      expect.objectContaining({ p_new_order: true, p_request: false })
+    );
+    expect(mocks.flow).toHaveBeenCalledTimes(1);
+    expect(mocks.flow.mock.calls[0][0].message).toMatchObject({
+      kind: 'catalog_order',
+      notes: 'sem pimentão',
+      items: [expect.objectContaining({ retailer_id: sku, quantity: 2 })],
+    });
+    expect(tables.order_drafts[0].state).toEqual(oldDraft);
+    expect(tables.whatsapp_inbound_receipts).toHaveLength(1);
+    expect(mocks.payment).not.toHaveBeenCalled();
+    expect(mocks.ai).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it.each([0, -1, 1.5])(
+    'does not grant native priority to invalid quantity %s',
+    async (quantity) => {
+      const sku = '00000000-0000-0000-0000-000000000009';
+      tables.menu_items = [
+        {
+          id: sku,
+          account_id: 'account',
+          name: 'Carne',
+          price: 14,
+          is_available: true,
+        },
+      ];
+      tables.conversations[0].ai_autoreply_disabled = true;
+      mocks.db.rpc.mockResolvedValue({ data: { blocked: true }, error: null });
+      await deliver('invalid-native', {
+        type: 'order',
+        order: {
+          product_items: [
+            { product_retailer_id: sku, quantity, item_price: 14 },
+          ],
+        },
+      });
+      expect(mocks.db.rpc).toHaveBeenCalledWith(
+        'handle_conversation_handoff',
+        expect.objectContaining({ p_new_order: false })
+      );
+      expect(mocks.flow).not.toHaveBeenCalled();
+      expect(mocks.payment).not.toHaveBeenCalled();
+    }
+  );
   const media = {
     type: 'image',
     image: { id: 'media', mime_type: 'image/png' },

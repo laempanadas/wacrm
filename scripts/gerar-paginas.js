@@ -69,7 +69,7 @@ async function main() {
           /\{\{PRODUTO_DESCRICAO_SEO\}\}/g,
           () =>
             item.descricao +
-            ' Peca online com entrega rapida em Santo Andre. Frete gratis acima de R$ 100.'
+            ' Peca online com entrega rapida em Santo Andre. Frete gratis em todos os pedidos.'
         )
         .replace(/\{\{PRODUTO_ID\}\}/g, () => item.id)
         .replace(

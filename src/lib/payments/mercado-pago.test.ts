@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  createPaymentLink,
   getExistingPaymentLink,
   getPaymentById,
   getPaymentStatusForOrder,
@@ -63,6 +64,29 @@ describe('installed SDK payment identity transport', () => {
     total: 28,
     payment_url: 'https://payments.example/existing',
   };
+  it.each(['delivery', 'retirada'] as const)(
+    'sets an explicit zero shipping cost for %s, even below any former minimum',
+    async (deliveryKind) => {
+      transport.mockResolvedValueOnce(
+        Response.json({
+          id: 'pref-free-delivery',
+          init_point: 'https://www.mercadopago.com.br/checkout/test',
+        })
+      );
+      await createPaymentLink({
+        items: [
+          { title: 'Empanada de Carne com Ovos', quantity: 1, unitPrice: 14 },
+        ],
+        deliveryKind,
+        externalReference: 'FREE-DELIVERY',
+      });
+      const options = transport.mock.calls[0][1];
+      const body = JSON.parse(String(options.body));
+      expect(body.shipments).toMatchObject({ cost: 0 });
+      expect(body.items).toHaveLength(1);
+      expect(body.items[0]).toMatchObject({ quantity: 1, unit_price: 14 });
+    }
+  );
   it('validates an existing pending preference and returns its exact persisted URL using GET only', async () => {
     data['/checkout/preferences/pref-A'].init_point = existingOrder.payment_url;
     data['/merchant_orders/456'].payments = [];

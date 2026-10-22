@@ -33,6 +33,9 @@ beforeAll(async () => {
   await db.exec(
     readFileSync('supabase/migrations/039_conversation_handoff.sql', 'utf8')
   );
+  await db.exec(
+    readFileSync('supabase/migrations/042_order_intent_priority.sql', 'utf8')
+  );
 }, 30000);
 afterAll(async () => {
   await db?.close();
@@ -76,6 +79,115 @@ async function decision(
 }
 
 describe('handoff migration on real in-memory Postgres', () => {
+  it('keeps the seven-argument trusted RPC service-role-only and security definer', async () => {
+    const r = await db.query<{
+      definer: boolean;
+      anon: boolean;
+      authenticated: boolean;
+      service: boolean;
+    }>(`SELECT p.prosecdef AS definer,
+      has_function_privilege('anon',p.oid,'EXECUTE') AS anon,
+      has_function_privilege('authenticated',p.oid,'EXECUTE') AS authenticated,
+      has_function_privilege('service_role',p.oid,'EXECUTE') AS service
+      FROM pg_proc p WHERE p.oid='public.handle_conversation_handoff(uuid,uuid,uuid,boolean,text,boolean,boolean)'::regprocedure`);
+    expect(r.rows).toEqual([
+      { definer: true, anon: false, authenticated: false, service: true },
+    ]);
+  });
+  it('does not let trusted intent bypass conversation ownership or an explicit handoff request', async () => {
+    await expect(
+      db.query(
+        'SELECT handle_conversation_handoff($1,$2,$3,false,$4,false,true)',
+        [account, conversation, owner, 'customer_request']
+      )
+    ).rejects.toThrow('does not belong');
+    expect((await db.query('SELECT * FROM notifications')).rows).toHaveLength(
+      0
+    );
+    const result = await db.query<{ result: { blocked: boolean } }>(
+      'SELECT handle_conversation_handoff($1,$2,$3,true,$4,false,true) AS result',
+      [account, conversation, contact, 'customer_request']
+    );
+    expect(result.rows[0].result.blocked).toBe(true);
+  });
+  it.each([
+    'manual',
+    'customer_request',
+    'payment_review',
+    'technical_error',
+    'human_active',
+    'order_review',
+  ])(
+    'validated intent overrides %s and the prior human without changing financial or flow state',
+    async (reason) => {
+      await db.query(
+        "UPDATE conversations SET assigned_agent_id=$1,last_agent_message_at=now()-interval '1 minute' WHERE id=$2",
+        [admin, conversation]
+      );
+      await decision(true, reason);
+      await db.query(
+        "INSERT INTO flow_runs(id,account_id,conversation_id,status) VALUES($1,$2,$3,'active')",
+        [contact, account, conversation]
+      );
+      await db.query(
+        "INSERT INTO order_drafts(account_id,conversation_id,state,processing_message_id) VALUES($1,$2,$3,'uncertain-turn')",
+        [
+          account,
+          conversation,
+          { id: contact, version: 2, stage: 'payment_created' },
+        ]
+      );
+      await db.query("INSERT INTO order_checkouts VALUES($1,$2,'uncertain')", [
+        account,
+        `TEXT-${contact}-2`,
+      ]);
+      await db.query(
+        "INSERT INTO orders VALUES($1,$2,$3,'checkout_uncertain')",
+        [contact, account, `TEXT-${contact}-2`]
+      );
+      await db.query(
+        "INSERT INTO order_message_outbox(account_id,conversation_id,effect_key,status,payload) VALUES($1,$2,'existing-send','uncertain','{}')",
+        [account, conversation]
+      );
+      const snapshot = async () =>
+        Promise.all(
+          [
+            'flow_runs',
+            'order_drafts',
+            'order_checkouts',
+            'orders',
+            'order_message_outbox',
+          ].map(async (t) => (await db.query(`SELECT * FROM ${t}`)).rows)
+        );
+      const before = await snapshot();
+      const result = await db.query<{
+        result: { blocked: boolean; resumed: boolean };
+      }>(
+        'SELECT handle_conversation_handoff($1,$2,$3,false,$4,false,true) AS result',
+        [account, conversation, contact, 'customer_request']
+      );
+      expect(result.rows[0].result).toEqual({ blocked: false, resumed: true });
+      expect(await snapshot()).toEqual(before);
+      const c = (
+        await db.query<Record<string, unknown>>('SELECT * FROM conversations')
+      ).rows[0];
+      expect(c).toMatchObject({
+        status: 'open',
+        ai_autoreply_disabled: false,
+        assigned_agent_id: admin,
+        bot_pause_reason: null,
+        bot_handoff_id: null,
+      });
+      expect(c.last_agent_message_at).not.toBeNull();
+      expect(c.bot_order_resumed_at).not.toBeNull();
+      expect((await decision()).blocked).toBe(false);
+      await db.exec(
+        "UPDATE conversations SET last_agent_message_at=now()+interval '1 second'"
+      );
+      expect((await decision()).blocked).toBe(true);
+      expect(await snapshot()).not.toEqual(before); // a genuinely new human may hand off the active flow
+    }
+  );
   it('rotates an expired legacy draft after the real claim renews updated_at', async () => {
     const state = {
       id: contact,

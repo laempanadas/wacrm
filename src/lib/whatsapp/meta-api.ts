@@ -1067,6 +1067,83 @@ function validateInteractiveHeaderFooter(
 export interface GetMediaUrlArgs {
   mediaId: string;
   accessToken: string;
+  /** When supplied, Meta verifies that this phone number owns the media. */
+  phoneNumberId?: string;
+}
+
+/** Safe public diagnostics: never carries a token, signed URL or Meta message. */
+export class MediaFetchError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+    public readonly upstreamStatus?: number
+  ) {
+    super(message);
+    this.name = 'MediaFetchError';
+  }
+}
+
+function safeMediaError(error: unknown): MediaFetchError {
+  if (error instanceof MediaFetchError) return error;
+  if (error instanceof Error && error.name === 'TimeoutError') {
+    return new MediaFetchError(504, 'WhatsApp media request timed out');
+  }
+  return new MediaFetchError(502, 'WhatsApp media service unavailable');
+}
+
+function mediaDeadline() {
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(new DOMException('Media timeout', 'TimeoutError')),
+    15_000
+  );
+  timer.unref?.();
+  return { controller, clear: () => clearTimeout(timer) };
+}
+
+async function mediaResponseError(
+  response: Response,
+  download = false
+): Promise<never> {
+  let code: number | undefined;
+  try {
+    const data = await response.json();
+    code = data?.error?.code;
+  } catch {
+    /* Error bodies are untrusted; never expose them. */
+  }
+  if (
+    code === 190 ||
+    code === 10 ||
+    code === 200 ||
+    response.status === 401 ||
+    (!download && response.status === 403)
+  ) {
+    throw new MediaFetchError(
+      424,
+      'WhatsApp credentials rejected. Reconnect WhatsApp.'
+    );
+  }
+  if (
+    response.status === 410 ||
+    (download && [403, 404].includes(response.status))
+  ) {
+    throw new MediaFetchError(
+      410,
+      'WhatsApp media is no longer available',
+      response.status
+    );
+  }
+  if (response.status === 404 || code === 100) {
+    throw new MediaFetchError(404, 'WhatsApp media not found');
+  }
+  if (response.status === 429) {
+    throw new MediaFetchError(
+      503,
+      'WhatsApp media service rate limited. Try again later.'
+    );
+  }
+  throw new MediaFetchError(502, 'WhatsApp media service unavailable');
 }
 
 /**
@@ -1077,18 +1154,153 @@ export async function getMediaUrl(
   args: GetMediaUrlArgs
 ): Promise<{ url: string; mimeType: string }> {
   const { mediaId, accessToken } = args;
-  const response = await fetch(`${META_API_BASE}/${mediaId}`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  if (!response.ok) {
-    await throwMetaError(response, `Media fetch failed: ${response.status}`);
+  const deadline = mediaDeadline();
+  try {
+    const url = new URL(`${META_API_BASE}/${mediaId}`);
+    if (args.phoneNumberId)
+      url.searchParams.set('phone_number_id', args.phoneNumberId);
+    const response = await fetch(url.href, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: deadline.controller.signal,
+      redirect: 'error',
+      credentials: 'omit',
+      cache: 'no-store',
+    });
+    if (!response.ok) await mediaResponseError(response);
+    const data = await response.json();
+    if (!data.url)
+      throw new MediaFetchError(502, 'Invalid WhatsApp media metadata');
+    return {
+      url: data.url,
+      mimeType: data.mime_type || 'application/octet-stream',
+    };
+  } catch (error) {
+    throw safeMediaError(
+      deadline.controller.signal.aborted
+        ? deadline.controller.signal.reason
+        : error
+    );
+  } finally {
+    deadline.clear();
   }
-  const data = await response.json();
-  if (!data.url) throw new Error('Media URL not found in Meta response');
-  return {
-    url: data.url,
-    mimeType: data.mime_type || 'application/octet-stream',
+}
+
+function mediaMimeType(value: unknown): string | undefined {
+  const mime =
+    typeof value === 'string'
+      ? value.split(';')[0].trim().toLowerCase()
+      : undefined;
+  return mime && /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(mime)
+    ? mime
+    : undefined;
+}
+
+function validateMediaDownloadUrl(value: string): string {
+  const url = new URL(value);
+  // Deliberately narrow. New CDN hosts require an explicit review, not a
+  // permissive retry that could disclose the account's Authorization header.
+  const allowed =
+    url.hostname === 'lookaside.fbsbx.com' ||
+    url.hostname === 'mmg.whatsapp.net' ||
+    url.hostname.endsWith('.fbcdn.net');
+  if (
+    url.protocol !== 'https:' ||
+    !allowed ||
+    url.username ||
+    url.password ||
+    url.port
+  ) {
+    throw new MediaFetchError(502, 'Untrusted WhatsApp media URL');
+  }
+  return url.href;
+}
+
+/** Streaming counterpart; downloadMedia remains available for buffer callers. */
+export async function downloadMediaStream(
+  args: DownloadMediaArgs & { mimeType?: string }
+): Promise<{ body: ReadableStream<Uint8Array>; contentType: string }> {
+  const deadline = mediaDeadline();
+  try {
+    const response = await fetch(validateMediaDownloadUrl(args.downloadUrl), {
+      headers: { Authorization: `Bearer ${args.accessToken}` },
+      redirect: 'error',
+      credentials: 'omit',
+      cache: 'no-store',
+      signal: deadline.controller.signal,
+    });
+    if (!response.ok) await mediaResponseError(response, true);
+    if (!response.body)
+      throw new MediaFetchError(502, 'Empty WhatsApp media response');
+    const headerMime = mediaMimeType(response.headers.get('content-type'));
+    return {
+      body: mediaBodyStream(response.body, deadline),
+      contentType:
+        (headerMime !== 'application/octet-stream' ? headerMime : undefined) ||
+        mediaMimeType(args.mimeType) ||
+        'application/octet-stream',
+    };
+  } catch (error) {
+    deadline.clear();
+    throw safeMediaError(
+      deadline.controller.signal.aborted
+        ? deadline.controller.signal.reason
+        : error
+    );
+  }
+}
+
+function mediaBodyStream(
+  body: ReadableStream<Uint8Array>,
+  deadline: ReturnType<typeof mediaDeadline>
+): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  const signal = deadline.controller.signal;
+  let finished = false;
+  let abort: () => void;
+  const cleanup = () => {
+    deadline.clear();
+    signal.removeEventListener('abort', abort);
   };
+  return new ReadableStream<Uint8Array>(
+    {
+      start(controller) {
+        abort = () => {
+          if (finished) return;
+          finished = true;
+          cleanup();
+          controller.error(safeMediaError(signal.reason));
+          void reader.cancel().catch(() => {});
+        };
+        signal.addEventListener('abort', abort, { once: true });
+        if (signal.aborted) abort();
+      },
+      async pull(controller) {
+        try {
+          const { done, value } = await reader.read();
+          if (finished) return;
+          if (done) {
+            finished = true;
+            cleanup();
+            controller.close();
+          } else {
+            controller.enqueue(value);
+          }
+        } catch (error) {
+          if (finished) return;
+          finished = true;
+          cleanup();
+          controller.error(safeMediaError(error));
+        }
+      },
+      async cancel() {
+        finished = true;
+        cleanup();
+        deadline.controller.abort();
+        await reader.cancel().catch(() => {});
+      },
+    },
+    { highWaterMark: 0 }
+  );
 }
 
 export interface DownloadMediaArgs {

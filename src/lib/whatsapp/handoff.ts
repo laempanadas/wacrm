@@ -1,5 +1,4 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { hasFreshOrderIntent } from '@/lib/orders/draft-lifecycle';
 
 export type HandoffReason =
   | 'customer_request'
@@ -44,6 +43,8 @@ interface HandoffInput {
   text: string;
   messageId: string;
   reason?: HandoffReason;
+  /** Trusted only after explicit quantity + account-catalog validation. */
+  orderIntent?: boolean;
   send: (effectKey: string, text: string) => Promise<void>;
 }
 
@@ -59,7 +60,7 @@ export async function handleConversationHandoff(
     p_request: Boolean(input.reason) || isHumanRequest(input.text),
     p_reason: input.reason ?? 'customer_request',
     p_resume: normalize(input.text) === 'continuar com o bot',
-    p_new_order: hasFreshOrderIntent(input.text),
+    p_new_order: input.orderIntent === true,
   });
   if (error) throw new Error(error.message);
   if (!data || typeof data.blocked !== 'boolean')
@@ -77,10 +78,20 @@ export async function handleConversationHandoff(
  * timestamps fail closed rather than expiring a possibly active human. */
 export function hasActiveHuman(
   lastAgentMessageAt?: string | null,
-  now = Date.now()
+  now = Date.now(),
+  resumedAt?: string | null
 ): boolean {
   if (!lastAgentMessageAt) return false;
-  const age = now - Date.parse(lastAgentMessageAt);
+  const sent = Date.parse(lastAgentMessageAt);
+  const resumed = Date.parse(resumedAt ?? '');
+  if (
+    Number.isFinite(sent) &&
+    Number.isFinite(resumed) &&
+    resumed <= now &&
+    sent < resumed
+  )
+    return false;
+  const age = now - sent;
   return !Number.isFinite(age) || age < 30 * 60 * 1000;
 }
 

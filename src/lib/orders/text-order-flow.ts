@@ -2,6 +2,8 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { correctFlowCheckout } from '@/lib/flows/checkout-consent';
 import { hasOrderIntent, isCompleteDeliveryAddress } from './text-order-parser';
 import { loadOrderCatalog } from './order-catalog';
+import { groundCatalogOrder } from '@/lib/flows/catalog-order';
+import { hasValidatedQuantifiedOrderIntent } from './order-intent';
 import {
   advanceOrderDraft,
   orderSummary,
@@ -66,6 +68,10 @@ export interface TextOrderFlowResult {
   error?: string;
 }
 
+// Cheap lookup gate only: this never grants priority without catalog parsing.
+const QUANTITY_CANDIDATE =
+  /\d|\b(?:um|uma|dois|duas|tr[eê]s|quatro|cinco|seis|sete|oito|nove|dez|onze|doze|d[uú]zia)\b/i;
+
 async function handoff(
   ctx: TextOrderFlowContext,
   reason: HandoffReason = 'order_review',
@@ -89,11 +95,17 @@ async function handoff(
 
 /** Shared by text and native-catalog inbounds before automation or checkout. */
 export async function processInboundHandoff(
-  ctx: TextOrderFlowContext
+  ctx: TextOrderFlowContext,
+  nativeOrder?: {
+    items: Parameters<typeof groundCatalogOrder>[0];
+    notes?: string;
+  }
 ): Promise<boolean> {
   const { data: conversation, error } = await ctx.supabase
     .from('conversations')
-    .select('ai_autoreply_disabled, last_agent_message_at, status')
+    .select(
+      'ai_autoreply_disabled, last_agent_message_at, bot_order_resumed_at, status'
+    )
     .eq('id', ctx.conversationId)
     .eq('account_id', ctx.accountId)
     .maybeSingle();
@@ -101,10 +113,35 @@ export async function processInboundHandoff(
   if (
     !isHumanRequest(ctx.inboundText) &&
     !conversation?.ai_autoreply_disabled &&
-    !hasActiveHuman(conversation?.last_agent_message_at) &&
+    !hasActiveHuman(
+      conversation?.last_agent_message_at,
+      undefined,
+      conversation?.bot_order_resumed_at
+    ) &&
     conversation?.status !== 'pending'
   )
     return false;
+  let orderIntent = false;
+  if (
+    !isHumanRequest(ctx.inboundText) &&
+    (nativeOrder || QUANTITY_CANDIDATE.test(ctx.inboundText))
+  ) {
+    const catalog = await loadOrderCatalog(ctx.supabase, ctx.accountId);
+    if (nativeOrder) {
+      try {
+        // Notes stay on the original inbound/flow for review. Validate the lines
+        // only here; resumption is not authorization to discard notes or charge.
+        groundCatalogOrder(nativeOrder.items, catalog);
+        orderIntent = true;
+      } catch {
+        // Invalid cart follows the existing persisted handoff policy.
+      }
+    } else
+      orderIntent = hasValidatedQuantifiedOrderIntent(
+        newOrderText(ctx.inboundText),
+        catalog
+      );
+  }
   return handleConversationHandoff({
     db: ctx.supabase,
     accountId: ctx.accountId,
@@ -113,6 +150,7 @@ export async function processInboundHandoff(
     text: ctx.inboundText,
     messageId: ctx.inboundMessageId,
     send: (key, text) => sendAndRecord(ctx, key, text),
+    orderIntent,
   });
 }
 
@@ -315,7 +353,15 @@ export async function processFreeTextOrderInbound(
       .eq('conversation_id', ctx.conversationId)
       .maybeSingle();
     if (readError) throw readError;
-    if (!existing && !hasOrderIntent(ctx.inboundText))
+    if (
+      !existing &&
+      !hasOrderIntent(ctx.inboundText) &&
+      (!QUANTITY_CANDIDATE.test(ctx.inboundText) ||
+        !hasValidatedQuantifiedOrderIntent(
+          newOrderText(ctx.inboundText),
+          await loadOrderCatalog(db, ctx.accountId)
+        ))
+    )
       return { handled: false };
     if (!ctx.inboundMessageId)
       throw new Error('Missing inbound Meta message ID');

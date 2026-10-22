@@ -8,6 +8,8 @@ const h = vi.hoisted(() => ({
   retrieveKnowledge: vi.fn(),
   generateReply: vi.fn(),
   engineSendText: vi.fn(),
+  engineSendPayment: vi.fn(),
+  resolveAiPayment: vi.fn(),
   state: {
     conv: null as Record<string, unknown> | null,
     autoResponders: [] as { id: string }[],
@@ -23,7 +25,14 @@ vi.mock('./context', () => ({
 }));
 vi.mock('./knowledge', () => ({ retrieveKnowledge: h.retrieveKnowledge }));
 vi.mock('./generate', () => ({ generateReply: h.generateReply }));
-vi.mock('@/lib/flows/meta-send', () => ({ engineSendText: h.engineSendText }));
+vi.mock('@/lib/flows/meta-send', () => ({
+  engineSendText: h.engineSendText,
+  engineSendPayment: h.engineSendPayment,
+}));
+vi.mock('./auto-payment', async (original) => ({
+  ...(await original<typeof import('./auto-payment')>()),
+  resolveAiPayment: h.resolveAiPayment,
+}));
 vi.mock('./admin-client', () => ({
   supabaseAdmin: () => ({
     from: (table: string) => {
@@ -115,6 +124,17 @@ beforeEach(() => {
 });
 
 describe('dispatchInboundToAiReply — eligibility gates', () => {
+  it('respects a persisted bot order resume newer than the historical human send', async () => {
+    h.state.conv = {
+      ai_autoreply_disabled: false,
+      ai_reply_count: 0,
+      status: 'open',
+      last_agent_message_at: new Date(Date.now() - 60_000).toISOString(),
+      bot_order_resumed_at: new Date(Date.now() - 30_000).toISOString(),
+    };
+    await dispatchInboundToAiReply(ARGS);
+    expect(h.generateReply).toHaveBeenCalledOnce();
+  });
   it('does not bypass a paused conversation without an agent timestamp', async () => {
     h.state.conv = { ai_autoreply_disabled: true, ai_reply_count: 0 };
     await dispatchInboundToAiReply(ARGS);
@@ -218,6 +238,146 @@ describe('dispatchInboundToAiReply — eligibility gates', () => {
     await dispatchInboundToAiReply(ARGS);
     expect(h.generateReply).not.toHaveBeenCalled();
     expect(h.engineSendText).not.toHaveBeenCalled();
+  });
+});
+
+describe('dispatchInboundToAiReply — safe AI payment', () => {
+  it('keeps configured Haiku and sends the canonical payment with the real engine helper', async () => {
+    const config = aiConfig({
+      provider: 'anthropic',
+      model: 'claude-haiku-4-5-20251001',
+    });
+    h.loadAiConfig.mockResolvedValue(config);
+    h.generateReply.mockResolvedValue({
+      text: 'Pague agora. [TOTAL:140.00]',
+      handoff: false,
+    });
+    h.resolveAiPayment.mockResolvedValue({
+      kind: 'payment',
+      url: 'https://www.mercadopago.com.br/same',
+      reference: 'ORIGINAL',
+      cents: 14000,
+    });
+    await dispatchInboundToAiReply(ARGS);
+    expect(h.generateReply).toHaveBeenCalledWith(
+      expect.objectContaining({ config })
+    );
+    expect(h.generateReply.mock.calls[0][0].systemPrompt).toContain(
+      '[TOTAL:xxx.xx]'
+    );
+    expect(h.resolveAiPayment).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        accountId: ARGS.accountId,
+        contactId: ARGS.contactId,
+        conversationId: ARGS.conversationId,
+      }),
+      14000
+    );
+    expect(h.engineSendPayment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        buttonUrl: 'https://www.mercadopago.com.br/same',
+        effectKey: 'ai-payment:conv-1:ORIGINAL',
+        bodyText: expect.not.stringContaining('[TOTAL'),
+      })
+    );
+    expect(h.engineSendText).not.toHaveBeenCalled();
+    expect(h.state.updatePayload).toBeNull();
+  });
+  it.each([
+    '[TOTAL:-1.00]',
+    '[TOTAL:NaN]',
+    '[TOTAL:0.00]',
+    '[TOTAL:140.00][TOTAL:141.00]',
+    '[ TOTAL:140.00 ]',
+    '[TOTAL:\n140.00]',
+    '[TOTAL:140.00]\n[TOTAL:\n999.00]',
+    '[TOTAL:140.00]\r\n[TOTAL:\r\n999.00]',
+    '[TOTAL:140.00]\n[TOTAL:\n999.00',
+    '[TOTAL:\n[TOTAL:140.00]]',
+  ])(
+    'asks a clarification without handoff or gateway for %s',
+    async (marker) => {
+      h.generateReply.mockResolvedValue({
+        text: `Pronto ${marker}`,
+        handoff: false,
+      });
+      await dispatchInboundToAiReply(ARGS);
+      expect(h.engineSendText).toHaveBeenCalledOnce();
+      expect(h.engineSendText.mock.calls[0][0].text).not.toContain('[TOTAL');
+      expect(h.engineSendText.mock.calls[0][0].text).toContain(
+        'Nenhuma nova cobrança foi criada.'
+      );
+      expect(h.resolveAiPayment).not.toHaveBeenCalled();
+      expect(h.engineSendPayment).not.toHaveBeenCalled();
+      expect(h.state.rpcCalls.map((call) => call.name)).toEqual([
+        'claim_ai_reply_slot',
+      ]);
+      expect(h.state.updatePayload).toBeNull();
+    }
+  );
+  it('clarifies missing cart/address/confirmation or mismatch without disabling the bot', async () => {
+    h.generateReply.mockResolvedValue({
+      text: '[TOTAL:140.00]',
+      handoff: false,
+    });
+    h.resolveAiPayment.mockResolvedValue({
+      kind: 'clarify',
+      text: 'Envie o endereço completo.',
+    });
+    await dispatchInboundToAiReply(ARGS);
+    expect(h.engineSendText).toHaveBeenCalledWith(
+      expect.objectContaining({ text: 'Envie o endereço completo.' })
+    );
+    expect(h.engineSendPayment).not.toHaveBeenCalled();
+    expect(h.state.updatePayload).toBeNull();
+    expect(h.state.rpcCalls.map((call) => call.name)).toEqual([
+      'claim_ai_reply_slot',
+    ]);
+  });
+  it('does not silently handoff mixed payment controls and a handoff sentinel', async () => {
+    h.generateReply.mockResolvedValue({
+      text: '[TOTAL:140.00]',
+      handoff: true,
+    });
+    await dispatchInboundToAiReply(ARGS);
+    expect(h.engineSendText).toHaveBeenCalledOnce();
+    expect(h.resolveAiPayment).not.toHaveBeenCalled();
+    expect(h.state.rpcCalls.map((call) => call.name)).toEqual([
+      'claim_ai_reply_slot',
+    ]);
+  });
+  it('never queries the gateway or sends a CTA if the atomic reply slot is lost', async () => {
+    h.state.claim = false;
+    h.generateReply.mockResolvedValue({
+      text: '[TOTAL:140.00]',
+      handoff: false,
+    });
+    await dispatchInboundToAiReply(ARGS);
+    expect(h.resolveAiPayment).not.toHaveBeenCalled();
+    expect(h.engineSendPayment).not.toHaveBeenCalled();
+  });
+  it('uses the identical canonical effect for repeated model replies and never falls back after ambiguous delivery', async () => {
+    h.generateReply.mockResolvedValue({
+      text: '[TOTAL:140.00]',
+      handoff: false,
+    });
+    h.resolveAiPayment.mockResolvedValue({
+      kind: 'payment',
+      url: 'https://www.mercadopago.com.br/same',
+      reference: 'ORIGINAL',
+      cents: 14000,
+    });
+    h.engineSendPayment
+      .mockResolvedValueOnce({ whatsapp_message_id: 'm1' })
+      .mockRejectedValueOnce(new Error('uncertain'));
+    await dispatchInboundToAiReply(ARGS);
+    await dispatchInboundToAiReply(ARGS);
+    expect(h.engineSendPayment.mock.calls[0][0]).toEqual(
+      h.engineSendPayment.mock.calls[1][0]
+    );
+    expect(h.engineSendText).not.toHaveBeenCalled();
+    expect(h.state.updatePayload).toBeNull();
   });
 });
 

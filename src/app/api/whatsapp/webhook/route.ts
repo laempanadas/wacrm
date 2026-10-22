@@ -667,27 +667,32 @@ async function processMessage(
     // A native cart must honor the same persisted human handoff as text orders.
     if (order) {
       try {
-        const blocked = await processInboundHandoff({
-          supabase: supabaseAdmin(),
-          accountId,
-          userId: configOwnerUserId,
-          contactRecord: {
-            id: contactRecord.id,
-            name: contactRecord.name,
-            phone: senderPhone,
+        const blocked = await processInboundHandoff(
+          {
+            supabase: supabaseAdmin(),
+            accountId,
+            userId: configOwnerUserId,
+            contactRecord: {
+              id: contactRecord.id,
+              name: contactRecord.name,
+              phone: senderPhone,
+            },
+            contactName: contactRecord.name || contactName,
+            senderPhone,
+            conversationId: conversation.id,
+            inboundText: contentText ?? '',
+            inboundMessageId: message.id,
+            inboundTimestamp: new Date(
+              Number(message.timestamp) * 1000
+            ).toISOString(),
+            phoneNumberId,
+            accessToken,
           },
-          contactName: contactRecord.name || contactName,
-          senderPhone,
-          conversationId: conversation.id,
-          inboundText: contentText ?? '',
-          inboundMessageId: message.id,
-          inboundTimestamp: new Date(
-            Number(message.timestamp) * 1000
-          ).toISOString(),
-          phoneNumberId,
-          accessToken,
-        });
+          { items: order.items, notes: order.notes }
+        );
         if (blocked) return;
+        // Catalog validation above grants routing priority only; the flow still
+        // owns notes review, delivery collection and explicit checkout consent.
       } catch (error) {
         console.error('[webhook] native order handoff failed:', error);
         await supabaseAdmin()

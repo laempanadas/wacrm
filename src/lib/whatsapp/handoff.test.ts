@@ -3,6 +3,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   handleConversationHandoff,
   isHumanRequest,
+  hasActiveHuman,
   sendHandoffNotice,
 } from './handoff';
 
@@ -25,6 +26,33 @@ function fixture(decision: Record<string, unknown>) {
 }
 
 describe('durable conversation handoff', () => {
+  it('only forwards catalog-validated intent, never lexical order intent', async () => {
+    const f = fixture({ blocked: false });
+    await handleConversationHandoff({ ...f.input, text: 'Quero 2 carne' });
+    expect(f.rpc).toHaveBeenLastCalledWith(
+      'handle_conversation_handoff',
+      expect.objectContaining({ p_new_order: false })
+    );
+    await handleConversationHandoff({
+      ...f.input,
+      text: '2 carne',
+      orderIntent: true,
+    });
+    expect(f.rpc).toHaveBeenLastCalledWith(
+      'handle_conversation_handoff',
+      expect.objectContaining({ p_new_order: true })
+    );
+  });
+  it('ignores only known human timestamps strictly older than order resumption', () => {
+    const now = Date.parse('2026-10-11T02:00:00Z');
+    const resumed = '2026-10-11T01:59:00Z';
+    expect(hasActiveHuman('2026-10-11T01:58:00Z', now, resumed)).toBe(false);
+    expect(hasActiveHuman(resumed, now, resumed)).toBe(true);
+    expect(hasActiveHuman('2026-10-11T01:59:30Z', now, resumed)).toBe(true);
+    expect(hasActiveHuman('invalid', now, resumed)).toBe(true);
+    expect(hasActiveHuman('2026-10-11T01:58:00Z', now, 'invalid')).toBe(true);
+    expect(hasActiveHuman('2099-01-01', now, '2099-01-02')).toBe(true);
+  });
   it('does not repeat an episode notice after a successful or ambiguous send', async () => {
     const reserved = new Set<string>();
     const db = {

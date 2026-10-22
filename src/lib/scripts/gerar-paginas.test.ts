@@ -45,7 +45,7 @@ describe('gerar-paginas CLI', () => {
         PRODUTO_DESCRICAO: item.descricao,
         PRODUTO_DESCRICAO_SEO:
           item.descricao +
-          ' Peca online com entrega rapida em Santo Andre. Frete gratis acima de R$ 100.',
+          ' Peca online com entrega rapida em Santo Andre. Frete gratis em todos os pedidos.',
         PRODUTO_ID: 'fixture',
         CATEGORIA_NOME: 'Empanadas Salgadas',
         CATEGORIA_SLUG: 'empanadas-salgadas',
