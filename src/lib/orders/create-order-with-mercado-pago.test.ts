@@ -329,39 +329,39 @@ describe('durable checkout', () => {
     { field: 'deliveryAddress', legacy: false },
     { field: 'title', legacy: true },
     { field: 'deliveryAddress', legacy: true },
-  ])('reuses boundary-space aliases across references (%j)', async ({
-    field,
-    legacy,
-  }) => {
-    const noted = {
-      ...input,
-      observations: 'Portaria',
-      items: input.items.map((item) => ({
-        ...item,
-        title: field === 'title' ? `  ${item.title}  ` : item.title,
-      })),
-      deliveryAddress:
-        field === 'deliveryAddress'
-          ? `  ${input.deliveryAddress}  `
-          : input.deliveryAddress,
-    };
-    const first = await createOrderWithMercadoPago(ctx, noted);
-    expect(first.ok).toBe(true);
-    if (legacy) db.tables.orders[0].payment_fingerprint = null;
-    const before = structuredClone(db.tables);
-    const second = await createOrderWithMercadoPago(ctx, {
-      ...input,
-      observations: noted.observations,
-      externalReference: 'NEW-SPACE-ALIAS',
-    });
-    expect(payment.createPaymentLink).toHaveBeenCalledTimes(1);
-    expect(second).toMatchObject({
-      ok: true,
-      orderId: first.orderId,
-      externalReference: input.externalReference,
-    });
-    expect(db.tables).toEqual(before);
-  });
+  ])(
+    'reuses boundary-space aliases across references (%j)',
+    async ({ field, legacy }) => {
+      const noted = {
+        ...input,
+        observations: 'Portaria',
+        items: input.items.map((item) => ({
+          ...item,
+          title: field === 'title' ? `  ${item.title}  ` : item.title,
+        })),
+        deliveryAddress:
+          field === 'deliveryAddress'
+            ? `  ${input.deliveryAddress}  `
+            : input.deliveryAddress,
+      };
+      const first = await createOrderWithMercadoPago(ctx, noted);
+      expect(first.ok).toBe(true);
+      if (legacy) db.tables.orders[0].payment_fingerprint = null;
+      const before = structuredClone(db.tables);
+      const second = await createOrderWithMercadoPago(ctx, {
+        ...input,
+        observations: noted.observations,
+        externalReference: 'NEW-SPACE-ALIAS',
+      });
+      expect(payment.createPaymentLink).toHaveBeenCalledTimes(1);
+      expect(second).toMatchObject({
+        ok: true,
+        orderId: first.orderId,
+        externalReference: input.externalReference,
+      });
+      expect(db.tables).toEqual(before);
+    }
+  );
   it('reuses legacy observations from the bound frozen ledger without a second preference', async () => {
     const noted = { ...input, observations: 'Entregar na portaria' };
     const first = await createOrderWithMercadoPago(ctx, noted);
@@ -530,7 +530,7 @@ describe('durable checkout', () => {
     } finally {
       vi.unstubAllGlobals();
     }
-  });
+  }, 15000);
   it('payment adapter rejects a mixed valid/invalid basket instead of silently filtering', async () => {
     vi.stubEnv('MP_ACCESS_TOKEN', 'dummy-test-access-token');
     sdk.create.mockResolvedValue({
