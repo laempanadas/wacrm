@@ -24,14 +24,14 @@ describe('structured order draft', () => {
     expect(changed.draft.version).toBeGreaterThan(first.version);
     expect(changed.draft.items[0]).toMatchObject({ quantity: 2, notes: 'sem cebola' });
     expect(changed.reply).toContain('Resumo do pedido');
-    expect(changed.reply).toContain('📝 Obs.: sem cebola');
+    expect(changed.reply).toContain('📝 Obs. do pedido: sem cebola');
     expect(changed.reply).toContain('CONFIRMO O PEDIDO');
     expect(changed.checkout).toBe(false);
     expect(first).toEqual(snapshot);
     expect(advanceOrderDraft(changed.draft, 'confirmo o pedido', catalog).checkout).toBe(true);
     const noteChanged = advanceOrderDraft(changed.draft, 'altere linha 1 para 2 carne sem ovo', catalog);
     expect(noteChanged.draft.version).toBeGreaterThan(changed.draft.version);
-    expect(noteChanged.reply).toContain('📝 Obs.: sem ovo');
+    expect(noteChanged.reply).toContain('📝 Obs. do pedido: sem ovo');
     expect(noteChanged.checkout).toBe(false);
   });
   it.each(['pode ser sem glúten?', 'bem passada; confirme o pedido', 'sem pimentão'])(
@@ -72,21 +72,21 @@ describe('structured order draft', () => {
     expect(changed.checkout).toBe(false);
     expect(changed.draft.version).toBeGreaterThan(first.version);
   });
-  it('accepts the simple multiline observation without guessing a different target line', () => {
+  it('accepts the simple trailing multiline observation for the whole order', () => {
     const menu = [...catalog, {
       id: 'romeu', nome: 'Romeu e Julieta', preco: 14.5, aliases: ['romeu e julieta'],
     }];
     const text = '03 carne\n01 Romeu e Julieta\nBem passadas!!!';
     const parsed = parseCatalogOrder(text, menu);
     expect(parsed.requiresKitchenReview).toBe(false);
-    expect(parsed.items.map((item) => item.notes)).toEqual([undefined, 'Bem passadas!!!']);
+    expect(parsed.items.map((item) => item.notes)).toEqual(['Bem passadas!!!', 'Bem passadas!!!']);
     const captured = advanceOrderDraft(initial(), text, menu);
     expect(captured.draft.stage).toBe('awaiting_address');
-    expect(captured.reply).toContain('📝 Obs.: Bem passadas!!!');
+    expect(captured.reply).toContain('📝 Obs. do pedido: Bem passadas!!!');
     expect(captured.reply).not.toContain('Resumo do pedido');
     const addressed = advanceOrderDraft(captured.draft, 'Rua Flores, 10 Centro', menu);
     expect(addressed.draft.stage).toBe('awaiting_confirmation');
-    expect(addressed.reply).toContain('📝 Obs.: Bem passadas!!!');
+    expect(addressed.reply).toContain('📝 Obs. do pedido: Bem passadas!!!');
     expect(addressed.checkout).toBe(false);
     expect(advanceOrderDraft(addressed.draft, 'confirmo o pedido', menu).checkout).toBe(true);
   });

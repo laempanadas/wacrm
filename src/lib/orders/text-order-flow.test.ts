@@ -358,6 +358,28 @@ beforeEach(() => {
 });
 
 describe('text order pipeline (all external effects mocked)', () => {
+  it('persists the whole-order note in every checkout description after explicit confirmation', async () => {
+    const f = fixture();
+    vi.mocked(loadOrderCatalog).mockResolvedValue([
+      { id: 'meat', nome: 'Carne', preco: 14, aliases: ['carne'] },
+      { id: 'romeu', nome: 'Romeu e Julieta', preco: 14.5, aliases: ['romeu e julieta'] },
+    ]);
+    const text = '03 carne\n01 Romeu e Julieta\nBem passadas!!!\nRua Cruzeiro do Sul 352, Vila Leopoldina';
+    expect((await f.turn(text, 'whole-note')).outcome).toBe('confirmation_requested');
+    expect(f.state().items.map((item) => item.notes)).toEqual(['Bem passadas!!!', 'Bem passadas!!!']);
+    expect(String(f.messages.at(-1)?.content_text).match(/Obs\. do pedido:/g)).toHaveLength(1);
+    expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+    expect((await f.turn('confirmo o pedido', 'whole-note-confirm')).outcome).toBe('order_created');
+    await f.turn('confirmo o pedido', 'whole-note-confirm');
+    expect(createOrderWithMercadoPago).toHaveBeenCalledTimes(1);
+    expect(createOrderWithMercadoPago).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ items: [
+        expect.objectContaining({ id: 'meat', quantity: 3, description: 'Bem passadas!!!' }),
+        expect.objectContaining({ id: 'romeu', quantity: 1, description: 'Bem passadas!!!' }),
+      ] })
+    );
+  });
   it('carries a simple observation through address, fresh confirmation and checkout description exactly once', async () => {
     const f = fixture();
     vi.mocked(loadOrderCatalog).mockResolvedValue([
@@ -366,11 +388,11 @@ describe('text order pipeline (all external effects mocked)', () => {
     ]);
     expect((await f.turn('03 carne\n01 Romeu e Julieta\nBem passadas!!!', 'simple-notes')).outcome).toBe('address_requested');
     expect(f.state().stage).toBe('awaiting_address');
-    expect(f.state().items.map((item) => item.notes)).toEqual([undefined, 'Bem passadas!!!']);
-    expect(f.messages.at(-1)?.content_text).toContain('📝 Obs.: Bem passadas!!!');
+    expect(f.state().items.map((item) => item.notes)).toEqual(['Bem passadas!!!', 'Bem passadas!!!']);
+    expect(f.messages.at(-1)?.content_text).toContain('📝 Obs. do pedido: Bem passadas!!!');
     expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
     expect((await f.turn('Rua Flores, 10 Centro', 'notes-address')).outcome).toBe('confirmation_requested');
-    expect(f.messages.at(-1)?.content_text).toContain('📝 Obs.: Bem passadas!!!');
+    expect(f.messages.at(-1)?.content_text).toContain('📝 Obs. do pedido: Bem passadas!!!');
     const version = f.state().version;
     expect((await f.turn('altere linha 1 para 2 carne sem cebola', 'notes-edit')).outcome).toBe('confirmation_requested');
     expect(f.state().version).toBeGreaterThan(version);

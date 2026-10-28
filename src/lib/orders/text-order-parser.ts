@@ -8,7 +8,11 @@
  * 4. Identificar confirmação de endereço anterior (isAddressConfirmation)
  */
 
-import { classifyNote } from './kitchen-notes';
+import {
+  appendKitchenNotes,
+  classifyItemNotes,
+  classifyNote,
+} from './kitchen-notes';
 
 export interface ParsedOrderItem {
   id: string;
@@ -29,6 +33,8 @@ export interface ParsedOrderResult {
   rawText: string;
   unresolved?: string[];
   requiresKitchenReview?: boolean;
+  /** Transient scope from this inbound, never a new persisted draft field. */
+  orderNotes?: string[];
 }
 
 function normalize(text: string): string {
@@ -647,11 +653,27 @@ export function parseCatalogOrder(
         .trim()
     );
   }
+  const orderNotes: string[] = [];
   const items: ParsedOrderItem[] = matches.flatMap((match) => {
     const next =
       quantityStarts.find((start) => start > match.start) ?? orderText.length;
     const suffix = orderText
       .slice(match.end, next)
+      .split(/\r?\n/)
+      .filter((line, index) => {
+        // Only a whole safe line AFTER the last item is order-wide. Text on
+        // the item's own line and all unknown instructions retain their scope.
+        if (
+          match === matches.at(-1) &&
+          index > 0 &&
+          classifyNote(line) === 'safe'
+        ) {
+          orderNotes.push(line.trim());
+          return false;
+        }
+        return true;
+      })
+      .join('\n')
       .replace(/[,;\n\s]+$/g, '')
       .replace(/\s+e\s*$/i, '')
       .trim();
@@ -677,6 +699,10 @@ export function parseCatalogOrder(
       },
     ];
   });
+  if (orderNotes.length) {
+    for (const item of items)
+      item.notes = appendKitchenNotes(item.notes, orderNotes);
+  }
   const total =
     items.reduce((sum, item) => sum + Math.round(item.totalPrice * 100), 0) /
     100;
@@ -697,8 +723,9 @@ export function parseCatalogOrder(
     deliveryAddress: address || undefined,
     rawText: text,
     unresolved,
+    ...(orderNotes.length ? { orderNotes } : {}),
     requiresKitchenReview: items.some(
-      (item) => item.notes && classifyNote(item.notes) === 'review'
+      (item) => item.notes && classifyItemNotes(item.notes) === 'review'
     ),
   };
 }

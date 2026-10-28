@@ -1,4 +1,8 @@
-import { classifyNote } from './kitchen-notes';
+import {
+  appendKitchenNotes,
+  classifyItemNotes,
+  classifyNote,
+} from './kitchen-notes';
 import {
   extractAddressFromText,
   isCompleteDeliveryAddress,
@@ -39,17 +43,35 @@ const normalized = (text: string) =>
     .trim();
 export const orderLineKey = (item: ParsedOrderItem) =>
   `${item.id}:${normalized(item.notes || '')}`;
+
+function sharedOrderNotes(items: ParsedOrderItem[]): string[] {
+  // No extra persisted scope field: display safe notes shared by every item
+  // once. Item-specific and unknown instructions remain on their own lines.
+  const first = items[0]?.notes?.split('\n') ?? [];
+  return [...new Set(first)].filter(
+    (note) =>
+      classifyNote(note) === 'safe' &&
+      items.every((item) => item.notes?.split('\n').includes(note))
+  );
+}
+
 export function orderSummary(draft: OrderDraft): string {
-  return draft.items
+  const commonNotes = sharedOrderNotes(draft.items);
+  const lines = draft.items
     .map((item, index) => {
-      const notes = !item.notes
+      const remaining = item.notes
+        ?.split('\n')
+        .filter((note) => !commonNotes.includes(note))
+        .join('\n');
+      const notes = !remaining
         ? ''
-        : classifyNote(item.notes) === 'safe'
-          ? `\n📝 Obs.: ${item.notes}`
-          : ` — ${item.notes}`;
+        : classifyItemNotes(remaining) === 'safe'
+          ? `\n📝 Obs.: ${remaining.replace(/\n/g, '; ')}`
+          : ` — ${remaining}`;
       return `${index + 1}. ${item.quantity}x ${item.title}${notes}`;
     })
     .join('\n');
+  return `${lines}${commonNotes.length ? `\n📝 Obs. do pedido: ${commonNotes.join('; ')}` : ''}`;
 }
 
 function summaryReply(draft: OrderDraft, previous: OrderDraft): string {
@@ -66,9 +88,9 @@ function summaryReply(draft: OrderDraft, previous: OrderDraft): string {
       : quantity === 1
         ? 'item'
         : 'itens';
-    const notes = draft.items
-      .filter((item) => item.notes)
-      .map((item) => `📝 Obs.: ${item.notes}`)
+    const notes = orderSummary(draft)
+      .split('\n')
+      .filter((line) => line.startsWith('📝 Obs.'))
       .join('\n');
     return `Anotado! Temos ${quantity} ${noun} no seu pedido. Quer adicionar mais algo (bebida, sobremesa) ou posso fechar o pedido? Para fechar, envie o endereço completo (Rua, Número e Bairro).${notes ? `\n${notes}` : ''}`;
   }
@@ -262,6 +284,17 @@ export function advanceOrderDraft(
     draft.unresolved.push(...(parsed.unresolved ?? []));
     draft.version += 1;
   }
+  if (parsed.orderNotes?.length) {
+    let notesChanged = false;
+    for (const item of draft.items) {
+      const notes = appendKitchenNotes(item.notes, parsed.orderNotes);
+      if (notes !== item.notes) {
+        item.notes = notes;
+        notesChanged = true;
+      }
+    }
+    if (notesChanged) draft.version += 1;
+  }
   const address = parsed.deliveryAddress || extractAddressFromText(text);
   if (address) {
     if (address !== draft.deliveryAddress) {
@@ -315,7 +348,7 @@ export function advanceOrderDraft(
     !draft.items.length ||
     draft.unresolved.length ||
     draft.items.some(
-      (item) => item.notes && classifyNote(item.notes) === 'review'
+      (item) => item.notes && classifyItemNotes(item.notes) === 'review'
     ) ||
     previous.stage === 'needs_human'
       ? 'needs_human'
