@@ -70,7 +70,7 @@ function summaryReply(draft: OrderDraft, previous: OrderDraft): string {
       .filter((item) => item.notes)
       .map((item) => `📝 Obs.: ${item.notes}`)
       .join('\n');
-    return `Anotado! Temos ${quantity} ${noun} no seu pedido. Gostaria de adicionar mais alguma coisa ou podemos fechar? Para fechar, envie o endereço completo (Rua, Número e Bairro).${notes ? `\n${notes}` : ''}`;
+    return `Anotado! Temos ${quantity} ${noun} no seu pedido. Quer adicionar mais algo (bebida, sobremesa) ou posso fechar o pedido? Para fechar, envie o endereço completo (Rua, Número e Bairro).${notes ? `\n${notes}` : ''}`;
   }
   if (
     previous.stage === 'awaiting_confirmation' &&
