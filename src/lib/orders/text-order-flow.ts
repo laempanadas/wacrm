@@ -19,6 +19,7 @@ import { sendTextMessage } from '@/lib/whatsapp/meta-api';
 import { sendWhatsAppPaymentMessage } from '@/lib/whatsapp/payment-message';
 import { getExistingPaymentLink } from '@/lib/payments/mercado-pago';
 import { exactBrlCents } from '@/lib/payments/payment-identity';
+import { classifyFaq, faqResponse } from './store-faq';
 import {
   handleConversationHandoff,
   hasActiveHuman,
@@ -62,6 +63,7 @@ export interface TextOrderFlowResult {
     | 'confirmation_requested'
     | 'payment_resent'
     | 'payment_already_created'
+    | 'faq_answered'
     | 'bot_resumed'
     | 'needs_human'
     | 'duplicate';
@@ -465,6 +467,19 @@ export async function processFreeTextOrderInbound(
       }
     }
     if (previous.stage === 'payment_created') {
+      const faq = classifyFaq(ctx.inboundText);
+      if (faq) {
+        const response = faqResponse(faq, ctx.inboundText);
+        await sendAndRecord(ctx, `faq:${ctx.inboundMessageId}`, response.text);
+        // Unknown store policy is not permission to change the order or lift
+        // review. Known FAQs only complete this turn with the frozen draft.
+        if (response.needsHandoff) await handoff(ctx, 'payment_review');
+        await completeTurn(ctx, previous);
+        return {
+          handled: true,
+          outcome: response.needsHandoff ? 'needs_human' : 'faq_answered',
+        };
+      }
       const text = ctx.inboundText
         .toLowerCase()
         .normalize('NFD')

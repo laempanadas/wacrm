@@ -28,6 +28,7 @@ import {
 import { PEDIDO_EMPANADAS_FLOW } from './pedido-empanadas-flow';
 import { loadOrderCatalog } from '@/lib/orders/order-catalog';
 import { isCompleteDeliveryAddress } from '@/lib/orders/text-order-parser';
+import { classifyFaq, faqResponse } from '@/lib/orders/store-faq';
 import { groundCatalogOrder } from './catalog-order';
 import { HANDOFF_WAITING, sendHandoffNotice } from '@/lib/whatsapp/handoff';
 import type { Item } from '@/lib/orders/create-order-with-mercado-pago';
@@ -1428,6 +1429,40 @@ async function handleReplyForActiveRun(
   if (!currentNode) {
     await endRun(db, run, 'failed', 'current_node_not_found');
     return { consumed: true, flow_run_id: run.id, outcome: 'no_match' };
+  }
+
+  if (currentNode.node_type === 'send_buttons' && message.kind === 'text') {
+    const faq = classifyFaq(message.text);
+    if (faq) {
+      const response = faqResponse(faq, message.text);
+      // A FAQ is not a new summary, a correction, or checkout consent. Keep the
+      // parked prompt and its revision intact, and reserve the reply durably.
+      await sendHandoffNotice(
+        db,
+        run.account_id,
+        run.conversation_id!,
+        `faq:${message.meta_message_id}`,
+        response.text,
+        (text) =>
+          engineSendText({
+            accountId: run.account_id,
+            userId: run.user_id,
+            conversationId: run.conversation_id!,
+            contactId: run.contact_id!,
+            text,
+          })
+      );
+      if (response.needsHandoff) {
+        await executeHandoff(db, run, {
+          node_key: currentNode.node_key,
+          config: {
+            note: `Informação não configurada (${faq}); confirmar com a equipe.`,
+          },
+        });
+        return { consumed: true, flow_run_id: run.id, outcome: 'handed_off' };
+      }
+      return { consumed: true, flow_run_id: run.id, outcome: 'advanced' };
+    }
   }
 
   if (

@@ -353,6 +353,134 @@ beforeEach(() => {
     send.mockResolvedValue({ whatsapp_message_id: 'outbound' });
 });
 describe('catalog engine safety', () => {
+  it.each(['Tem taxa de entrega?', 'Como pagar?', 'A entrega é sem taxa?'])(
+    'answers a strict configured FAQ without changing the parked summary: %s',
+    async (text) => {
+      run.current_node_key = 'confirmar_delivery';
+      run.reprompt_count = 1;
+      (run.vars as Record<string, unknown>).endereco = 'Rua A, 123 Centro';
+      const inbound = input({
+        kind: 'text',
+        text,
+        meta_message_id: 'faq-inbound',
+      });
+      const before = structuredClone(run);
+      const result = await dispatchInboundToFlows(inbound);
+      expect(result).toMatchObject({ consumed: true, outcome: 'advanced' });
+      expect(run).toEqual(before);
+      expect(mocks.text).toHaveBeenCalledTimes(1);
+      expect(mocks.text).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringMatching(/GRÁTIS|Mercado Pago/),
+        })
+      );
+      expect(mocks.buttons).not.toHaveBeenCalled();
+      expect(mocks.mp).not.toHaveBeenCalled();
+      expect(mocks.payment).not.toHaveBeenCalled();
+      expect(mocks.pickup).not.toHaveBeenCalled();
+      expect(mocks.db.rpc).not.toHaveBeenCalled();
+      expect(writes.some((w) => w.value.event_type === 'fallback_fired')).toBe(
+        false
+      );
+      expect(writes).toContainEqual({
+        table: 'order_message_outbox',
+        value: expect.objectContaining({ effect_key: 'faq:faq-inbound' }),
+      });
+    }
+  );
+
+  it.each([
+    'Quanto tempo?',
+    'Aceita Pluxee?',
+    'Posso pagar na entrega?',
+    'Qual o horário?',
+  ])(
+    'preserves human review instead of inventing an unconfigured policy: %s',
+    async (text) => {
+      run.current_node_key = 'confirmar_delivery';
+      run.reprompt_count = 1;
+      const inbound = input({
+        kind: 'text',
+        text,
+        meta_message_id: 'unknown-faq',
+      });
+      const vars = structuredClone(run.vars);
+      const result = await dispatchInboundToFlows(inbound);
+      expect(result).toMatchObject({ consumed: true, outcome: 'handed_off' });
+      expect(mocks.text).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining(
+            'confirmar essa informação com a equipe'
+          ),
+        })
+      );
+      expect(run.status).toBe('handed_off');
+      expect(run.vars).toEqual(vars);
+      expect(run.reprompt_count).toBe(1);
+      expect(mocks.buttons).not.toHaveBeenCalled();
+      expect(mocks.mp).not.toHaveBeenCalled();
+      expect(mocks.payment).not.toHaveBeenCalled();
+      expect(
+        mocks.db.rpc.mock.calls.some(
+          ([name]) =>
+            name === 'flow_checkout_confirm' ||
+            name === 'flow_checkout_authorize'
+        )
+      ).toBe(false);
+    }
+  );
+
+  it('does not consume a mixed FAQ and correction or discard its requested items', async () => {
+    run.current_node_key = 'confirmar_delivery';
+    const text = 'quanto tempo? adiciona 2 coca';
+    const result = await dispatchInboundToFlows(input({ kind: 'text', text }));
+    expect(result.outcome).toBe('handed_off');
+    expect(mocks.db.rpc).toHaveBeenCalledWith(
+      'flow_checkout_correct',
+      expect.objectContaining({ p_text: text })
+    );
+    expect(mocks.mp).not.toHaveBeenCalled();
+    expect(mocks.buttons).not.toHaveBeenCalled();
+    expect(
+      writes.some(
+        (w) =>
+          w.table === 'order_message_outbox' &&
+          String(w.value.effect_key).startsWith('faq:')
+      )
+    ).toBe(false);
+  });
+
+  it('does not let a FAQ bypass legacy catalog review', async () => {
+    run.current_node_key = 'confirmar_delivery';
+    delete (run.vars as Record<string, unknown>).catalog_order_version;
+    const result = await dispatchInboundToFlows(
+      input({ kind: 'text', text: 'Como pagar?' })
+    );
+    expect(result.outcome).toBe('handed_off');
+    expect(
+      writes.some(
+        (w) =>
+          w.table === 'order_message_outbox' &&
+          String(w.value.effect_key).startsWith('faq:')
+      )
+    ).toBe(false);
+    expect(mocks.mp).not.toHaveBeenCalled();
+  });
+
+  it('does not treat a question at collect_input as consent or advance checkout', async () => {
+    const result = await dispatchInboundToFlows(
+      input({ kind: 'text', text: 'Como pagar?' })
+    );
+    expect(result.consumed).toBe(true);
+    expect(run.current_node_key).toBe('ask_endereco');
+    expect(mocks.text).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('endereço completo'),
+      })
+    );
+    expect(mocks.mp).not.toHaveBeenCalled();
+  });
+
   it('never lets the button from summary A authorize the newer snapshot B', async () => {
     seedDisplayedSummary = false;
     run.current_node_key = 'confirmar_delivery';
