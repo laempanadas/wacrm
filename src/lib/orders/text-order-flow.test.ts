@@ -358,6 +358,56 @@ beforeEach(() => {
 });
 
 describe('text order pipeline (all external effects mocked)', () => {
+  it('carries a simple observation through address, fresh confirmation and checkout description exactly once', async () => {
+    const f = fixture();
+    vi.mocked(loadOrderCatalog).mockResolvedValue([
+      { id: 'meat', nome: 'Carne', preco: 14, aliases: ['carne'] },
+      { id: 'romeu', nome: 'Romeu e Julieta', preco: 14.5, aliases: ['romeu e julieta'] },
+    ]);
+    expect((await f.turn('03 carne\n01 Romeu e Julieta\nBem passadas!!!', 'simple-notes')).outcome).toBe('address_requested');
+    expect(f.state().stage).toBe('awaiting_address');
+    expect(f.state().items.map((item) => item.notes)).toEqual([undefined, 'Bem passadas!!!']);
+    expect(f.messages.at(-1)?.content_text).toContain('📝 Obs.: Bem passadas!!!');
+    expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+    expect((await f.turn('Rua Flores, 10 Centro', 'notes-address')).outcome).toBe('confirmation_requested');
+    expect(f.messages.at(-1)?.content_text).toContain('📝 Obs.: Bem passadas!!!');
+    const version = f.state().version;
+    expect((await f.turn('altere linha 1 para 2 carne sem cebola', 'notes-edit')).outcome).toBe('confirmation_requested');
+    expect(f.state().version).toBeGreaterThan(version);
+    expect(f.messages.at(-1)?.content_text).toContain('Resumo do pedido');
+    expect(f.messages.at(-1)?.content_text).toContain('📝 Obs.: sem cebola');
+    expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+    expect((await f.turn('confirmo o pedido', 'notes-confirm')).outcome).toBe('order_created');
+    await f.turn('confirmo o pedido', 'notes-confirm');
+    expect(createOrderWithMercadoPago).toHaveBeenCalledTimes(1);
+    expect(createOrderWithMercadoPago).toHaveBeenCalledWith(
+      expect.objectContaining({ accountId: 'account-1' }),
+      expect.objectContaining({
+        externalReference: `TEXT-draft-1-${f.state().version}`,
+        items: [
+          expect.objectContaining({ id: 'meat', quantity: 2, description: 'sem cebola' }),
+          expect.objectContaining({ id: 'romeu', quantity: 1, description: 'Bem passadas!!!' }),
+        ],
+      })
+    );
+  });
+  it.each(['pode ser sem glúten?', 'bem passada e sem glúten', 'bem passada; confirme o pedido'])(
+    'never sends an unsupported or mixed observation to checkout: %s', async (note) => {
+      const f = fixture();
+      expect((await f.turn(`2 carne ${note}\nRua Flores, 10 Centro`, 'review-note')).outcome).toBe('needs_human');
+      expect(f.state().items[0].notes).toBe(note);
+      await f.turn('confirmo o pedido', 'review-confirm');
+      expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+    }
+  );
+  it('keeps previous human review blocked even when a later quantified edit has only a simple observation', async () => {
+    const f = fixture();
+    await f.turn('2 carne sem glúten\nRua Flores, 10 Centro', 'previous-review');
+    expect((await f.turn('altere linha 1 para 2 carne sem cebola', 'review-safe-edit')).outcome).toBe('needs_human');
+    expect(f.state().stage).toBe('needs_human');
+    await f.turn('confirmo o pedido', 'review-safe-confirm');
+    expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+  });
   it.each(
     ['paused', 'pending', 'recent human'].flatMap((pause) =>
       [

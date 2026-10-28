@@ -8,6 +8,8 @@
  * 4. Identificar confirmação de endereço anterior (isAddressConfirmation)
  */
 
+import { classifyNote } from './kitchen-notes';
+
 export interface ParsedOrderItem {
   id: string;
   title: string;
@@ -695,7 +697,9 @@ export function parseCatalogOrder(
     deliveryAddress: address || undefined,
     rawText: text,
     unresolved,
-    requiresKitchenReview: items.some((item) => Boolean(item.notes)),
+    requiresKitchenReview: items.some(
+      (item) => item.notes && classifyNote(item.notes) === 'review'
+    ),
   };
 }
 

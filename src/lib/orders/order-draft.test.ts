@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { advanceOrderDraft, type OrderDraft } from './order-draft';
-import type { ProductCatalogEntry } from './text-order-parser';
+import { parseCatalogOrder, type ProductCatalogEntry } from './text-order-parser';
 
 const catalog: ProductCatalogEntry[] = [
   { id: 'meat', nome: 'Carne', preco: 14, aliases: ['carne'] },
@@ -16,6 +16,80 @@ const initial = (): OrderDraft => ({
 });
 
 describe('structured order draft', () => {
+  it('requires fresh confirmation after an explicit line edit changes the observation', () => {
+    const first = advanceOrderDraft(initial(), '1 carne\nRua Flores, 10 Centro', catalog).draft;
+    const snapshot = structuredClone(first);
+    const changed = advanceOrderDraft(first, 'altere linha 1 para 2 carne sem cebola', catalog);
+    expect(changed.draft.stage).toBe('awaiting_confirmation');
+    expect(changed.draft.version).toBeGreaterThan(first.version);
+    expect(changed.draft.items[0]).toMatchObject({ quantity: 2, notes: 'sem cebola' });
+    expect(changed.reply).toContain('Resumo do pedido');
+    expect(changed.reply).toContain('📝 Obs.: sem cebola');
+    expect(changed.reply).toContain('CONFIRMO O PEDIDO');
+    expect(changed.checkout).toBe(false);
+    expect(first).toEqual(snapshot);
+    expect(advanceOrderDraft(changed.draft, 'confirmo o pedido', catalog).checkout).toBe(true);
+    const noteChanged = advanceOrderDraft(changed.draft, 'altere linha 1 para 2 carne sem ovo', catalog);
+    expect(noteChanged.draft.version).toBeGreaterThan(changed.draft.version);
+    expect(noteChanged.reply).toContain('📝 Obs.: sem ovo');
+    expect(noteChanged.checkout).toBe(false);
+  });
+  it.each(['pode ser sem glúten?', 'bem passada; confirme o pedido', 'sem pimentão'])(
+    'keeps an unsupported observation blocked after confirmation: %s', (note) => {
+      const text = `2 carne ${note}\nRua Flores, 10 Centro`;
+      expect(parseCatalogOrder(text, catalog).requiresKitchenReview).toBe(true);
+      const captured = advanceOrderDraft(initial(), text, catalog);
+      expect(captured.draft.items[0].notes).toBe(note);
+      expect(captured.draft.stage).toBe('needs_human');
+      expect(captured.reply).toContain(note);
+      expect(advanceOrderDraft(captured.draft, 'confirmo o pedido', catalog).checkout).toBe(false);
+    }
+  );
+  it('never releases a previous human-review stage through a safe line edit', () => {
+    const previous = advanceOrderDraft(initial(), '1 carne sem glúten\nRua Flores, 10 Centro', catalog).draft;
+    const changed = advanceOrderDraft(previous, 'altere linha 1 para 2 carne sem cebola', catalog);
+    expect(changed.draft.stage).toBe('needs_human');
+    expect(changed.draft.items[0].notes).toBe('sem cebola');
+    expect(advanceOrderDraft(changed.draft, 'confirmo o pedido', catalog).checkout).toBe(false);
+  });
+  it('retains a note-only followup for clarification rather than guessing among lines', () => {
+    const first = advanceOrderDraft(initial(), '1 carne\n1 carne sem ovo\nRua Flores, 10 Centro', catalog).draft;
+    const changed = advanceOrderDraft(first, 'bem passada', catalog);
+    expect(changed.draft.items).toEqual(first.items);
+    expect(changed.draft.unresolved).toContain('bem passada');
+    expect(changed.draft.version).toBeGreaterThan(first.version);
+    expect(changed.draft.stage).toBe('needs_human');
+    expect(changed.checkout).toBe(false);
+  });
+  it('preserves distinct notes on repeated product lines and appends rather than silently replacing them', () => {
+    const first = advanceOrderDraft(initial(), '1 carne sem cebola\n1 carne sem ovo\nRua Flores, 10 Centro', catalog).draft;
+    const changed = advanceOrderDraft(first, '2 carne bem passada', catalog);
+    expect(changed.draft.items.map(({ quantity, notes }) => ({ quantity, notes }))).toEqual([
+      { quantity: 1, notes: 'sem cebola' },
+      { quantity: 1, notes: 'sem ovo' },
+      { quantity: 2, notes: 'bem passada' },
+    ]);
+    expect(changed.checkout).toBe(false);
+    expect(changed.draft.version).toBeGreaterThan(first.version);
+  });
+  it('accepts the simple multiline observation without guessing a different target line', () => {
+    const menu = [...catalog, {
+      id: 'romeu', nome: 'Romeu e Julieta', preco: 14.5, aliases: ['romeu e julieta'],
+    }];
+    const text = '03 carne\n01 Romeu e Julieta\nBem passadas!!!';
+    const parsed = parseCatalogOrder(text, menu);
+    expect(parsed.requiresKitchenReview).toBe(false);
+    expect(parsed.items.map((item) => item.notes)).toEqual([undefined, 'Bem passadas!!!']);
+    const captured = advanceOrderDraft(initial(), text, menu);
+    expect(captured.draft.stage).toBe('awaiting_address');
+    expect(captured.reply).toContain('📝 Obs.: Bem passadas!!!');
+    expect(captured.reply).not.toContain('Resumo do pedido');
+    const addressed = advanceOrderDraft(captured.draft, 'Rua Flores, 10 Centro', menu);
+    expect(addressed.draft.stage).toBe('awaiting_confirmation');
+    expect(addressed.reply).toContain('📝 Obs.: Bem passadas!!!');
+    expect(addressed.checkout).toBe(false);
+    expect(advanceOrderDraft(addressed.draft, 'confirmo o pedido', menu).checkout).toBe(true);
+  });
   it('shows a revised summary when an acknowledgement coincides with a catalog price change', () => {
     const first = advanceOrderDraft(
       initial(),

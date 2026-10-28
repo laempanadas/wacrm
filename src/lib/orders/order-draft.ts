@@ -1,3 +1,4 @@
+import { classifyNote } from './kitchen-notes';
 import {
   extractAddressFromText,
   isCompleteDeliveryAddress,
@@ -40,10 +41,14 @@ export const orderLineKey = (item: ParsedOrderItem) =>
   `${item.id}:${normalized(item.notes || '')}`;
 export function orderSummary(draft: OrderDraft): string {
   return draft.items
-    .map(
-      (item, index) =>
-        `${index + 1}. ${item.quantity}x ${item.title}${item.notes ? ` — ${item.notes}` : ''}`
-    )
+    .map((item, index) => {
+      const notes = !item.notes
+        ? ''
+        : classifyNote(item.notes) === 'safe'
+          ? `\n📝 Obs.: ${item.notes}`
+          : ` — ${item.notes}`;
+      return `${index + 1}. ${item.quantity}x ${item.title}${notes}`;
+    })
     .join('\n');
 }
 
@@ -61,7 +66,11 @@ function summaryReply(draft: OrderDraft, previous: OrderDraft): string {
       : quantity === 1
         ? 'item'
         : 'itens';
-    return `Anotado! Temos ${quantity} ${noun} no seu pedido. Gostaria de adicionar mais alguma coisa ou podemos fechar? Para fechar, envie o endereço completo (Rua, Número e Bairro).`;
+    const notes = draft.items
+      .filter((item) => item.notes)
+      .map((item) => `📝 Obs.: ${item.notes}`)
+      .join('\n');
+    return `Anotado! Temos ${quantity} ${noun} no seu pedido. Gostaria de adicionar mais alguma coisa ou podemos fechar? Para fechar, envie o endereço completo (Rua, Número e Bairro).${notes ? `\n${notes}` : ''}`;
   }
   if (
     previous.stage === 'awaiting_confirmation' &&
@@ -305,7 +314,9 @@ export function advanceOrderDraft(
   draft.stage =
     !draft.items.length ||
     draft.unresolved.length ||
-    draft.items.some((item) => Boolean(item.notes)) ||
+    draft.items.some(
+      (item) => item.notes && classifyNote(item.notes) === 'review'
+    ) ||
     previous.stage === 'needs_human'
       ? 'needs_human'
       : isCompleteDeliveryAddress(draft.deliveryAddress || '')

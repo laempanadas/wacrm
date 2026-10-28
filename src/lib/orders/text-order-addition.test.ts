@@ -208,7 +208,7 @@ describe('addition regression boundaries', () => {
       const parsed = parseTextOrder(text);
       expect(parsed.items.map((item) => item.quantity)).toEqual(quantities);
       expect(parsed.unresolved).toEqual([]);
-      expect(parsed.requiresKitchenReview).toBe(text.includes('sem cebola'));
+      expect(parsed.requiresKitchenReview).toBe(false);
       if (text.includes('sem cebola'))
         expect(parsed.items[0].notes).toBe('sem cebola');
     }
