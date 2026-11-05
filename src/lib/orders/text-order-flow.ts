@@ -177,6 +177,62 @@ async function saveDraft(
     throw new Error(error?.message || 'Order turn lost its durable claim');
 }
 
+/**
+ * Frees the draft claim of a turn that failed. Only safe when no outbound
+ * effect is in doubt: a payment attempt or any 'sending'/'uncertain' outbox row
+ * keeps the claim, so reconciliation (not a retry) decides what happened.
+ * The conversation-wide outbox check is deliberately conservative.
+ */
+async function releaseFailedTurnClaim(
+  ctx: TextOrderFlowContext,
+  paymentAttempted: boolean
+): Promise<boolean> {
+  const scope = {
+    conversationId: ctx.conversationId,
+    inboundMessageId: ctx.inboundMessageId,
+  };
+  try {
+    if (paymentAttempted) {
+      console.error(
+        '[text-order-flow] claim kept: payment attempted, reconciliation required',
+        scope
+      );
+      return false;
+    }
+    const { data, error } = await ctx.supabase
+      .from('order_message_outbox')
+      .select('effect_key')
+      .eq('account_id', ctx.accountId)
+      .eq('conversation_id', ctx.conversationId)
+      .in('status', ['sending', 'uncertain']);
+    if (error) throw error;
+    if (data?.length) {
+      console.error(
+        '[text-order-flow] claim kept: uncertain outbound effect, reconciliation required',
+        { ...scope, effects: data.length }
+      );
+      return false;
+    }
+    const { error: releaseError } = await ctx.supabase
+      .from('order_drafts')
+      .update({
+        processing_message_id: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('account_id', ctx.accountId)
+      .eq('conversation_id', ctx.conversationId)
+      .eq('processing_message_id', ctx.inboundMessageId);
+    if (releaseError) throw releaseError;
+    return true;
+  } catch (releaseFailure) {
+    console.error(
+      '[text-order-flow] claim kept: release could not be verified',
+      releaseFailure
+    );
+    return false;
+  }
+}
+
 /** At-most-once outbound effect. Ambiguous sends remain reserved for reconciliation. */
 async function sendAndRecord(
   ctx: TextOrderFlowContext,
@@ -329,6 +385,9 @@ export async function processFreeTextOrderInbound(
   const db = ctx.supabase;
   let ownsTurn = false;
   let catalogRunOwnsTurn = false;
+  // Set before the payment call: a failed call may already have created a
+  // Mercado Pago preference, so the claim must stay held for reconciliation.
+  let paymentAttempted = false;
   try {
     const priorEvent = await db
       .from('order_inbound_events')
@@ -546,6 +605,7 @@ export async function processFreeTextOrderInbound(
     });
     if (transition.checkout) {
       const reference = `TEXT-${draft.id}-${draft.version}`;
+      paymentAttempted = true;
       const result = await createOrderWithMercadoPago(
         { accountId: ctx.accountId, userId: ctx.userId },
         {
@@ -601,13 +661,16 @@ export async function processFreeTextOrderInbound(
             : 'confirmation_requested',
     };
   } catch (error) {
+    console.error('[text-order-flow] turn failed', error);
     // Fail closed: no LLM/legacy payment fallback and no automatic uncertain-effect retry.
-    if (ownsTurn)
+    if (ownsTurn) {
       await db
         .from('order_inbound_events')
         .update({ status: 'failed' })
         .eq('account_id', ctx.accountId)
         .eq('meta_message_id', ctx.inboundMessageId);
+      await releaseFailedTurnClaim(ctx, paymentAttempted);
+    }
     try {
       // Catalog ownership is exclusively changed by the consent RPC. A failed
       // RPC/notice must not let this stale text worker hand off a newer run.

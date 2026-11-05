@@ -36,6 +36,10 @@ function fixture() {
   let processing: string | null = null;
   const events = new Set<string>();
   const outbox = new Set<string>();
+  const outboxRows = new Map<
+    string,
+    { conversation_id: unknown; status: string }
+  >();
   const messages: Record<string, unknown>[] = [];
   let storedOrder: Record<string, unknown> | null = {
     id: 'order-1',
@@ -186,7 +190,8 @@ function fixture() {
             };
           if (filters.processing_message_id !== processing)
             return { data: null, error: { message: 'claim mismatch' } };
-          state = structuredClone(payload.state) as OrderDraft;
+          if (payload.state !== undefined)
+            state = structuredClone(payload.state) as OrderDraft;
           draftUpdatedAt = String(payload.updated_at);
           if (payload.processing_message_id === null) processing = null;
           return { data: { id: 'draft-1' }, error: null };
@@ -199,6 +204,26 @@ function fixture() {
               error: { code: '23505', message: 'duplicate' },
             };
           outbox.add(key);
+          outboxRows.set(key, {
+            conversation_id: payload.conversation_id,
+            status: String(payload.status),
+          });
+        }
+        if (table === 'order_message_outbox' && operation === 'update') {
+          const row = outboxRows.get(String(filters.effect_key));
+          if (row) row.status = String(payload.status);
+          return { data: null, error: null };
+        }
+        if (table === 'order_message_outbox' && operation === 'select') {
+          const statuses = (filters['status$in'] as string[]) ?? [];
+          return {
+            data: [...outboxRows.values()].filter(
+              (row) =>
+                row.conversation_id === filters.conversation_id &&
+                statuses.includes(row.status)
+            ),
+            error: null,
+          };
         }
         if (table === 'messages' && operation === 'insert') {
           if (failMessages)
@@ -216,6 +241,10 @@ function fixture() {
         },
         eq(key: string, value: unknown) {
           filters[key] = value;
+          return builder;
+        },
+        in(key: string, values: unknown[]) {
+          filters[`${key}$in`] = values;
           return builder;
         },
         insert(value: Record<string, unknown>) {
@@ -277,6 +306,12 @@ function fixture() {
     pause: () => {
       conversationDisabled = true;
     },
+    resume: () => {
+      conversationDisabled = false;
+      conversationReason = null;
+      conversationStatus = 'open';
+    },
+    claimHeld: () => processing !== null,
     pending: () => {
       conversationStatus = 'pending';
     },
@@ -1140,5 +1175,73 @@ describe('text order pipeline (all external effects mocked)', () => {
     expect((await f.turn('1 carne', 'items')).outcome).toBe('needs_human');
     expect(fetch).not.toHaveBeenCalled();
     expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+  });
+
+  it('logs the original turn error and releases the claim when it failed before any external effect', async () => {
+    const f = fixture();
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+    vi.mocked(loadOrderCatalog).mockRejectedValueOnce(
+      new Error('catalog unavailable')
+    );
+    expect((await f.turn('2 carne', 'turn-failed')).outcome).toBe(
+      'needs_human'
+    );
+    expect(consoleError).toHaveBeenCalledWith(
+      '[text-order-flow] turn failed',
+      expect.objectContaining({ message: 'catalog unavailable' })
+    );
+    expect(f.claimHeld()).toBe(false);
+    expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+    consoleError.mockRestore();
+
+    // The failed turn paused the conversation; a resumed customer's next turn must be processed.
+    f.resume();
+    const next = await f.turn('2 carne', 'turn-next');
+    expect(next.outcome).toBe('address_requested');
+    expect(next.outcome).not.toBe('duplicate');
+    expect(f.state().items).toEqual([
+      expect.objectContaining({ id: 'meat', quantity: 2 }),
+    ]);
+  });
+
+  it('keeps the claim and logs reconciliation when the failure happens after a payment attempt', async () => {
+    const f = fixture();
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+    await f.turn('2 carne, entregar na Rua Flores, 10 Centro', 'items');
+    vi.mocked(fetch).mockRejectedValueOnce(new Error('socket hang up'));
+    expect((await f.turn('confirmo o pedido', 'confirm')).outcome).toBe(
+      'needs_human'
+    );
+    expect(createOrderWithMercadoPago).toHaveBeenCalledTimes(1);
+    expect(f.claimHeld()).toBe(true);
+    expect(consoleError).toHaveBeenCalledWith(
+      '[text-order-flow] turn failed',
+      expect.any(Error)
+    );
+    expect(consoleError).toHaveBeenCalledWith(
+      '[text-order-flow] claim kept: payment attempted, reconciliation required',
+      expect.any(Object)
+    );
+    consoleError.mockRestore();
+  });
+
+  it('keeps the claim when an outbound reply is in doubt, without creating a payment', async () => {
+    const f = fixture();
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+    vi.mocked(fetch).mockRejectedValueOnce(new Error('socket hang up'));
+    expect((await f.turn('2 carne', 'turn-doubt')).outcome).toBe('needs_human');
+    expect(f.claimHeld()).toBe(true);
+    expect(createOrderWithMercadoPago).not.toHaveBeenCalled();
+    expect(consoleError).toHaveBeenCalledWith(
+      '[text-order-flow] claim kept: uncertain outbound effect, reconciliation required',
+      expect.objectContaining({ effects: 1 })
+    );
+    consoleError.mockRestore();
   });
 });
