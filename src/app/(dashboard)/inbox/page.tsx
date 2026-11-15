@@ -14,6 +14,7 @@ import type {
   ConversationStatus,
 } from '@/types';
 import { useRealtime } from '@/hooks/use-realtime';
+import { sortConversationsByActivity } from '@/lib/inbox/sort-conversations';
 import { ConversationList } from '@/components/inbox/conversation-list';
 import { MessageThread } from '@/components/inbox/message-thread';
 import { ContactSidebar } from '@/components/inbox/contact-sidebar';
@@ -164,7 +165,7 @@ export default function InboxPage() {
               : c
           );
         }
-        return [fetched, ...prev];
+        return sortConversationsByActivity([fetched, ...prev]);
       });
     } finally {
       hydratingConvIdsRef.current.delete(convId);
@@ -224,18 +225,20 @@ export default function InboxPage() {
 
         if (knownConvIdsRef.current.has(newMsg.conversation_id)) {
           setConversations((prev) =>
-            prev.map((c) =>
-              c.id === newMsg.conversation_id
-                ? {
-                    ...c,
-                    last_message_text: newMsg.content_text ?? '',
-                    last_message_at: newMsg.created_at,
-                    unread_count:
-                      activeConv?.id === newMsg.conversation_id
-                        ? 0
-                        : c.unread_count + 1,
-                  }
-                : c
+            sortConversationsByActivity(
+              prev.map((c) =>
+                c.id === newMsg.conversation_id
+                  ? {
+                      ...c,
+                      last_message_text: newMsg.content_text ?? '',
+                      last_message_at: newMsg.created_at,
+                      unread_count:
+                        activeConv?.id === newMsg.conversation_id
+                          ? 0
+                          : c.unread_count + 1,
+                    }
+                  : c
+              )
             )
           );
         } else {
@@ -266,7 +269,7 @@ export default function InboxPage() {
         if (!knownConvIdsRef.current.has(conv.id)) {
           setConversations((prev) => {
             if (prev.some((c) => c.id === conv.id)) return prev;
-            return [conv, ...prev];
+            return sortConversationsByActivity([conv, ...prev]);
           });
           hydrateConversation(conv.id);
         }
@@ -276,14 +279,16 @@ export default function InboxPage() {
         if (knownConvIdsRef.current.has(conv.id)) {
           const isActive = activeConv?.id === conv.id;
           setConversations((prev) =>
-            prev.map((c) =>
-              c.id === conv.id
-                ? {
-                    ...c,
-                    ...conv,
-                    unread_count: isActive ? 0 : conv.unread_count,
-                  }
-                : c
+            sortConversationsByActivity(
+              prev.map((c) =>
+                c.id === conv.id
+                  ? {
+                      ...c,
+                      ...conv,
+                      unread_count: isActive ? 0 : conv.unread_count,
+                    }
+                  : c
+              )
             )
           );
         } else {
@@ -348,7 +353,7 @@ export default function InboxPage() {
 
   const handleConversationsLoaded = useCallback(
     (loaded: Conversation[]) => {
-      setConversations(loaded);
+      setConversations(sortConversationsByActivity(loaded));
       if (
         deepLinkConvId &&
         autoSelectedForDeepLinkRef.current !== deepLinkConvId &&

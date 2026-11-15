@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   isRecipientNotAllowedError,
   isValidE164,
+  resolveInboundSenderPhone,
   normalizePhone,
   phoneVariants,
   phonesMatch,
@@ -156,5 +157,33 @@ describe('isRecipientNotAllowedError', () => {
       false
     );
     expect(isRecipientNotAllowedError('')).toBe(false);
+  });
+});
+
+describe('resolveInboundSenderPhone', () => {
+  it('keeps a phone-shaped sender id as the phone', () => {
+    expect(resolveInboundSenderPhone('5511982378636', '5511982378636')).toBe(
+      '5511982378636'
+    );
+  });
+
+  it('accepts formatted phone-shaped ids (+, spaces, dashes)', () => {
+    expect(resolveInboundSenderPhone('+55 11 98237-8636')).toBe('5511982378636');
+  });
+
+  it('falls back to wa_id when from is a business-scoped id (non-phone)', () => {
+    expect(
+      resolveInboundSenderPhone('BR.1349120865530274191', '5511982378636')
+    ).toBe('5511982378636');
+  });
+
+  it('falls back to wa_id when from is missing', () => {
+    expect(resolveInboundSenderPhone(undefined as unknown as string, '5511982378636')).toBe(
+      '5511982378636'
+    );
+  });
+
+  it('keeps the legacy digits when neither id is phone-shaped', () => {
+    expect(resolveInboundSenderPhone('US.123', 'US.456')).toBe('123');
   });
 });

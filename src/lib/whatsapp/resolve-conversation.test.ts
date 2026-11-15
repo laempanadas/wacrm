@@ -39,6 +39,8 @@ function makeDb(script: Script): SupabaseClient {
       return builder;
     },
     eq: () => builder,
+    order: () => builder,
+    limit: () => builder,
     like: () => {
       const data = script.contactCandidatesByCall
         ? (script.contactCandidatesByCall[likeCalls] ?? [])

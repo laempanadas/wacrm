@@ -95,6 +95,21 @@ async function handoff(
   await applyContactTag(ctx.supabase, ctx, ctx.contactRecord.id, TAG_HUMANO);
 }
 
+/**
+ * A native cart that no flow consumed. It must never be silent and never go to
+ * the AI: the customer gets one notice (idempotent per handoff episode), the bot
+ * pauses, and the attendant is notified. No payment is created here.
+ */
+export async function escalateUnroutedNativeCart(
+  ctx: TextOrderFlowContext
+): Promise<void> {
+  await handoff(
+    ctx,
+    'order_review',
+    'Recebemos seu carrinho, mas ele precisa de confirmação de um atendente. Nenhuma cobrança foi gerada.'
+  );
+}
+
 /** Shared by text and native-catalog inbounds before automation or checkout. */
 export async function processInboundHandoff(
   ctx: TextOrderFlowContext,

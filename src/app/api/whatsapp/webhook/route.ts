@@ -3,14 +3,16 @@ import { createClient } from '@supabase/supabase-js';
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption';
 import { getCatalogProductNames, getMediaUrl } from '@/lib/whatsapp/meta-api';
 import { productNameFromCardapio } from '@/lib/cardapio/product-names';
-import { normalizePhone } from '@/lib/whatsapp/phone-utils';
+import { resolveInboundSenderPhone } from '@/lib/whatsapp/phone-utils';
 import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe';
+import { findOrCreateConversationForContact } from '@/lib/conversations/find-or-create';
 import { verifyMetaWebhookSignature } from '@/lib/whatsapp/webhook-signature';
 import { runAutomationsForTrigger } from '@/lib/automations/engine';
 import { dispatchInboundToFlows } from '@/lib/flows/engine';
 import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply';
 import { dispatchWebhookEvent } from '@/lib/webhooks/deliver';
 import {
+  escalateUnroutedNativeCart,
   processFreeTextOrderInbound,
   processInboundHandoff,
 } from '@/lib/orders/text-order-flow';
@@ -109,9 +111,7 @@ export function shouldAttemptAiReply(args: {
   const decision =
     !!trimmed &&
     !args.interactiveReplyId &&
-    (!args.flowConsumed ||
-      args.outcome === 'no_match' ||
-      args.outcome === 'duplicate_inbound_ignored');
+    (!args.flowConsumed || args.outcome === 'no_match');
 
   if (process.env.NODE_ENV !== 'production') {
     console.log('[webhook] ai gate', {
@@ -452,7 +452,8 @@ async function processMessage(
   phoneNumberId: string,
   pendingEffects: Array<() => Promise<void>>
 ) {
-  const senderPhone = normalizePhone(message.from);
+  // wa_id is the phone when `from` is a business-scoped id (BSUID).
+  const senderPhone = resolveInboundSenderPhone(message.from, contact.wa_id);
   const contactName = contact.profile.name;
 
   const contactOutcome = await findOrCreateContact(
@@ -598,7 +599,15 @@ async function processMessage(
     // ============================================================
     // 🥟 PEDIDO POR TEXTO LIVRE NO WHATSAPP
     // ============================================================
-    if (!order && (contentText || message.text?.body)) {
+    // Only plain customer text is free-text order input. Interactive taps
+    // (button/list titles), locations and media captions belong to the flow
+    // engine or the AI gate and must not be interpreted as an order draft.
+    if (
+      !order &&
+      !interactiveReplyId &&
+      message.type === 'text' &&
+      (contentText || message.text?.body)
+    ) {
       try {
         const textOrderResult = await processFreeTextOrderInbound({
           supabase: supabaseAdmin(),
@@ -735,6 +744,37 @@ async function processMessage(
     });
     const flowConsumed = flowResult.consumed;
 
+    // A native cart no flow picked up must not end silently or reach the AI.
+    if (order && !flowConsumed) {
+      try {
+        await escalateUnroutedNativeCart({
+          supabase: supabaseAdmin(),
+          accountId,
+          userId: configOwnerUserId,
+          contactRecord: {
+            id: contactRecord.id,
+            name: contactRecord.name,
+            phone: senderPhone,
+          },
+          contactName: contactRecord.name || contactName,
+          senderPhone,
+          conversationId: conversation.id,
+          inboundText: contentText ?? '',
+          inboundMessageId: message.id,
+          inboundTimestamp: new Date(
+            Number(message.timestamp) * 1000
+          ).toISOString(),
+          phoneNumberId,
+          accessToken,
+        });
+      } catch (error) {
+        console.error(
+          '[webhook] unrouted native cart escalation failed:',
+          error instanceof Error ? error.message : error
+        );
+      }
+    }
+
     const inboundText = contentText ?? message.text?.body ?? '';
     const automationTriggers: (
       | 'new_contact_created'
@@ -763,10 +803,10 @@ async function processMessage(
       }).catch((err) => console.error('[automations] dispatch failed:', err));
     }
 
-    // A cart the order flow already picked up (or a Meta retry of it) must
-    // not also get an AI reply — the customer would get two answers.
+    // Native catalog carts never reach the AI: either a flow owns them or they
+    // wait for the attendant. A Meta retry (duplicate) was already answered.
     const shouldAttemptAi =
-      !(order && flowConsumed) &&
+      !order &&
       shouldAttemptAiReply({
         flowConsumed,
         outcome: flowResult.outcome,
@@ -929,9 +969,13 @@ async function parseMessageContent(
         const local = productNameFromCardapio(it.product_retailer_id);
         if (local) names[it.product_retailer_id] = local;
       }
-      const unknownIds = productItems
-        .map((it) => it.product_retailer_id)
-        .filter((id) => !names[id]);
+      const unknownIds = [
+        ...new Set(
+          productItems
+            .map((it) => it.product_retailer_id)
+            .filter((id) => !names[id])
+        ),
+      ];
       if (message.order?.catalog_id && unknownIds.length) {
         try {
           Object.assign(
@@ -950,17 +994,23 @@ async function parseMessageContent(
           );
         }
       }
+      // Meta may send numeric fields as strings. The summary is display-only:
+      // the flow re-prices from the account catalog, so a non-finite value
+      // is shown as "a confirmar" rather than NaN or a false R$ 0,00.
       const items = productItems.map((it) => ({
         retailer_id: it.product_retailer_id,
         name: names[it.product_retailer_id],
-        quantity: it.quantity,
-        unit_price: it.item_price,
+        quantity: Number(it.quantity),
+        unit_price: Number(it.item_price),
       }));
       const total = items.reduce(
         (sum, it) => sum + it.quantity * it.unit_price,
         0
       );
-      const fmt = (v: number) => `R$ ${v.toFixed(2).replace('.', ',')}`;
+      const fmt = (v: number) =>
+        Number.isFinite(v)
+          ? `R$ ${v.toFixed(2).replace('.', ',')}`
+          : 'a confirmar';
       const lines = items.map(
         (it) =>
           `• ${it.quantity}x ${it.name ?? it.retailer_id} — ${fmt(it.quantity * it.unit_price)}`
@@ -1043,36 +1093,17 @@ async function findOrCreateContact(
   return { contact: newContact, wasCreated: true };
 }
 
-async function findOrCreateConversation(
+// Shared with the send route and the public API resolver: one conversation
+// per (account, contact), oldest row wins, unique-race re-read.
+function findOrCreateConversation(
   accountId: string,
   configOwnerUserId: string,
   contactId: string
 ) {
-  const { data: existing, error: findError } = await supabaseAdmin()
-    .from('conversations')
-    .select('*')
-    .eq('account_id', accountId)
-    .eq('contact_id', contactId)
-    .single();
-
-  if (!findError && existing) {
-    return { conversation: existing, created: false };
-  }
-
-  const { data: newConv, error: createError } = await supabaseAdmin()
-    .from('conversations')
-    .insert({
-      account_id: accountId,
-      user_id: configOwnerUserId,
-      contact_id: contactId,
-    })
-    .select()
-    .single();
-
-  if (createError) {
-    console.error('Error creating conversation:', createError);
-    return null;
-  }
-
-  return { conversation: newConv, created: true };
+  return findOrCreateConversationForContact(
+    supabaseAdmin(),
+    accountId,
+    configOwnerUserId,
+    contactId
+  );
 }

@@ -8,6 +8,12 @@ const mocks = vi.hoisted(() => ({
   payment: vi.fn(),
   text: vi.fn(),
   autoDeal: vi.fn(),
+  names: vi.fn(async () => ({}) as Record<string, string>),
+  findExistingContact: vi.fn(async () => ({
+    id: 'contact',
+    name: 'Maria',
+    phone: '5511999999999',
+  })),
 }));
 vi.mock('next/server', async (original) => ({
   ...(await original<typeof import('next/server')>()),
@@ -23,15 +29,12 @@ vi.mock('@/lib/whatsapp/webhook-signature', () => ({
   verifyMetaWebhookSignature: () => true,
 }));
 vi.mock('@/lib/contacts/dedupe', () => ({
-  findExistingContact: async () => ({
-    id: 'contact',
-    name: 'Maria',
-    phone: '5511999999999',
-  }),
+  findExistingContact: (...args: unknown[]) =>
+    (mocks.findExistingContact as (...a: unknown[]) => unknown)(...args),
   isUniqueViolation: () => false,
 }));
 vi.mock('@/lib/whatsapp/meta-api', () => ({
-  getCatalogProductNames: async () => ({}),
+  getCatalogProductNames: mocks.names,
   getMediaUrl: vi.fn(),
   sendTextMessage: mocks.text,
 }));
@@ -70,8 +73,17 @@ function database() {
     let operation = 'select';
     let payload: Row = {};
     const filters: Array<[string, unknown]> = [];
+    const modifiers: { orderKey: string | null; limitTo: number | null } = {
+      orderKey: null,
+      limitTo: null,
+    };
     const result = () => {
-      const rows = (tables[table] ??= []);
+      let rows = (tables[table] ??= []);
+      const sortKey = modifiers.orderKey;
+      if (sortKey)
+        rows = [...rows].sort((a, b) =>
+          String(a[sortKey]).localeCompare(String(b[sortKey]))
+        );
       if (operation === 'insert') {
         if (
           table === 'whatsapp_inbound_receipts' &&
@@ -111,20 +123,31 @@ function database() {
       );
       if (operation === 'update')
         matched.forEach((row) => Object.assign(row, structuredClone(payload)));
+      const limited =
+        modifiers.limitTo === null
+          ? matched
+          : matched.slice(0, modifiers.limitTo);
       return {
-        data: structuredClone(matched),
+        data: structuredClone(limited),
         count: matched.length,
         error: null,
       };
     };
+    // Like PostgREST: maybeSingle/single reject more than one row.
     const single = async () => {
       const r = result();
+      if (Array.isArray(r.data) && r.data.length > 1)
+        return {
+          data: null,
+          count: r.count,
+          error: { code: 'PGRST116', message: 'multiple rows returned' },
+        };
       return { ...r, data: r.data?.[0] ?? null };
     };
     const q = {
       select: () => q,
-      limit: () => q,
-      order: () => q,
+      limit: (n: number) => ((modifiers.limitTo = n), q),
+      order: (key: string) => ((modifiers.orderKey = key), q),
       in: () => q,
       eq: (key: string, value: unknown) => (filters.push([key, value]), q),
       insert: (value: Row) => ((operation = 'insert'), (payload = value), q),
@@ -673,4 +696,140 @@ describe('real WhatsApp POST and text processor ownership', () => {
       expect(fetch).not.toHaveBeenCalled();
     }
   );
+
+  it('sends an interactive tap to the flow engine even while a text draft exists', async () => {
+    await deliver('tap', {
+      type: 'interactive',
+      interactive: {
+        type: 'button_reply',
+        button_reply: { id: 'delivery', title: '2 carne' },
+      },
+    });
+    expect(mocks.db.rpc).not.toHaveBeenCalled();
+    expect(mocks.flow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.objectContaining({
+          kind: 'interactive_reply',
+          reply_id: 'delivery',
+        }),
+      })
+    );
+    expect(tables.order_drafts[0].state).toEqual(oldDraft);
+  });
+
+  it('never gives a native catalog cart to the AI, even when no flow consumed it', async () => {
+    mocks.db.rpc.mockImplementation(async (name, args) => {
+      expect(name).toBe('handle_conversation_handoff');
+      // Triage (no reason) passes; the explicit escalation pauses and notifies.
+      return {
+        data: args.p_request
+          ? { blocked: true, notice: 'waiting', episode_id: 'episode-1' }
+          : { blocked: false },
+        error: null,
+      };
+    });
+    mocks.text.mockResolvedValue({ messageId: 'wamid.notice' });
+    mocks.flow.mockResolvedValueOnce({ consumed: false, outcome: 'no_match' });
+    await deliver('cart-unconsumed', {
+      // Free-text window is measured from the inbound timestamp: keep it fresh.
+      timestamp: String(Math.floor(Date.now() / 1000)),
+      type: 'order',
+      order: {
+        catalog_id: 'catalog',
+        product_items: [
+          {
+            product_retailer_id: 'emp_hamburguer',
+            quantity: 2,
+            item_price: 14,
+          },
+        ],
+      },
+    });
+    expect(mocks.flow).toHaveBeenCalledTimes(1);
+    expect(mocks.ai).not.toHaveBeenCalled();
+    // Not silent: exactly one notice, the bot paused, no payment created.
+    expect(mocks.text).toHaveBeenCalledTimes(1);
+    expect(mocks.text).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('Nenhuma cobrança foi gerada'),
+      })
+    );
+    expect(mocks.db.rpc).toHaveBeenCalledWith(
+      'handle_conversation_handoff',
+      expect.objectContaining({ p_request: true, p_reason: 'order_review' })
+    );
+    expect(mocks.payment).not.toHaveBeenCalled();
+  });
+
+  it('does not answer a Meta retry with the AI when the flow reports a duplicate', async () => {
+    tables.order_drafts = [];
+    mocks.flow.mockResolvedValueOnce({
+      consumed: true,
+      outcome: 'duplicate_inbound_ignored',
+    });
+    await deliver('retry', {
+      type: 'text',
+      text: { body: 'Quero saber o preço' },
+    });
+    expect(mocks.flow).toHaveBeenCalledTimes(1);
+    expect(mocks.ai).not.toHaveBeenCalled();
+  });
+
+  it('looks up the contact by wa_id when the sender id is a business-scoped id', async () => {
+    tables.order_drafts = [];
+    await deliver('bsuid-msg', {
+      from: 'BR.1349120865530274191',
+      type: 'text',
+      text: { body: 'Oi' },
+    });
+    expect(mocks.findExistingContact).toHaveBeenCalledWith(
+      expect.anything(),
+      'account',
+      '5511999999999'
+    );
+    expect(tables.messages[0].conversation_id).toBe('conversation');
+  });
+
+  it('keeps routing to the oldest conversation when a duplicate row already exists', async () => {
+    Object.assign(tables.conversations[0], {
+      created_at: '2026-01-01T00:00:00Z',
+    });
+    tables.conversations.push({
+      id: 'conversation-duplicate',
+      account_id: 'account',
+      contact_id: 'contact',
+      status: 'open',
+      unread_count: 0,
+      created_at: '2026-02-01T00:00:00Z',
+    });
+    tables.order_drafts = [];
+    await deliver('after-duplicate', { type: 'text', text: { body: 'Oi' } });
+    expect(mocks.flow).toHaveBeenCalledWith(
+      expect.objectContaining({ conversationId: 'conversation' })
+    );
+    expect(tables.conversations).toHaveLength(2);
+    expect(tables.messages[0].conversation_id).toBe('conversation');
+  });
+
+  it('looks up each unknown catalog retailer id once and never prints NaN for bad numbers', async () => {
+    mocks.names.mockResolvedValueOnce({});
+    await deliver('odd-cart', {
+      type: 'order',
+      order: {
+        catalog_id: 'catalog',
+        product_items: [
+          { product_retailer_id: 'unknown-sku', quantity: 1, item_price: 'x' },
+          { product_retailer_id: 'unknown-sku', quantity: 2, item_price: '10' },
+        ],
+      },
+    });
+    expect(mocks.names).toHaveBeenCalledWith(
+      expect.objectContaining({ retailerIds: ['unknown-sku'] })
+    );
+    const flowCall = mocks.flow.mock.calls.find(
+      ([input]) => input.message.kind === 'catalog_order'
+    );
+    expect(flowCall?.[0].message.text).not.toContain('NaN');
+    expect(flowCall?.[0].message.text).toContain('a confirmar');
+  });
 });

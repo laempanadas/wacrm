@@ -102,3 +102,31 @@ export function phoneVariants(sanitized: string): string[] {
 export function isRecipientNotAllowedError(message: string): boolean {
   return /131030|not in allowed list|not in the allowed list/i.test(message);
 }
+
+/** Characters a real phone id can contain (digits plus common formatting). */
+const PHONE_ID_SHAPE = /^\+?[\d\s().-]+$/;
+
+/**
+ * Identify the sender of an inbound WhatsApp message as a phone number.
+ *
+ * Meta is rolling out business-scoped user ids (BSUID, e.g. "BR.1349…"),
+ * which are not phone numbers and contain letters/dots. When `from` is not
+ * phone-shaped (or missing), use `contacts[].wa_id` if it is. Otherwise keep
+ * the legacy digit-only value so existing behaviour is unchanged.
+ */
+export function resolveInboundSenderPhone(
+  from: string,
+  waId?: string | null
+): string {
+  const fromRaw = (from ?? '').trim();
+  if (PHONE_ID_SHAPE.test(fromRaw)) {
+    const digits = normalizePhone(fromRaw);
+    if (digits.length >= 7 && digits.length <= 15) return digits;
+  }
+  const waRaw = (waId ?? '').trim();
+  if (PHONE_ID_SHAPE.test(waRaw)) {
+    const digits = normalizePhone(waRaw);
+    if (digits.length >= 7 && digits.length <= 15) return digits;
+  }
+  return normalizePhone(from);
+}
